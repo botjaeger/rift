@@ -142,6 +142,9 @@ pub enum UserEvent {
     /// The desktop-notification permission was read or answered.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     NotifyPermission,
+    /// Settings › Permissions read the Full Disk Access of the window and the
+    /// session service (window, service).
+    Permissions(crate::permissions::Access, crate::permissions::Access),
     /// A pane's connection notice (see `SessionEvent::Notice`).
     PtyNotice(String),
     /// A pane's durable shell did not start in the session service.
@@ -838,6 +841,9 @@ pub struct App {
     /// a scripted run only with `RIFT_PERSIST_SESSION`: tests leave no
     /// service behind).
     durable_allowed: bool,
+    /// Settings › Permissions has a probe running (it ends in
+    /// `UserEvent::Permissions`).
+    permissions_probing: bool,
     update: UpdateUi,
     /// Remote access: the gateway's status, its start, pairing.
     remote: RemoteUi,
@@ -1699,6 +1705,21 @@ impl ToastAction {
     }
 }
 
+/// Whether a window's git and Docker status is polled on a beat: while it is
+/// in use, and while a phone is connected (its chips show the status of a
+/// window nobody looks at).
+fn status_watched(focused: bool, phones: bool) -> bool {
+    focused || phones
+}
+
+/// Whether tab `tab`'s panes are asked for their status: the active one
+/// always (a `cd` or a finished command refreshes it, focused or not), and
+/// with a phone connected all of them (the phone lists every tab's chips).
+/// The timed beat is gated apart, by [`status_watched`].
+fn status_tab_watched(phones: bool, tab: usize, active: usize) -> bool {
+    phones || tab == active
+}
+
 /// How long a header's copy button shows its check after a copy.
 const COPIED_SHOWN: Duration = Duration::from_millis(1500);
 /// How often the session file takes the counted time while a tab counts.
@@ -2259,6 +2280,7 @@ impl App {
             shell_env: None,
             persist_session,
             durable_allowed,
+            permissions_probing: false,
             update: UpdateUi::default(),
             remote: RemoteUi::default(),
             restart_requested: false,
@@ -4469,6 +4491,8 @@ impl App {
                     | ClickTarget::SettingsTestAlert(_)
                     | ClickTarget::SettingsRingBell
                     | ClickTarget::SettingsNotifyPermission
+                    | ClickTarget::SettingsOpenFullDisk
+                    | ClickTarget::SettingsRevealHelper
                     | ClickTarget::UpdateChip
                     | ClickTarget::RemoteChip
                     | ClickTarget::RemotePair
@@ -5753,6 +5777,32 @@ impl App {
             if let Ok(p) = proxy.lock() {
                 let _ = p.send_event(UserEvent::NotifyPermission);
             }
+        });
+    }
+
+    /// Read the grants Settings › Permissions shows (it changes in System
+    /// Settings while Rift runs). The session service is asked off the UI
+    /// thread; the answer arrives as `UserEvent::Permissions`. A scripted run
+    /// may fix the answers with `RIFT_SCRIPT_PERMISSIONS`.
+    fn refresh_permissions(&mut self) {
+        if self.script.is_some()
+            && let Some(fixed) = crate::permissions::injected()
+        {
+            self.win.settings.permissions = fixed;
+            return;
+        }
+        let host = crate::permissions::ShellHost::current(
+            self.config.durable_sessions && self.durable_allowed,
+        );
+        self.win.settings.permissions.host = host;
+        if self.permissions_probing {
+            return;
+        }
+        self.permissions_probing = true;
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let (window, service) = crate::permissions::probe(host);
+            let _ = proxy.send_event(UserEvent::Permissions(window, service));
         });
     }
 
@@ -9127,20 +9177,30 @@ impl App {
         let mut changed = false;
         let now = Instant::now();
         let due = |at: Option<Instant>, every: Duration| at.is_none_or(|t| now - t >= every);
-        // while the window is in use, the active tab is asked again on a
-        // beat: an agent or an editor changes files with no command ending
-        let git_due = self.win.focused && due(self.win.git_polled, GIT_POLL);
-        let docker_due = self.win.focused && due(self.win.docker_polled, DOCKER_POLL);
-        let Some(tab) = self.win.tabs.get_mut(self.win.active) else {
+        // while the window is in use, or a phone is connected, the tabs are
+        // asked again on a beat: an agent or an editor changes files with no
+        // command ending, and the phone's chips read this status
+        let phones = self.phone_connected();
+        let watched = status_watched(self.win.focused, phones);
+        let git_due = watched && due(self.win.git_polled, GIT_POLL);
+        let docker_due = watched && due(self.win.docker_polled, DOCKER_POLL);
+        let active_tab = self.win.active;
+        let Some(active) = self.win.tabs.get(active_tab).map(|t| t.active_pane) else {
             return;
         };
-        let active = tab.active_pane;
         let refocused = self.win.status_pane != Some(active);
         let docker = self
             .config
             .prompt_chips
             .contains(&rift_core::PromptChip::Docker);
-        for pane in &mut tab.panes {
+        for pane in self
+            .win
+            .tabs
+            .iter_mut()
+            .enumerate()
+            .filter(|(ti, _)| status_tab_watched(phones, *ti, active_tab))
+            .flat_map(|(_, t)| t.panes.iter_mut())
+        {
             let cwd = pane.session.local_cwd();
             let blocks = pane
                 .session
@@ -9202,7 +9262,7 @@ impl App {
     /// window of Rift is in use).
     fn status_poll_due(&self) -> Option<Instant> {
         let next = |at: Option<Instant>, every: Duration| at.map_or(Instant::now(), |t| t + every);
-        self.win.focused.then(|| {
+        status_watched(self.win.focused, self.phone_connected()).then(|| {
             next(self.win.git_polled, GIT_POLL).min(next(self.win.docker_polled, DOCKER_POLL))
         })
     }
@@ -12682,6 +12742,13 @@ impl App {
             self.poll_remote(true);
         }
         self.win.settings.remote.page_read = remote_page;
+        // Settings › Permissions just opened: read the grants now
+        let permissions_page = self.permissions_page_open();
+        if permissions_page && !self.win.settings.permissions.shown {
+            self.refresh_notify_permission();
+            self.refresh_permissions();
+        }
+        self.win.settings.permissions.shown = permissions_page;
         if self.win.search.open && self.win.search_stale {
             let due = self.win.search_counted + SEARCH_LIVE;
             if self.win.last_frame >= due {
@@ -17718,6 +17785,31 @@ impl App {
                     crate::notify::open_system_settings();
                 }
             }
+            Some(ClickTarget::SettingsOpenFullDisk) => {
+                // a headless run opens nothing on the desktop
+                if self.headless {
+                    log::info!("permissions (headless): open System Settings › Full Disk Access");
+                } else {
+                    crate::notify::open_settings_url(
+                        crate::permissions::FULL_DISK_URL,
+                        "Full Disk Access",
+                    );
+                }
+            }
+            Some(ClickTarget::SettingsRevealHelper) => {
+                match rift_pty::launchd::helper_app() {
+                    // a headless run opens nothing on the desktop
+                    Some(app) if self.headless => {
+                        log::info!("permissions (headless): reveal {}", app.display())
+                    }
+                    Some(app) => {
+                        if let Err(e) = reveal_external(&app) {
+                            self.toast(format!("Couldn't show Rift Helper: {e}"));
+                        }
+                    }
+                    None => log::info!("permissions: no Rift Helper.app in this run"),
+                }
+            }
             Some(ClickTarget::SettingsRingBell) => {
                 log::info!("bell: rung from Settings ({:?})", self.config.bell);
                 self.ring_bell();
@@ -19718,8 +19810,8 @@ impl App {
                 title: t.display_title(),
                 active,
                 panes: t
-                    .panes
-                    .iter()
+                    .panes_in_order()
+                    .into_iter()
                     .map(|p| {
                         let last = p
                             .session
@@ -20315,6 +20407,7 @@ impl App {
                 check,
             } => self.remote_upload(pane, &device, &name, check),
             Request::RemoteOpen { pane, device, kind } => self.remote_open(pane, &device, kind),
+            Request::RemoteMove { pane, kind, to, .. } => self.remote_move(pane, kind, to),
             // needs the event loop (closing the last tab quits): answered in `user_event`
             Request::RemoteClose { .. } => Response::error("remote-close needs the event loop"),
             Request::RemoteFit { pane, cols, rows } => self.remote_fit(pane, cols, rows),
@@ -21092,6 +21185,8 @@ impl App {
                         | ClickTarget::SettingsTestAlert(_)
                         | ClickTarget::SettingsRingBell
                         | ClickTarget::SettingsNotifyPermission
+                        | ClickTarget::SettingsOpenFullDisk
+                        | ClickTarget::SettingsRevealHelper
                         | ClickTarget::SettingsEditPrompt
                         | ClickTarget::SettingsEditToolbar
                         | ClickTarget::SettingsKeybind(_)
@@ -23519,6 +23614,14 @@ impl App {
         }
     }
 
+    /// A phone is connected to the gateway right now.
+    fn phone_connected(&self) -> bool {
+        self.remote
+            .status
+            .as_ref()
+            .is_some_and(|s| !s.clients.is_empty())
+    }
+
     /// The phones connected right now (the quit warning names them).
     fn connected_phones(&self) -> Vec<String> {
         self.remote
@@ -23545,6 +23648,16 @@ impl App {
     }
 
     /// Settings › Remote access is on screen.
+    /// Settings › Permissions is on screen: its page, or a search (its rows
+    /// match "disk", "finder", "notifications").
+    fn permissions_page_open(&self) -> bool {
+        let s = &self.win.settings;
+        s.open
+            && crate::views::settings::Page::ALL
+                .contains(&crate::views::settings::Page::Permissions)
+            && (s.page == crate::views::settings::Page::Permissions || !s.query.trim().is_empty())
+    }
+
     fn remote_page_open(&self) -> bool {
         self.win.settings.open && self.win.settings.page == crate::views::settings::Page::Remote
     }
@@ -25507,6 +25620,9 @@ impl ApplicationHandler<UserEvent> for App {
                 } else if self.win.settings.open {
                     // back from System Settings: show what was chosen there
                     self.refresh_notify_permission();
+                    if self.permissions_page_open() {
+                        self.refresh_permissions();
+                    }
                 }
                 self.sync_focus();
                 // AppKit may lay the titlebar out again on key-state changes
@@ -25715,6 +25831,16 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(w) = &self.win.window {
                     w.request_redraw();
                 }
+            }
+            UserEvent::Permissions(window, service) => {
+                self.permissions_probing = false;
+                self.each_window(|app| {
+                    let v = &mut app.win.settings.permissions;
+                    (v.window, v.service) = (window, service);
+                    if let Some(w) = &app.win.window {
+                        w.request_redraw();
+                    }
+                });
             }
             UserEvent::QuitRequested => {
                 // the window may be hidden (global hotkey): the dialog must show
@@ -26061,7 +26187,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.each_window(|app| app.sync_focus());
         // git and Docker status of the windows in use, on their beat
         self.each_window(|app| {
-            if app.win.focused {
+            if status_watched(app.win.focused, app.phone_connected()) {
                 app.request_git();
             }
         });
@@ -26129,6 +26255,19 @@ impl ApplicationHandler<UserEvent> for App {
                 let due = output_frame.map_or(due, |f| f.min(due));
                 let due = tip_due.map_or(due, |t| t.min(due));
                 let due = select_due.map_or(due, |t| t.min(due));
+                // a long `wait` still wakes for the gateway's files (a gateway
+                // that died is started again) and the git/Docker beat, as
+                // the app does without a script
+                let now = Instant::now();
+                let mut due = due;
+                if self.remote_polling() {
+                    due = due.min(self.remote.polled.map_or(now, |t| t + REMOTE_POLL));
+                }
+                self.each_window(|app| {
+                    if let Some(t) = app.status_poll_due() {
+                        due = due.min(t);
+                    }
+                });
                 event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(due));
                 return;
             }
@@ -26193,6 +26332,19 @@ fn caret_key(key: &EditorKey, pairs: bool) -> Option<CaretOp> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_status_is_polled_for_a_phone_while_the_window_is_not_in_use() {
+        // the phone's branch chip went stale: the beat stopped with the focus
+        assert!(!status_watched(false, false));
+        assert!(status_watched(true, false));
+        assert!(status_watched(false, true));
+        // the active tab always (a cd refreshes it in an unfocused window
+        // too); with a phone: every tab
+        assert!(status_tab_watched(false, 0, 0));
+        assert!(!status_tab_watched(false, 1, 0));
+        assert!(status_tab_watched(true, 1, 0));
+    }
 
     #[test]
     fn a_config_error_toast_leads_with_the_cause() {

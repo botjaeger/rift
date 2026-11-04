@@ -5057,6 +5057,59 @@ last_dump = (closed / "last.txt").read_text()
 assert "tabs=1 " in last_dump and not re.search(r"tab 0 title=.* panes=1 active_pane=1 ", last_dump), \
     last_dump[:600]
 
+# `remote-move` (the phone's tab / pane drag): refused while remote access
+# is off; with it on a tab goes to a place among the window's tabs and a
+# pane among its tab's panes, the active tab following the one it was
+move_off = remote_run("move-off", remote_base, [
+    "wait 500", *rin("move-off", "tab.json",
+                     '{"cmd":"remote-move","pane":PANE,"device":"Test Phone","kind":"tab","to":0}'),
+    "wait 300"])
+assert answer(move_off, "tab.json") == {"ok": False, "error": "remote access is off"}, \
+    answer(move_off, "tab.json")
+def move_cmd(pane, kind, to):
+    return ('{"cmd":"remote-move","pane":%d,"device":"Test Phone","kind":"%s","to":%d}'
+            % (pane, kind, to))
+def order(run, name):
+    return [[p["id"] for p in t["panes"]] for t in answer(run, name)["tabs"]]
+moved = remote_run("move", remote_base + 'control_api = "off"\nremote_access = true\n', [
+    "wait 500", *rin("move", "o1.json", open_tab), "wait 600",
+    *rin("move", "o2.json", open_tab), "wait 600",
+    *rin("move", "s0.json", '{"cmd":"status"}'),
+    *rin("move", "tab.json", move_cmd(3, "tab", 0)), "wait 400",
+    *rin("move", "s1.json", '{"cmd":"status"}'),
+    *rin("move", "tab-late.json", move_cmd(3, "tab", 2)), "wait 400",
+    *rin("move", "s2.json", '{"cmd":"status"}'),
+    *rin("move", "o3.json", open_pane.replace("PANE", "1")), "wait 600",
+    *rin("move", "pane.json", move_cmd(4, "pane", 0)), "wait 400",
+    *rin("move", "s3.json", '{"cmd":"status"}'),
+    *rin("move", "far.json", move_cmd(4, "pane", 5)), "wait 300",
+    *rin("move", "gone.json", move_cmd(99, "tab", 0)), "wait 300",
+    *rin("move", "s4.json", '{"cmd":"status"}'),
+    # a split goes right after the pane split: the list follows the layout, not the
+    # order the panes were opened in, and a move counts places in that order
+    *rin("move", "o4.json", open_pane.replace("PANE", "4")), "wait 600",
+    *rin("move", "s5.json", '{"cmd":"status"}'),
+    *rin("move", "split.json", move_cmd(1, "pane", 0)), "wait 400",
+    *rin("move", "s6.json", '{"cmd":"status"}')])
+assert order(moved, "s0.json") == [[1], [2], [3]], order(moved, "s0.json")
+assert answer(moved, "tab.json") == {"ok": True, "pane": 3}, answer(moved, "tab.json")
+assert order(moved, "s1.json") == [[3], [1], [2]], order(moved, "s1.json")
+assert [t["active"] for t in answer(moved, "s1.json")["tabs"]] == [True, False, False], \
+    answer(moved, "s1.json")["tabs"]
+assert answer(moved, "tab-late.json")["ok"] is True
+assert order(moved, "s2.json") == [[1], [2], [3]], order(moved, "s2.json")
+assert answer(moved, "o3.json") == {"ok": True, "pane": 4}, answer(moved, "o3.json")
+assert answer(moved, "pane.json")["ok"] is True
+assert order(moved, "s3.json") == [[4, 1], [2], [3]], order(moved, "s3.json")
+assert answer(moved, "far.json") == {"ok": False, "error": "no such position in this tab"}, \
+    answer(moved, "far.json")
+assert answer(moved, "gone.json") == {"ok": False, "error": "no such pane"}, answer(moved, "gone.json")
+assert order(moved, "s4.json") == order(moved, "s3.json")
+assert answer(moved, "o4.json") == {"ok": True, "pane": 5}, answer(moved, "o4.json")
+assert order(moved, "s5.json") == [[4, 5, 1], [2], [3]], order(moved, "s5.json")
+assert answer(moved, "split.json")["ok"] is True
+assert order(moved, "s6.json") == [[1, 4, 5], [2], [3]], order(moved, "s6.json")
+
 # (b)-(d) remote access on with control_api off: the socket serves the
 # gateway's requests only; a command at the prompt runs as a block with a
 # toast; one while a command runs is busy; ctrl+c interrupts; turning
@@ -9437,6 +9490,76 @@ assert 'staged=Some(["Abig.bin"]) unstaged=Some([])' in (rw / "origin.txt").read
     next(line for line in (rw / "origin.txt").read_text().splitlines() if line.startswith("review="))
 assert 'review=true load=not-a-repo' in (rw / "other.txt").read_text()
 assert subprocess.check_output([*rw_git, "show", ":big.bin"], env=rw_env) == (rw / "repo/big.bin").read_bytes()
+
+# settings-permissions: Settings › Permissions (macOS only) lists Full Disk
+# Access per app that runs shells (Rift Helper when the session service runs
+# as the helper app, else only Rift) and Notifications, each with its status
+# and an Open Settings button. A scripted run fixes the answers with
+# RIFT_SCRIPT_PERMISSIONS; Open Settings only logs in a headless run.
+if sys.platform == "darwin":
+    sp = scratch / "settings-permissions"
+    for sub in ("cfg/rift", "data", "home"):
+        (sp / sub).mkdir(parents=True, exist_ok=True)
+    (sp / "cfg/rift/config.toml").write_text(
+        'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
+        'check_for_updates = false\n')
+    def sp_run(name, answers, steps):
+        (sp / f"{name}.rift").write_text("\n".join([
+            "resize 1000 700", "wait_prompt", "key cmd+,", "wait 400",
+            "a11y click Permissions", "wait 500", *steps, "quit"]) + "\n")
+        with (sp / f"{name}.log").open("w") as log:
+            rc = subprocess.run([str(binary), "--script", str(sp / f"{name}.rift"), "--headless"],
+                                env=dict(env, HOME=str(sp / "home"), XDG_CONFIG_HOME=str(sp / "cfg"),
+                                         XDG_DATA_HOME=str(sp / "data"),
+                                         RIFT_SCRIPT_PERMISSIONS=answers),
+                                stdout=log, stderr=log, timeout=60).returncode
+        assert rc == 0, died(f"settings-permissions {name} run failed", sp / f"{name}.log")
+    sp_run("helper", "host=helper window=granted service=missing notifications=allowed", [
+        f"dump {sp}/helper.txt", f"shot {sp}/helper.png",
+        "a11y click Open Settings, Full Disk Access", "wait 300",
+        "a11y click Open Settings, Notifications", "wait 300",
+        "a11y click Show Rift Helper in Finder", "wait 300"])
+    sp_helper = (sp / "helper.txt").read_text()
+    for sp_want in ('page=Permissions',
+                    'Button "Open Settings, Full Disk Access"',
+                    'Label "Full Disk Access, Rift Helper: Not granted"',
+                    'Label "Full Disk Access, Rift: Granted"',
+                    # macOS lists the helper only once added: Finder shows it to drag in
+                    'Button "Show Rift Helper in Finder"',
+                    'Button "Open Settings, Notifications"', 'Label "Notifications: Granted"'):
+        assert sp_want in sp_helper, (sp_want, sp_helper[-2500:])
+    # the switch to turn on is the helper's: it is listed before the window
+    assert sp_helper.index("Rift Helper: Not granted") < sp_helper.index("Full Disk Access, Rift: Granted")
+    # headless: the panes are not opened on the desktop
+    sp_opened = (sp / "helper.log").read_text()
+    assert "permissions (headless): open System Settings › Full Disk Access" in sp_opened, sp_opened[-1500:]
+    assert "open System Settings › Notifications" in sp_opened, sp_opened[-1500:]
+    # an isolated run has no helper app to show (and never opens Finder)
+    assert "permissions: no Rift Helper.app in this run" in sp_opened, sp_opened[-1500:]
+    # the opposite answers, an older service, and shells in the window
+    sp_run("flipped", "host=helper window=missing service=granted notifications=off",
+           [f"dump {sp}/flipped.txt"])
+    sp_flipped = (sp / "flipped.txt").read_text()
+    assert 'Label "Full Disk Access, Rift Helper: Granted"' in sp_flipped, sp_flipped[-2500:]
+    assert 'Label "Full Disk Access, Rift: Not granted"' in sp_flipped, sp_flipped[-2500:]
+    assert 'Label "Notifications: Not granted"' in sp_flipped, sp_flipped[-2500:]
+    assert "Show Rift Helper in Finder" not in sp_flipped, sp_flipped[-2500:]
+    sp_run("restart", "host=helper window=granted service=restart notifications=unasked", [
+        f"dump {sp}/restart.txt"])
+    sp_restart = (sp / "restart.txt").read_text()
+    assert 'Label "Full Disk Access, Rift Helper: Unknown · restart Rift"' in sp_restart, sp_restart[-2500:]
+    assert 'Button "Allow Rift\'s desktop notifications"' in sp_restart, sp_restart[-2500:]
+    sp_run("window", "host=window window=missing service=granted notifications=allowed", [
+        f"dump {sp}/window.txt", f"shot {sp}/window.png"])
+    sp_window = (sp / "window.txt").read_text()
+    assert 'Label "Full Disk Access, Rift: Not granted"' in sp_window, sp_window[-2500:]
+    assert "Rift Helper" not in sp_window, sp_window[-2500:]
+    # Settings search finds it by what it is for ("downloads" is in its description)
+    sp_run("search", "host=helper window=granted service=missing", [
+        "a11y click Search settings: ", "wait 300", "type downloads", "wait 500",
+        f"dump {sp}/search.txt"])
+    sp_search = (sp / "search.txt").read_text()
+    assert 'Button "Open Settings, Full Disk Access"' in sp_search, sp_search[-2500:]
 
 # settings-collections: the four structured editors save real TOML, validate
 # on their UI, and feed actual action, masking and tab-color consumers.

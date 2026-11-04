@@ -341,8 +341,6 @@ export function stateText(kind: TabKind, o: { ageMs: number | null; elapsedMs: n
   }
 }
 
-/** Sheet order: needs you, failed, working, idle. */
-export const KIND_ORDER: Record<TabKind, number> = { needs: 0, failed: 1, working: 2, idle: 3 };
 
 /** What the Portals chips filter on: failed tabs count with the idle ones (nothing runs). */
 export type HomeFilter = "needs" | "working" | "idle";
@@ -432,13 +430,6 @@ export function tabRow(h: HostView, tab: Tab, ctx: RowContext, idle: ReadonlyMap
   };
 }
 
-/** Rows in sheet order (stable within a state). */
-export function sortRows<T extends { kind: TabKind }>(rows: readonly T[]): T[] {
-  return rows
-    .map((r, i) => [r, i] as const)
-    .sort((a, b) => KIND_ORDER[a[0].kind] - KIND_ORDER[b[0].kind] || a[1] - b[1])
-    .map(([r]) => r);
-}
 
 /** Portals' chips: tabs per state (failed with idle). */
 export function homeCounts(rows: readonly { kind: TabKind }[]): Record<HomeFilter, number> {
@@ -462,9 +453,9 @@ export function sheetCounts(rows: readonly { kind: TabKind }[]): Record<SheetFil
   return n;
 }
 
-/** The sheet's rows: filtered, then ordered. */
+/** The sheet's rows in the computer's tab order, filtered to one state or not. */
 export function sheetRows<T extends { kind: TabKind }>(rows: readonly T[], f: SheetFilter): T[] {
-  return sortRows(f === "all" ? rows : rows.filter((r) => r.kind === f));
+  return f === "all" ? [...rows] : rows.filter((r) => r.kind === f);
 }
 
 /** "No tab is waiting for you." */

@@ -155,8 +155,8 @@ describe("Computers chips", () => {
 describe("Tabs sheet", () => {
   const rows = [quiet, working, failed, asking, idleAgent].map((t) => ({ kind: tabKind(t), id: t.title }));
 
-  it("orders needs you, failed, working, idle (stable inside a state)", () => {
-    expect(sheetRows(rows, "all").map((r) => r.id)).toEqual(["RIFT", "flow", "q", "zsh", "c"]);
+  it("keeps the computer's tab order, whatever state each tab is in", () => {
+    expect(sheetRows(rows, "all").map((r) => r.id)).toEqual(["zsh", "q", "flow", "RIFT", "c"]);
   });
 
   it("filters one state and counts each", () => {

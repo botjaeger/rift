@@ -516,6 +516,76 @@ impl App {
         self.win.tabs[ti].panes.len() > 1 || self.can_move_tab(ti, true, false)
     }
 
+    /// A phone's `move`: the tab holding `pane` goes to global tab position
+    /// `to` (as `topology` counts them across this process's windows) when
+    /// that is a place in the pane's own window and in its zone (pinned or
+    /// not, same group, as the tab drag); or `pane` goes to position `to`
+    /// among its tab's panes, exchanging layout places with each pane it
+    /// passes. The active tab and pane stay the same ones.
+    pub(super) fn remote_move(
+        &mut self,
+        pane: u64,
+        kind: rift_remote::protocol::MoveKind,
+        to: usize,
+    ) -> crate::control::Response {
+        use crate::control::Response;
+        use rift_remote::protocol::MoveKind;
+        if !self.config.remote_access {
+            return Response::error("remote access is off");
+        }
+        let Some((ti, _)) = self.find_tab_of_pane(pane) else {
+            return Response::error("no such pane");
+        };
+        match kind {
+            MoveKind::Tab => {
+                let first: usize = self
+                    .windows_in_order()
+                    .iter()
+                    .take(self.window_index())
+                    .map(|w| w.tabs.len())
+                    .sum();
+                let n = self.win.tabs.len();
+                let Some(to) = to.checked_sub(first).filter(|t| *t < n) else {
+                    return Response::error("no such position in this window");
+                };
+                let (lo, hi) = (ti.min(to), ti.max(to));
+                if (lo..=hi).any(|j| !self.same_zone(ti, j)) {
+                    return Response::error("a pinned or grouped tab stays in its own zone");
+                }
+                if ti != to {
+                    reorder(&mut self.win.tabs, ti, to);
+                    self.win.active = followed(self.win.active, ti, to);
+                    self.save_session();
+                }
+            }
+            MoveKind::Pane => {
+                let tab = &mut self.win.tabs[ti];
+                // positions count the panes in layout order, as `topology` lists them
+                let order: Vec<u64> = tab.panes_in_order().iter().map(|p| p.session.id).collect();
+                let from = order.iter().position(|id| *id == pane);
+                let (Some(from), true) = (from, to < order.len()) else {
+                    return Response::error("no such position in this tab");
+                };
+                if from != to {
+                    tab.zoomed = None;
+                    let step: isize = if to > from { 1 } else { -1 };
+                    let mut at = from;
+                    while at != to {
+                        let next = (at as isize + step) as usize;
+                        tab.root.swap(pane, order[next]);
+                        at = next;
+                    }
+                    self.save_session();
+                }
+            }
+        }
+        Response {
+            ok: true,
+            pane: Some(pane),
+            ..Default::default()
+        }
+    }
+
     /// The tab menu's move rows for tab `tab`: "Move to new window", then
     /// one row per other window it can go to, named by its number (as the
     /// switcher counts) and its active tab's title.
@@ -621,6 +691,25 @@ impl App {
         self.on_left(ElementState::Pressed, event_loop, &window);
         self.on_cursor_moved(release, &window);
         self.on_left(ElementState::Released, event_loop, &window);
+    }
+}
+
+/// Take the item at `from` out and put it back at `to`.
+fn reorder<T>(items: &mut Vec<T>, from: usize, to: usize) {
+    let item = items.remove(from);
+    items.insert(to, item);
+}
+
+/// Where the item that was at `at` is after `reorder(from, to)`.
+fn followed(at: usize, from: usize, to: usize) -> usize {
+    if at == from {
+        to
+    } else if from < at && at <= to {
+        at - 1
+    } else if to <= at && at < from {
+        at + 1
+    } else {
+        at
     }
 }
 
@@ -760,6 +849,24 @@ mod tests {
         // the round trip a script's `drag_tab` makes
         let p = retina.screen((10.0, 91.0));
         assert_eq!(retina.local(p), (10.0, 91.0));
+    }
+
+    #[test]
+    fn a_phone_reorder_keeps_the_active_tab_the_same_one() {
+        for from in 0..5 {
+            for to in 0..5 {
+                for active in 0..5 {
+                    let mut v: Vec<usize> = (0..5).collect();
+                    reorder(&mut v, from, to);
+                    assert_eq!(v[to], from, "{from}->{to}");
+                    assert_eq!(
+                        v[followed(active, from, to)],
+                        active,
+                        "{from}->{to} @{active}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

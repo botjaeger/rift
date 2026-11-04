@@ -29,7 +29,7 @@
 
 use crate::protocol::{
     Block, BlockState, ClientHello, ClientMsg, CloseKind, ClosingReason, ErrorCode, GatewayHello,
-    OpenKind, Permission, Run, ScreenMode, ServerMsg, VERSION,
+    MoveKind, OpenKind, Permission, Run, ScreenMode, ServerMsg, VERSION,
 };
 use crate::registry::{self, Device, RelayState, RelayStatus, Via};
 use crate::transport::{self, Channel, KEY_LEN, Recv, Socket};
@@ -80,7 +80,7 @@ const DONE_RUNNING: usize = 64;
 /// after the 45 s idle timeout.
 pub const FOLLOW_FRESH: Duration = Duration::from_secs(20);
 /// What this gateway serves beyond Phase 2 (`welcome.features`).
-const FEATURES: [&str; 22] = [
+const FEATURES: [&str; 23] = [
     "screen",
     "text",
     "output",
@@ -94,6 +94,7 @@ const FEATURES: [&str; 22] = [
     "running",
     "open",
     "close",
+    "move",
     "fit",
     "prompt_chips",
     "closing",
@@ -1991,6 +1992,7 @@ fn session<S: Source, T: Socket>(
     let mut keys = Rate::new(KEYS_RATE);
     let mut fits = Rate::new(FIT_RATE);
     let mut opens = Rate::new(OPEN_RATE);
+    let mut moves = Rate::new(FIT_RATE);
     let mut outputs = Rate::new(OUTPUT_RATE);
     let mut scrolls = Rate::new(crate::SCROLL_RATE);
     let mut uploads = Rate::new(UPLOAD_RATE);
@@ -2280,6 +2282,12 @@ fn session<S: Source, T: Socket>(
                 pane,
                 kind,
             }) => Some(close(shared, device, &mut opens, rid, pane, kind)),
+            Ok(ClientMsg::Move {
+                id: rid,
+                pane,
+                kind,
+                to,
+            }) => Some(move_to(shared, device, &mut moves, rid, pane, kind, to)),
             Ok(ClientMsg::Start { id: rid }) => Some(start(shared, device, &mut opens, rid)),
             Ok(ClientMsg::Scroll {
                 id: rid,
@@ -2941,6 +2949,39 @@ fn close<S: Source>(
         return ServerMsg::ack_err(rid, ErrorCode::Rate, "too many requests; slow down");
     }
     match shared.source.close(pane, &device.name, kind) {
+        Ok(()) => {
+            push_topology(shared);
+            ServerMsg::ack_ok(rid)
+        }
+        Err(e) => opened(shared, rid, Err(e), || format!("no pane {pane}")),
+    }
+}
+
+/// `move`: permission as `open`, rate like `fit` (a screen reader's Move up /
+/// down repeats quickly), then the source. On success every connection gets
+/// the new topology before the ack.
+fn move_to<S: Source>(
+    shared: &Shared<S>,
+    device: &Device,
+    rate: &mut Rate,
+    rid: String,
+    pane: u64,
+    kind: MoveKind,
+    to: usize,
+) -> ServerMsg {
+    if rid.chars().count() > MAX_REQUEST_ID {
+        return ServerMsg::error(
+            ErrorCode::BadRequest,
+            format!("id is longer than {MAX_REQUEST_ID} characters"),
+        );
+    }
+    if !operates(shared, device) {
+        return ServerMsg::ack_err(rid, ErrorCode::Forbidden, VIEW_ONLY);
+    }
+    if !rate.allow(Instant::now()) {
+        return ServerMsg::ack_err(rid, ErrorCode::Rate, "too many requests; slow down");
+    }
+    match shared.source.move_to(pane, &device.name, kind, to) {
         Ok(()) => {
             push_topology(shared);
             ServerMsg::ack_ok(rid)

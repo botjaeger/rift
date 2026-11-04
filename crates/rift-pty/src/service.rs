@@ -296,10 +296,93 @@ pub fn list() -> Vec<ipc::SessionInfo> {
     }
 }
 
+/// What the running session service says about the privacy switches of the
+/// app it runs as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServicePrivacy {
+    /// It answered: Full Disk Access (`None`: it cannot tell).
+    Answer { full_disk: Option<bool> },
+    /// It runs, from a release that cannot be asked (restart Rift).
+    Outdated,
+    /// None runs, or it did not answer in time.
+    Unreachable,
+}
+
+/// How long the service may take to answer a privacy question.
+const PRIVACY_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Ask the service about its own privacy grants. Never starts it. Blocks up
+/// to [`SETUP_TIMEOUT`] on the hello of a stalled service: call it off the
+/// UI thread.
+pub fn privacy() -> ServicePrivacy {
+    let Some(path) = ipc::socket_path() else {
+        return ServicePrivacy::Unreachable;
+    };
+    let Ok(s) = UnixStream::connect(path) else {
+        return ServicePrivacy::Unreachable;
+    };
+    let Ok((mut s, features)) = handshake_features(s) else {
+        return ServicePrivacy::Unreachable;
+    };
+    ask_privacy(&mut s, &features)
+}
+
+/// `privacy` on a connection that has said hello.
+fn ask_privacy(s: &mut UnixStream, features: &[String]) -> ServicePrivacy {
+    if !features.iter().any(|f| f == ipc::FEATURE_PRIVACY) {
+        return ServicePrivacy::Outdated;
+    }
+    if ipc::send_json(s, &Request::Privacy).is_err() {
+        return ServicePrivacy::Unreachable;
+    }
+    match next_event_within(s, PRIVACY_TIMEOUT) {
+        Ok(Event::Privacy { full_disk }) => ServicePrivacy::Answer { full_disk },
+        _ => ServicePrivacy::Unreachable,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn a_service_without_the_feature_is_outdated_and_is_not_asked() {
+        let (mut ours, mut theirs) = UnixStream::pair().unwrap();
+        assert_eq!(ask_privacy(&mut ours, &[]), ServicePrivacy::Outdated);
+        // nothing was sent to it
+        theirs
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        let mut b = [0u8; 1];
+        assert!(std::io::Read::read(&mut theirs, &mut b).is_err());
+    }
+
+    #[test]
+    fn the_answer_of_a_service_is_passed_on_and_a_silent_one_is_unreachable() {
+        let feature = vec![ipc::FEATURE_PRIVACY.to_string()];
+        let (mut ours, mut theirs) = UnixStream::pair().unwrap();
+        ipc::send_json(
+            &mut theirs,
+            &Event::Privacy {
+                full_disk: Some(false),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            ask_privacy(&mut ours, &feature),
+            ServicePrivacy::Answer {
+                full_disk: Some(false)
+            }
+        );
+        let (mut ours, _theirs) = UnixStream::pair().unwrap();
+        let t = Instant::now();
+        assert_eq!(
+            ask_privacy(&mut ours, &feature),
+            ServicePrivacy::Unreachable
+        );
+        assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
+    }
 
     fn hello_frame() -> Vec<u8> {
         let mut b = Vec::new();

@@ -345,10 +345,39 @@ describe("Live Activities", () => {
   it("starts one per wait, with the computer's start time and place", () => {
     const plan = livePlan(new Map(), [a], hosts, []);
     expect(plan).toEqual({
-      start: [{ key: liveKey(a), wait: a, command: "cargo test", place: "host-A · rift", startedAt: 4_000, line: "test a ... ok" }],
+      start: [
+        {
+          key: liveKey(a),
+          wait: a,
+          command: "cargo test",
+          place: "host-A · rift",
+          link: "rift://host/A/pane/2",
+          startedAt: 4_000,
+          line: "test a ... ok",
+        },
+      ],
       update: [],
       end: [],
     });
+  });
+
+  it("names the pane when its tab has more than one, and links a key that needs escaping", () => {
+    const two = [host("a/b+c", [pane(2), pane(3)])];
+    const w: AskedView = { ...a, host: "a/b+c", pane: 3 };
+    expect(livePlan(new Map(), [w], two, []).start[0]).toMatchObject({
+      place: "host-a/b+c · rift · pane 2",
+      link: "rift://host/a%2Fb%2Bc/pane/3",
+    });
+  });
+
+  it("ends one that finished while away with the pane's last exit status, else none", () => {
+    const shown = new Map([[liveKey(a), { wait: a, id: "act1", line: "x" }]]);
+    const atPrompt = (last: string) => [host("A", [pane(2, { last_command: last, last_exit: 3 })])];
+    // when it ended is not known: no duration
+    expect(livePlan(shown, [], atPrompt("cargo test"), []).end[0]).toMatchObject({ exit: 3, timed: false });
+    expect(livePlan(shown, [], atPrompt("make"), []).end[0]!.exit).toBeNull();
+    // still running (a later command): its last exit is not this one's
+    expect(livePlan(shown, [], hosts, []).end[0]!.exit).toBeNull();
   });
 
   it("updates a changed line, and ends a finished wait with its exit status", () => {
@@ -356,13 +385,13 @@ describe("Live Activities", () => {
     expect(livePlan(shown, [a], hosts, []).update).toEqual([{ key: liveKey(a), id: "act1", line: "test a ... ok" }]);
     expect(livePlan(new Map([[liveKey(a), { wait: a, id: "act1", line: "test a ... ok" }]]), [a], hosts, []).update).toEqual([]);
     const end = livePlan(shown, [], hosts, [done("cargo test", 101, 9, { pane: 2 })]).end;
-    expect(end).toEqual([{ key: liveKey(a), id: "act1", exit: 101, line: "old" }]);
+    expect(end).toEqual([{ key: liveKey(a), id: "act1", exit: 101, line: "old", timed: true }]);
   });
 
   it("ends a multi-line command's activity with its exit status", () => {
     const multi: AskedView = { ...a, command: "for i in 1 2; do\n  make\ndone" };
     const shown = new Map([[liveKey(multi), { wait: multi, id: "act2", line: "" }]]);
     const end = livePlan(shown, [], hosts, [done(multi.command, 2, 9, { pane: 2, command: multi.command })]).end;
-    expect(end).toEqual([{ key: liveKey(multi), id: "act2", exit: 2, line: "" }]);
+    expect(end).toEqual([{ key: liveKey(multi), id: "act2", exit: 2, line: "", timed: true }]);
   });
 });

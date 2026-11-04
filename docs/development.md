@@ -208,6 +208,10 @@ in Rift's own command history (`history.json`) unless it sets
 reads nor writes the ignored suggestions (`ignored-suggestions.json`, the
 ghost text's ✕) unless it sets `RIFT_SCRIPT_RECORD_IGNORED=1` with its own
 `XDG_DATA_HOME` (its ignores otherwise last for the run).
+Settings › Permissions (macOS) reads the system's real grants; a test fixes
+them with `RIFT_SCRIPT_PERMISSIONS` (scripted runs only), words of `key=value`:
+`host=helper|service|window`, `window=` and `service=`
+`granted|missing|unknown|restart|down`, `notifications=allowed|off|unasked`.
 Nor does it read `/etc/shells`: config.toml gets no generated shell profiles
 and none is marked orphaned, unless `RIFT_SHELLS_FILE` names a fixture shells
 file, which then stands in for `/etc/shells` (the startup sync and the orphan
@@ -397,12 +401,17 @@ crate covers it. Keep default features off where the crate allows.
 `--target <triple>`, `--target-dir <dir>` and `--no-build`; `make-dmg.sh`
 takes `--target-dir <dir>` and `--arch <arch>`. They honor
 `CARGO_TARGET_DIR` and print the artifact path; `gen-icon.py` takes no
-options.
+options. `make-app.sh` also takes `--sign <identity>` (default
+`$RIFT_SIGN_IDENTITY`, else ad hoc). `release-local.sh` signs with the
+self-signed `Rift Signing` code-signing certificate from the login keychain
+and stops without it: macOS ties privacy grants (Full Disk Access, Files and
+Folders, Accessibility) to the signature, and an ad-hoc one changes with every
+build, so each update lost them.
 
 | Script | Platform | Produces |
 |---|---|---|
 | `packaging/gen-icon.py` | any | `assets/icon/`: 1024 PNG, `.iconset`, `.icns` (macOS), hicolor PNGs (Linux), `.ico` (Windows), `rift-window.png` (embedded window icon) |
-| `packaging/make-app.sh` | macOS | `target/Rift.app` (ad-hoc signed) |
+| `packaging/make-app.sh` | macOS | `target/Rift.app` (ad hoc, or `--sign`) |
 | `packaging/make-dmg.sh` | macOS | `target/Rift-<version>-<arch>.dmg` (run `make-app.sh` first) |
 | `packaging/make-deb.sh` | Linux | `target/rift-terminal_<version>_<arch>.deb` |
 | `packaging/make-appimage.sh` | Linux | `target/Rift-<version>-<arch>.AppImage` (pins appimagetool 1.9.1 and verifies SHA-256 before every execution, including cached copies) |
@@ -525,7 +534,9 @@ instead: an optional field (`#[serde(default, skip_serializing_if = …)]`)
 that an older peer ignores, plus a `FEATURE_*` name the service lists in its
 hello when the window must know the service honours it (profile `args`:
 a service without `FEATURE_ARGS` is not asked to start such a shell; the
-window starts it locally). Update the golden; the version stays. Check it
+window starts it locally; `FEATURE_PRIVACY`: only a service that lists it is
+asked `Request::Privacy`, Settings › Permissions shows "Unknown · restart
+Rift" for the others). Update the golden; the version stays. Check it
 against the installed release's service with
 `scripts/service-compat.py`.
 

@@ -25,10 +25,30 @@ pub enum Page {
     Keybindings,
     Themes,
     Remote,
+    /// macOS privacy switches (not listed elsewhere).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Permissions,
     About,
 }
 
 impl Page {
+    #[cfg(target_os = "macos")]
+    pub const ALL: [Page; 13] = [
+        Page::General,
+        Page::Profiles,
+        Page::Actions,
+        Page::Appearance,
+        Page::Features,
+        Page::Terminal,
+        Page::Files,
+        Page::Notifications,
+        Page::Keybindings,
+        Page::Themes,
+        Page::Remote,
+        Page::Permissions,
+        Page::About,
+    ];
+    #[cfg(not(target_os = "macos"))]
     pub const ALL: [Page; 12] = [
         Page::General,
         Page::Profiles,
@@ -57,6 +77,7 @@ impl Page {
             Page::Keybindings => "Keybindings",
             Page::Themes => "Themes",
             Page::Remote => "Remote access",
+            Page::Permissions => "Permissions",
             Page::About => "About",
         }
     }
@@ -84,6 +105,9 @@ impl Page {
                 })
             }
             Page::Remote => "Watch and run commands from a paired phone, at home or away.",
+            Page::Permissions => {
+                "macOS privacy switches Rift can use. Status refreshes when you return from System Settings."
+            }
             Page::About => "",
         }
     }
@@ -106,6 +130,7 @@ impl Page {
             Page::Themes => Icon::Themes,
             // reaching in from outside (no phone mark in the set)
             Page::Remote => Icon::Open,
+            Page::Permissions => Icon::Lock,
             Page::About => Icon::Info,
         }
     }
@@ -414,6 +439,8 @@ pub struct SettingsState {
     pub update: UpdateLine,
     /// Remote access's gateway, devices and pairing (set by the app).
     pub remote: RemoteView,
+    /// Permissions' grants (set by the app).
+    pub permissions: crate::permissions::View,
     /// Recent connections: the first row shown (whole rows, so none is cut).
     pub history_top: usize,
     /// When config.toml was last written or reloaded: "Open config.toml"
@@ -697,6 +724,8 @@ fn focusable(target: &ClickTarget) -> bool {
             | ClickTarget::SettingsTestAlert(_)
             | ClickTarget::SettingsRingBell
             | ClickTarget::SettingsNotifyPermission
+            | ClickTarget::SettingsOpenFullDisk
+            | ClickTarget::SettingsRevealHelper
             | ClickTarget::SettingsThemeFilter(_)
             | ClickTarget::SettingsOpenThemes
             | ClickTarget::RemotePair
@@ -1349,8 +1378,13 @@ pub fn render(
             Page::Files,
             Page::Notifications,
             Page::Remote,
+            Page::Permissions,
             Page::Themes,
         ] {
+            // the page exists on macOS only
+            if !Page::ALL.contains(&page) {
+                continue;
+            }
             form.page = page.label();
             match page {
                 // by name: a match applies that theme
@@ -1365,6 +1399,7 @@ pub fn render(
                 Page::Files => files_page(&mut form, config),
                 // its switch only: pairing and devices need the page
                 Page::Remote => remote_switch(&mut form, config),
+                Page::Permissions => permissions_page(&mut form, &state.permissions),
                 _ => notifications_page(&mut form, config),
             }
             collections::page(&mut form, config, state, page);
@@ -1398,6 +1433,7 @@ pub fn render(
                 state.history_top,
                 blink_on,
             ),
+            Page::Permissions => permissions_page(&mut form, &state.permissions),
             Page::About => about_page(&mut form, top, bottom, &state.update),
         }
     }
@@ -5976,6 +6012,137 @@ fn desktop_notifications(form: &mut Form) {
     );
 }
 
+/// Width of a status pill with `text`.
+fn pill_width(form: &mut Form, text: &str) -> f32 {
+    (form.engine.measure(text, 12.0, FONT_SANS, Weight::SEMIBOLD) + 18.0).round()
+}
+
+/// A status pill (green: on, red: off, neutral: no tone) ending at `right`,
+/// vertically centred on the row at `y`: its left edge.
+fn status_pill(form: &mut Form, y: f32, right: f32, text: &str, tone: Option<bool>) -> f32 {
+    let w = pill_width(form, text);
+    let px = right - w;
+    if form.visible(y, ROW_H) {
+        let py = y + (ROW_H - 22.0) / 2.0;
+        let (fill, ink) = match tone {
+            Some(true) => (form.theme.success.with_alpha(0.16), form.theme.success),
+            Some(false) => (form.theme.error.with_alpha(0.16), form.theme.error),
+            None => (lift(form.theme, 0.08), form.theme.text_dim),
+        };
+        form.layer.rect([px, py], [w, 22.0], fill, 11.0);
+        form.layer.text(
+            sans(form.engine, text, 12.0, Weight::SEMIBOLD),
+            px + 9.0,
+            py + (22.0 - 12.0 * 1.35) / 2.0,
+            ink,
+        );
+    }
+    px
+}
+
+/// Settings › Permissions (macOS): Full Disk Access per app that runs
+/// something (the shells' host first), and Notifications; each with its
+/// status and a button into System Settings.
+fn permissions_page(form: &mut Form, view: &crate::permissions::View) {
+    use crate::notify::Permission;
+    use crate::permissions;
+    // the apps of Full Disk Access sit under its row
+    const INDENT: f32 = 16.0;
+    form.group("Recommended");
+    let y = form.y;
+    let open = "Open Settings";
+    let bw = (form.engine.measure(open, 12.5, FONT_SANS, Weight::MEDIUM) + 24.0).round();
+    form.reserve = bw + 40.0;
+    form.label_desc(
+        "Full Disk Access",
+        "Desktop, Documents, Downloads, iCloud Drive, external and network volumes",
+        y,
+    );
+    if !form.hidden {
+        let bx = form.right() - bw;
+        form.button(
+            bx,
+            y + (ROW_H - CONTROL_H) / 2.0,
+            open,
+            ButtonKind::Secondary,
+            ClickTarget::SettingsOpenFullDisk,
+            "Open Settings, Full Disk Access".into(),
+        );
+    }
+    form.x += INDENT;
+    form.card_w -= INDENT;
+    for row in permissions::full_disk_rows(view) {
+        let y = form.y;
+        let text = row.access.text();
+        let pw = pill_width(form, text);
+        // the helper is not in the list until added: Finder shows it to drag in
+        let reveal = row.reveal.then_some("Show in Finder");
+        let bw = reveal.map_or(0.0, |b| {
+            (form.engine.measure(b, 12.5, FONT_SANS, Weight::MEDIUM) + 24.0).round() + 10.0
+        });
+        form.reserve = pw + bw + 40.0;
+        form.label_desc(row.app, &row.role, y);
+        if !form.hidden {
+            let mut right = form.right();
+            if let Some(b) = reveal {
+                let bx = right - (bw - 10.0);
+                form.button(
+                    bx,
+                    y + (ROW_H - CONTROL_H) / 2.0,
+                    b,
+                    ButtonKind::Secondary,
+                    ClickTarget::SettingsRevealHelper,
+                    format!("Show {} in Finder", row.app),
+                );
+                right = bx - 10.0;
+            }
+            status_pill(form, y, right, text, row.access.tone());
+            form.push_hit(
+                [form.x, y, right - pw - form.x, ROW_H],
+                ClickTarget::SettingsNoop,
+            );
+            form.name_last(row.name());
+        }
+    }
+    form.x -= INDENT;
+    form.card_w += INDENT;
+
+    form.group("Optional");
+    let y = form.y;
+    let p = view.notifications.unwrap_or_else(crate::notify::permission);
+    let (text, tone) = permissions::notification_status(p);
+    let (button, name) = if p == Permission::NotAsked {
+        ("Allow…", "Allow Rift's desktop notifications")
+    } else {
+        ("Open Settings", "Open Settings, Notifications")
+    };
+    let bw = (form.engine.measure(button, 12.5, FONT_SANS, Weight::MEDIUM) + 24.0).round();
+    let pw = pill_width(form, text);
+    form.reserve = bw + pw + 10.0 + 40.0;
+    form.label_desc(
+        "Notifications",
+        "Banners when a command finishes or an agent needs you",
+        y,
+    );
+    if !form.hidden {
+        let bx = form.right() - bw;
+        form.button(
+            bx,
+            y + (ROW_H - CONTROL_H) / 2.0,
+            button,
+            ButtonKind::Secondary,
+            ClickTarget::SettingsNotifyPermission,
+            name.into(),
+        );
+        status_pill(form, y, bx - 10.0, text, tone);
+        form.push_hit(
+            [form.x, y, bx - form.x - 10.0, ROW_H],
+            ClickTarget::SettingsNoop,
+        );
+        form.name_last(format!("Notifications: {text}"));
+    }
+}
+
 fn notifications_page(form: &mut Form, config: &Config) {
     let n = &config.notifications;
     form.group("Alerts");
@@ -7096,7 +7263,15 @@ mod tests {
         state.move_page(99);
         assert_eq!(state.page, Page::About);
         state.move_page(-1);
-        assert_eq!(state.page, Page::Remote);
+        // Permissions sits between them on macOS only
+        assert_eq!(
+            state.page,
+            if cfg!(target_os = "macos") {
+                Page::Permissions
+            } else {
+                Page::Remote
+            }
+        );
         state.move_page(-99);
         assert_eq!(state.page, Page::General);
     }

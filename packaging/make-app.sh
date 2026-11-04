@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 # Build Rift.app (macOS).
 #
-# Usage: packaging/make-app.sh [--target <triple>] [--target-dir <dir>] [--no-build]
+# Usage: packaging/make-app.sh [--target <triple>] [--target-dir <dir>] [--no-build] [--sign <identity>]
 #   --target      pick target/<triple>/release/rift-terminal (CI cross builds)
 #   --target-dir  override CARGO_TARGET_DIR / the default `target`
 #   --no-build    package an already-built binary
+#   --sign        a code-signing identity in the keychain (default
+#                 $RIFT_SIGN_IDENTITY, else "-", ad hoc). Releases sign with a
+#                 fixed one: macOS ties privacy grants (Full Disk Access,
+#                 Files and Folders, Accessibility) to the signature, and an ad
+#                 hoc one changes with every build, so each update lost them.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # shellcheck source=packaging/lib.sh
@@ -13,12 +18,14 @@ cd "$(dirname "$0")/.."
 TRIPLE=""
 TARGET_DIR="$(rift_default_target_dir)"
 BUILD=1
+SIGN="${RIFT_SIGN_IDENTITY:--}"
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --target)     TRIPLE="${2:?--target needs a triple}"; shift 2 ;;
         --target-dir) TARGET_DIR="${2:?--target-dir needs a path}"; shift 2 ;;
         --no-build)   BUILD=0; shift ;;
+        --sign)       SIGN="${2:?--sign needs an identity}"; shift 2 ;;
         --release)    shift ;;  # accepted for compatibility; release is the only profile
         -h|--help)    rift_usage; exit 0 ;;
         *)            rift_die "unknown option: $1" ;;
@@ -147,9 +154,18 @@ cat > "$HELPER/Contents/Info.plist" <<PLIST
 PLIST
 plutil -lint "$HELPER/Contents/Info.plist" >/dev/null
 
-# Ad-hoc signature. Without any signature at all Gatekeeper refuses to launch
-# the bundle even locally; "-" is the ad-hoc identity and needs no certificate.
-codesign --force --deep --sign - "$APP"
+# Without any signature at all Gatekeeper refuses to launch the bundle even
+# locally; "-" is the ad-hoc identity and needs no certificate.
+codesign --force --deep --sign "$SIGN" "$APP"
 codesign --verify --deep "$APP"
+if [ "$SIGN" != "-" ]; then
+    # a real identity's requirement names the certificate, never one build's hash
+    REQ="$(codesign -d -r- "$APP" 2>&1)"
+    case "$REQ" in
+        *"designated => cdhash"*) rift_die "$APP is tied to one build: $REQ" ;;
+        *"designated => "*certificate*) ;;
+        *) rift_die "no certificate in the designated requirement of $APP: $REQ" ;;
+    esac
+fi
 
 echo "built $APP (version $VERSION)"

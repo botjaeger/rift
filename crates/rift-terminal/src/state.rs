@@ -142,6 +142,12 @@ pub enum ClickTarget {
     /// Settings › Notifications › Desktop notifications: Allow… (ask macOS)
     /// or Open System Settings.
     SettingsNotifyPermission,
+    /// Settings › Permissions › Full Disk Access: open its System Settings pane.
+    SettingsOpenFullDisk,
+    /// Settings › Permissions › Rift Helper: show the helper app in Finder,
+    /// to drag into the Full Disk Access list (macOS lists an app only once
+    /// it was added).
+    SettingsRevealHelper,
     SettingsSlider(&'static str),
     SettingsTheme(u8),
     /// Settings › Themes: show all themes (0), the dark (1) or the light
@@ -1612,6 +1618,23 @@ impl TabState {
             group: None,
             picked: false,
         }
+    }
+
+    /// The panes in their layout order (left to right, top to bottom, as
+    /// the split tree reads), not the order they were opened in; a pane the
+    /// tree lacks (none should) goes last.
+    pub fn panes_in_order(&self) -> Vec<&PaneState> {
+        let leaves = self.root.leaves();
+        let mut out: Vec<&PaneState> = leaves
+            .iter()
+            .filter_map(|id| self.panes.iter().find(|p| p.session.id == *id))
+            .collect();
+        out.extend(
+            self.panes
+                .iter()
+                .filter(|p| !leaves.contains(&p.session.id)),
+        );
+        out
     }
 
     /// Start the Elapsed clock at the tab's first non-empty command.

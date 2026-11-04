@@ -2,7 +2,8 @@
 //! acts as the phone with `snow` through `rift_remote::transport::connect`.
 
 use rift_remote::protocol::{
-    Block, BlockState, ClientHello, CloseKind, OpenKind, Pane, Permission, Run, Tab, Window,
+    Block, BlockState, ClientHello, CloseKind, MoveKind, OpenKind, Pane, Permission, Run, Tab,
+    Window,
 };
 use rift_remote::protocol::{
     ChangedFile, Completion, CompletionKind, DiffLine, HistoryEntry, Waiting, WaitingKind,
@@ -54,6 +55,7 @@ struct State {
     opens: Vec<(u64, String, OpenKind)>,
     /// What `close` was asked: (pane, device name, kind).
     closes: Vec<(u64, String, CloseKind)>,
+    moves: Vec<(u64, String, MoveKind, usize)>,
     /// `start` allowed (the computer's `remote_access` with durable shells).
     can_start: bool,
     /// Devices that started a shell.
@@ -220,6 +222,21 @@ impl Source for Fake {
         st.panes.insert(new, Vec::new());
         st.starts.push(device.to_string());
         Ok(new)
+    }
+
+    fn move_to(
+        &self,
+        pane: u64,
+        device: &str,
+        kind: MoveKind,
+        to: usize,
+    ) -> Result<(), InputError> {
+        let mut st = self.0.lock().unwrap();
+        if !st.panes.contains_key(&pane) {
+            return Err(InputError::NoPane);
+        }
+        st.moves.push((pane, device.to_string(), kind, to));
+        Ok(())
     }
 
     /// `Pane` removes the pane; `Tab` every pane (the fake has one tab).
@@ -778,7 +795,7 @@ fn pairing_then_reconnecting_gets_welcome_and_topology() {
     assert_eq!(
         welcome,
         json!({"t":"welcome","v":2,"host":"test-host","os":"linux","version":"9.9.9",
-               "device":d.id,"permission":"operate","features":["screen","text","output","push_failures","push_ntfy","git","notify_off","chips","waiting","complete","running","open","close","fit","prompt_chips","closing","scroll","upload","upload_files","paste","mouse","clipboard"]})
+               "device":d.id,"permission":"operate","features":["screen","text","output","push_failures","push_ntfy","git","notify_off","chips","waiting","complete","running","open","close","move","fit","prompt_chips","closing","scroll","upload","upload_files","paste","mouse","clipboard"]})
     );
     assert_eq!(
         (d.name.as_str(), d.platform.as_str()),
@@ -1466,6 +1483,59 @@ fn close_answers_after_a_topology_without_the_pane() {
         json!({"t":"close","id":"c4","pane":12,"kind":"window"}),
     );
     assert_eq!(code(&recv_t(&mut ch, "error")), ("error", "bad_request"));
+}
+
+#[test]
+fn move_reaches_the_source_and_is_listed_in_the_welcome() {
+    let env = start(|c| c.topology_poll = Duration::from_secs(60));
+    let (_k, mut ch, welcome) = env.pair(Permission::Operate);
+    assert!(
+        welcome["features"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("move")),
+        "{welcome}"
+    );
+    put(
+        &mut ch,
+        json!({"t":"move","id":"v1","pane":12,"kind":"tab","to":0}),
+    );
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (true, ""));
+    put(
+        &mut ch,
+        json!({"t":"move","id":"v2","pane":12,"kind":"pane","to":1}),
+    );
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (true, ""));
+    put(
+        &mut ch,
+        json!({"t":"move","id":"v3","pane":99,"kind":"pane","to":1}),
+    );
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (false, "no_pane"));
+    put(
+        &mut ch,
+        json!({"t":"move","id":"v4","pane":12,"kind":"window","to":1}),
+    );
+    assert_eq!(code(&recv_t(&mut ch, "error")), ("error", "bad_request"));
+    assert_eq!(
+        env.fake.0.lock().unwrap().moves,
+        [
+            (12, "Test Phone".to_string(), MoveKind::Tab, 0),
+            (12, "Test Phone".to_string(), MoveKind::Pane, 1)
+        ]
+    );
+}
+
+#[test]
+fn view_devices_are_forbidden_to_move() {
+    let env = start(|_| {});
+    let (_k, mut ch, _) = env.pair(Permission::View);
+    put(
+        &mut ch,
+        json!({"t":"move","id":"v1","pane":12,"kind":"tab","to":0}),
+    );
+    let v = recv_t(&mut ch, "ack");
+    assert_eq!(ack(&v), (false, "forbidden"));
+    assert!(env.fake.0.lock().unwrap().moves.is_empty());
 }
 
 #[test]

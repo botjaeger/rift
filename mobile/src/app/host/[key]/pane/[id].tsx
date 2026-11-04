@@ -26,7 +26,7 @@ import { canLoadOlder, MAX_BLOCKS } from "@/protocol/store";
 import type { Block } from "@/protocol/types";
 import { fleet, useApp } from "@/runtime";
 import { pending } from "@/pending";
-import { screenProgram, showsTerminal } from "@/terminal";
+import { atEnd, screenProgram, showsTerminal } from "@/terminal";
 import { findPane, paneTitle, runningCommand, tabTitle } from "@/topology";
 import { AskCard } from "@/ui/AskCard";
 import { FailedCard, FoldRow, RunningCard } from "@/ui/BlockCards";
@@ -122,15 +122,18 @@ export default function PaneScreen() {
     const ios = Platform.OS === "ios";
     const show = Keyboard.addListener(ios ? "keyboardWillShow" : "keyboardDidShow", () => setKeyboard(true));
     const hide = Keyboard.addListener(ios ? "keyboardWillHide" : "keyboardDidHide", () => setKeyboard(false));
-    // the list shrinks as the keyboard comes up: keep its end in sight once it has (the screen's
-    // own ScrollView follows its end itself)
-    const settled = Keyboard.addListener("keyboardDidShow", () => {
+    // the list shrinks as the keyboard comes up (and grows as it goes): keep its end in sight once
+    // it has (the screen's own ScrollView follows its end itself)
+    const toEnd = () => {
       if (atBottom.current) list.current?.scrollToEnd({ animated: false });
-    });
+    };
+    const settled = Keyboard.addListener("keyboardDidShow", toEnd);
+    const closed = Keyboard.addListener("keyboardDidHide", toEnd);
     return () => {
       show.remove();
       hide.remove();
       settled.remove();
+      closed.remove();
     };
   }, []);
 
@@ -291,9 +294,11 @@ export default function PaneScreen() {
       setTimeout(() => list.current?.scrollToIndex({ index, viewPosition: 0.2, animated: false }), ms);
   }, [target, items, state]);
 
-  const onScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
+  // Judged when a drag or fling ends, not on every scroll event: the list shrinking under the
+  // keyboard also reports a scroll, with the end now out of reach, and that read as "scrolled up".
+  const onScrollEnd = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
-    atBottom.current = contentOffset.y + layoutMeasurement.height >= contentSize.height - BOTTOM_SLOP;
+    atBottom.current = atEnd(contentOffset.y, contentSize.height, layoutMeasurement.height, BOTTOM_SLOP);
   }, []);
 
   const onContentSizeChange = useCallback(() => {
@@ -638,8 +643,13 @@ export default function PaneScreen() {
                   ? { startRenderingFromBottom: true, autoscrollToBottomThreshold: 0.1, animateAutoScrollToBottom: false }
                   : {}
               }
-              onScroll={onScroll}
-              scrollEventThrottle={100}
+              onScrollBeginDrag={() => {
+                atBottom.current = false;
+              }}
+              onScrollEndDrag={onScrollEnd}
+              // the keyboard follows a drag down the list (the only way to put it away at a prompt)
+              keyboardDismissMode="interactive"
+              onMomentumScrollEnd={onScrollEnd}
               onContentSizeChange={onContentSizeChange}
               contentContainerStyle={styles.listContent}
               accessibilityLabel="Command blocks, newest at the bottom"

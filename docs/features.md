@@ -246,8 +246,9 @@ pipes or devices. RTF is not offered.
   stats. A chip with nothing to show is left out. Git, PR and Docker state
   refresh after each command, when a pane takes focus, and in every pane of
   every tab as soon as the chip list changes (Edit prompt or config.toml).
-  While a Rift window is in use, its active tab's panes are also asked again
-  every 3 s for git status and every 10 s for Docker Compose state, so files
+  While a Rift window is in use, its active tab's panes (every tab's, and
+  also while the window is not in use, when a phone is connected) are also
+  asked again every 3 s for git status and every 10 s for Docker Compose state, so files
   an agent or an editor changes while a pane is busy show without a command
   ending. Each pane reads its own directory's repository; the review panel and
   the top bar's `+added −removed` button follow the focused pane, reload when
@@ -1557,6 +1558,18 @@ runs what was typed meanwhile), and the rest of the window's run stays
 local instead of waiting on it again. A reattach whose shell ended while
 detached starts a fresh one in the service.
 
+**macOS privacy.** macOS holds the app that runs a shell responsible for what
+the shell touches, so with the service as Rift Helper.app, "Operation not
+permitted" in `~/Downloads` or `~/Documents` needs Full Disk Access for *Rift
+Helper* (granting only *Rift* helps the window, not the shells). Settings ›
+Permissions lists the switches with their live status and a button into the
+right System Settings pane: Full Disk Access per app that runs shells (the
+helper's status is read inside the service, over its socket; a service older
+than this Rift reads `Unknown · restart Rift`; while it is off, `Show in Finder`
+reveals Rift Helper.app to drag into the list) and Notifications. The page
+exists on macOS only. Releases are signed with one fixed identity, so a grant
+survives updates.
+
 **Quitting** ends every tab. ⌘Q, Quit Rift in the menu or the palette, or
 closing the last window ends every shell, and the session file keeps only the
 window's frame, so the next launch starts fresh with one tab where the window
@@ -1930,7 +1943,14 @@ on the desktop (also for shells a phone started while no window is open).
   `run` of its name in the new pane, once its shell shows a prompt (the
   computer answers `busy` until then; the phone tries again for a few seconds);
   *Ask before running* and Face ID apply as to any run. View-only phones get
-  neither button.
+  neither button. In the Tabs sheet (whole list, no filter) a long press lifts
+  a tab and dragging it over the others reorders the desktop window's tabs
+  (the tab bar follows, ⌃⇧← / ⌃⇧→ order; a pinned tab stays among the pinned
+  and a grouped one in its group, other windows' places are refused); the
+  Panes sheet does the same for a tab's panes, each pane exchanging its place
+  in the split layout with the ones it passes. Screen readers get *Move up* /
+  *Move down* on each row. A desktop without the `move` feature, and
+  view-only phones, show no drag.
 - **Phone-first app.** *Portals* is the home page (no tab bar); its gear
   opens *Settings* and its **+** pairs a computer. *Portals* lists each
   computer in a card (connection line, *New tab*, *Try again* or *Pair again*;

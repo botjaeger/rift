@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { reduceScreen, type ScreenState } from "../src/protocol/store";
 import { decodeServer, type ScreenMsg, type ScreenRun } from "../src/protocol/types";
-import { textRoom, charWidth, cursorScrollY, fitArea, fitFont, lastTextRow, isWide, mix, rowPieces, rowSegments, screenDefaults, segmentColors } from "../src/terminal";
+import { textRoom, charWidth, atEnd, cursorScrollY, fitArea, fitFont, lastTextRow, isWide, mix, rowPieces, rowSegments, screenDefaults, segmentColors } from "../src/terminal";
 import { colors, contrast } from "../src/ui/palette";
 
 const fixture = (name: string) =>
@@ -373,5 +373,19 @@ describe("cursorScrollY", () => {
 describe("a run's text room", () => {
   it("leaves room for a font 8% wider than its cells, on any length", () => {
     for (const w of [10, 100, 400]) expect(textRoom(w)).toBeGreaterThanOrEqual(w * 1.08);
+  });
+});
+
+describe("atEnd", () => {
+  it("is true at the end and within the slop", () => {
+    expect(atEnd(500, 1000, 500, 48)).toBe(true);
+    expect(atEnd(460, 1000, 500, 48)).toBe(true);
+  });
+  it("is false once scrolled up", () => {
+    expect(atEnd(300, 1000, 500, 48)).toBe(false);
+  });
+  it("reads a view shrunk by the keyboard as scrolled up: judge it on a gesture's end, not on the shrink's scroll event", () => {
+    expect(atEnd(500, 1000, 500, 48)).toBe(true);
+    expect(atEnd(500, 1000, 220, 48)).toBe(false);
   });
 });

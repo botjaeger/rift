@@ -23,7 +23,7 @@ mod uplink;
 
 pub use server::{Config, Gateway, serve};
 
-use protocol::{Block, CloseKind, OpenKind, Window};
+use protocol::{Block, CloseKind, MoveKind, OpenKind, Window};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -980,6 +980,21 @@ pub trait Source: Send + Sync + 'static {
         let _ = (pane, device, kind);
         Err(InputError::Unavailable(
             "this computer cannot close shells".into(),
+        ))
+    }
+    /// Move the tab holding `pane`, or `pane` itself, to position `to` among
+    /// its siblings, for the device named `device` (feature `move`).
+    /// Defaults to `Unavailable`.
+    fn move_to(
+        &self,
+        pane: u64,
+        device: &str,
+        kind: MoveKind,
+        to: usize,
+    ) -> Result<(), InputError> {
+        let _ = (pane, device, kind, to);
+        Err(InputError::Unavailable(
+            "this computer cannot reorder tabs".into(),
         ))
     }
     /// Whether [`start`] may be used: the welcome then lists `start`.

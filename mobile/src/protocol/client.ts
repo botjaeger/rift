@@ -29,6 +29,7 @@ import {
   type GatewayHello,
   type OlderMsg,
   type CloseKind,
+  type MoveKind,
   type OpenKind,
   type OutputMsg,
   type ChipAnswerMsg,
@@ -816,6 +817,13 @@ export class RiftClient {
     if (!this.authed) return null;
     const id = `n${++this.idN}`;
     return this.send({ t: "close", id, pane, kind }) ? id : null;
+  }
+
+  /** Moves a pane's tab, or the pane, to position `to` (feature `move`); returns the `ack` id, or null when not connected. */
+  moveShell(pane: number, kind: MoveKind, to: number): string | null {
+    if (!this.authed) return null;
+    const id = `n${++this.idN}`;
+    return this.send({ t: "move", id, pane, kind, to }) ? id : null;
   }
 
   /**

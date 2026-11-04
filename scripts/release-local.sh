@@ -45,7 +45,8 @@ for pair in aarch64-apple-darwin:arm64 x86_64-apple-darwin:x86_64; do
     target="${pair%%:*}" arch="${pair##*:}"
     rustup target add "$target" >/dev/null
     rm -f target/*.dmg target/*.tar.gz
-    packaging/make-app.sh --target "$target"
+    # one fixed identity: macOS keeps users' privacy grants across updates
+    packaging/make-app.sh --target "$target" --sign "${RIFT_SIGN_IDENTITY:-Rift Signing}"
     packaging/make-dmg.sh --arch "$arch"
     packaging/make-tarball.sh --target "$target" --no-build
     mkdir -p "$DIST/macos-$arch"

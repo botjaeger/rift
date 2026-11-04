@@ -562,6 +562,7 @@ impl App {
             | R::RemoteUpload { pane, .. }
             | R::RemoteOpen { pane, .. }
             | R::RemoteClose { pane, .. }
+            | R::RemoteMove { pane, .. }
             | R::RemoteFit { pane, .. }
             | R::RemoteResetElapsed { pane, .. }
             | R::Focus {

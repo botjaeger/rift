@@ -94,6 +94,23 @@ fn bundled_helper(program: &Path) -> Option<PathBuf> {
     bundled_helper_in(program, isolated)
 }
 
+/// The helpers start as `Rift Helper.app` (so macOS holds that app, not
+/// Rift, responsible for the shells they run): false for an isolated run, a
+/// run outside the bundle, a bundle without the helper and off macOS.
+pub fn runs_as_helper_app() -> bool {
+    helper_app().is_some()
+}
+
+/// `Rift Helper.app` of this run's bundle, when the helpers start as it
+/// (Settings › Permissions shows it in Finder, to drag into a privacy list).
+pub fn helper_app() -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "macos")]
+    if let Ok(exe) = std::env::current_exe() {
+        return bundled_helper(&exe);
+    }
+    None
+}
+
 #[cfg(any(target_os = "macos", test))]
 fn bundled_helper_in(program: &Path, isolated: bool) -> Option<PathBuf> {
     if isolated {

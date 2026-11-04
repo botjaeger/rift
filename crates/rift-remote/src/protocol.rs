@@ -199,6 +199,16 @@ pub enum ClientMsg {
         pane: u64,
         kind: CloseKind,
     },
+    /// Move the tab holding `pane` (`kind` `tab`) to position `to` among its
+    /// window's tabs, or `pane` itself (`kind` `pane`) to position `to`
+    /// among its tab's panes, positions counted from 0 as `topology` lists
+    /// them (feature `move`). Answered with `ack`.
+    Move {
+        id: String,
+        pane: u64,
+        kind: MoveKind,
+        to: usize,
+    },
     /// What the pane's `kind` chip opens (feature `prompt_chips`): `pr`,
     /// `python`, `php`, `docker` or `elapsed` (the other menus have their own
     /// requests). Answered with `chip`.
@@ -286,6 +296,16 @@ pub enum CloseKind {
     Pane,
     /// The whole tab containing the pane.
     Tab,
+}
+
+/// What `move` moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MoveKind {
+    /// The tab containing the pane, within its window.
+    Tab,
+    /// The pane, within its tab.
+    Pane,
 }
 
 /// One completion of `complete`: the whole resulting command line.
@@ -965,7 +985,7 @@ mod tests {
     #[test]
     fn every_client_fixture_round_trips() {
         let all = fixtures("client");
-        assert_eq!(all.len(), 38, "client fixtures");
+        assert_eq!(all.len(), 40, "client fixtures");
         for (name, value) in all {
             let msg: ClientMsg =
                 serde_json::from_value(value.clone()).unwrap_or_else(|e| panic!("{name}: {e}"));

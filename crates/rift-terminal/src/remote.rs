@@ -14,7 +14,7 @@
 
 use crate::control::{self, Request, Response};
 use rift_remote::protocol::ClosingReason;
-use rift_remote::protocol::{CloseKind, OpenKind, Pane, Tab, Window};
+use rift_remote::protocol::{CloseKind, MoveKind, OpenKind, Pane, Tab, Window};
 use rift_remote::registry::{self, Permission};
 use rift_remote::{
     CompletePage, DiffPage, Input, InputError, Menu, MenuKind, OutputError, OutputPage, Page,
@@ -509,6 +509,28 @@ impl Source for ControlSource {
                 "the window did not name the new pane".into(),
             )),
         }
+    }
+
+    fn move_to(
+        &self,
+        pane: u64,
+        device: &str,
+        kind: MoveKind,
+        to: usize,
+    ) -> Result<(), InputError> {
+        if is_background(pane) {
+            // background shells are one pane in one tab each: nothing to order
+            return Err(InputError::Unavailable(
+                "background shells cannot be reordered".into(),
+            ));
+        }
+        let req = Request::RemoteMove {
+            pane: local_pane(pane),
+            device: device.to_string(),
+            kind,
+            to,
+        };
+        self.act(pane, &req).map(|_| ())
     }
 
     fn close(&self, pane: u64, device: &str, kind: CloseKind) -> Result<(), InputError> {

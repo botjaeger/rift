@@ -52,7 +52,8 @@ export interface DoneFacts {
   command: string;
   /** The command's exit status (null: the shell reported none). */
   exit: number | null;
-  durationMs: number;
+  /** How long it ran (null: unknown, it finished while this device was away). */
+  durationMs: number | null;
   /** The command's last output line, when known. */
   lastLine?: string | null;
   /** Settings › "Show the command". Off hides the command and the output line. */
@@ -73,10 +74,11 @@ export interface NotificationParts {
  */
 export function doneText(f: DoneFacts): NotificationParts {
   const failed = f.exit !== null && f.exit !== 0;
-  const took = durationText(f.durationMs);
+  const took = f.durationMs === null ? null : durationText(f.durationMs);
+  const how = failed ? (took ? `Failed after ${took}` : "Failed") : took ? `Finished in ${took}` : "Finished";
   const out: NotificationParts = {
     title: `${exitMark(f.exit)} · ${titleCommand(f.command, f.showCommand)}`,
-    subtitle: [failed ? `Failed after ${took}` : `Finished in ${took}`, f.host, f.tab].filter(Boolean).join(" · "),
+    subtitle: [how, f.host, f.tab].filter(Boolean).join(" · "),
   };
   const line = f.showCommand && f.lastLine ? oneLine(f.lastLine, MAX_BODY_LINE) : "";
   if (line) out.body = line;

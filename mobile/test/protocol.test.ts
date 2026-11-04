@@ -78,6 +78,7 @@ describe("client fixtures", () => {
       "forget",
       "keys",
       "mouse",
+      "move",
       "notify",
       "older",
       "open",
@@ -96,7 +97,7 @@ describe("client fixtures", () => {
       "upload",
       "visible",
     ]);
-    expect(client).toHaveLength(38);
+    expect(client).toHaveLength(40);
   });
 
   it.each(client.map((f) => [f.name, f.json] as const))("%s is a ClientMsg", (_name, json) => {

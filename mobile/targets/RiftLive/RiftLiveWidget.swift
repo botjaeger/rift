@@ -35,10 +35,18 @@ private struct Clock: View {
   let attributes: RiftLiveAttributes
   let state: RiftLiveAttributes.ContentState
   var size: CGFloat = 20
+  /// No update for its stale hour: the app is closed or suspended, so the result cannot come in
+  /// until it is opened. A clock ticking on would say the command still runs.
+  var stale = false
 
   var body: some View {
     if state.finishedAt != nil {
       Badge(exit: state.exit, size: size)
+    } else if stale {
+      Text("Open Rift")
+        .font(.system(size: size * 0.7, weight: .medium))
+        .foregroundColor(muted)
+        .lineLimit(1)
     } else {
       Text(timerInterval: attributes.startedAt...Date.distantFuture, countsDown: false)
         .font(.system(size: size, design: .monospaced))
@@ -69,6 +77,11 @@ private struct Badge: View {
 /// "Finished in 113ms" / "Failed after 8.4s" (nil while it runs or when it has no end).
 private func resultText(_ attributes: RiftLiveAttributes, _ state: RiftLiveAttributes.ContentState) -> String? {
   guard let end = state.finishedAt else { return nil }
+  // finished while the phone was away: how long it took is not known
+  if state.timed == false {
+    guard let exit = state.exit else { return "Stopped" }
+    return exit == 0 ? "Finished" : "Failed"
+  }
   let took = durationText(end.timeIntervalSince(attributes.startedAt))
   guard let exit = state.exit else { return "Stopped after \(took)" }
   return exit == 0 ? "Finished in \(took)" : "Failed after \(took)"
@@ -101,6 +114,7 @@ private struct Mark: View {
 private struct LockScreen: View {
   let attributes: RiftLiveAttributes
   let state: RiftLiveAttributes.ContentState
+  var stale = false
 
   var body: some View {
     let result = resultText(attributes, state)
@@ -119,7 +133,7 @@ private struct LockScreen: View {
             .lineLimit(1)
         }
         Spacer(minLength: 8)
-        Clock(attributes: attributes, state: state)
+        Clock(attributes: attributes, state: state, stale: stale)
       }
       if let result {
         Text(result)
@@ -140,35 +154,54 @@ private struct LockScreen: View {
   }
 }
 
+/// The pane's screen in the app (nil: an activity started before links, which opens the app).
+private func paneURL(_ attributes: RiftLiveAttributes) -> URL? {
+  attributes.link.flatMap { URL(string: $0) }
+}
+
 struct RiftLiveActivity: Widget {
   var body: some WidgetConfiguration {
     ActivityConfiguration(for: RiftLiveAttributes.self) { context in
-      LockScreen(attributes: context.attributes, state: context.state)
+      LockScreen(attributes: context.attributes, state: context.state, stale: context.isStale)
         .activityBackgroundTint(ground.opacity(0.95))
         .activitySystemActionForegroundColor(bright)
+        // a tap opens the pane it is about (where its bell turns the wait off)
+        .widgetURL(paneURL(context.attributes))
     } dynamicIsland: { context in
       DynamicIsland {
         DynamicIslandExpandedRegion(.leading) { Mark(size: 28, radius: 7) }
-        DynamicIslandExpandedRegion(.trailing) { Clock(attributes: context.attributes, state: context.state, size: 18) }
+        DynamicIslandExpandedRegion(.trailing) {
+          Clock(attributes: context.attributes, state: context.state, size: 18, stale: context.isStale)
+        }
         DynamicIslandExpandedRegion(.center) {
-          Text(context.attributes.command)
-            .font(.system(size: 14, design: .monospaced))
-            .foregroundColor(bright)
-            .lineLimit(1)
+          VStack(spacing: 2) {
+            Text(context.attributes.command)
+              .font(.system(size: 14, design: .monospaced))
+              .foregroundColor(bright)
+              .lineLimit(1)
+            // which computer, tab and pane it runs in
+            Text(context.attributes.place)
+              .font(.system(size: 12))
+              .foregroundColor(muted)
+              .lineLimit(1)
+          }
         }
         DynamicIslandExpandedRegion(.bottom) {
-          Text(resultText(context.attributes, context.state) ?? (context.state.line.isEmpty ? context.attributes.place : context.state.line))
-            .font(.system(size: 12, design: .monospaced))
-            .foregroundColor(muted)
-            .lineLimit(1)
+          if let text = resultText(context.attributes, context.state) ?? (context.state.line.isEmpty ? nil : context.state.line) {
+            Text(text)
+              .font(.system(size: 12, design: .monospaced))
+              .foregroundColor(muted)
+              .lineLimit(1)
+          }
         }
       } compactLeading: {
         Mark(size: 20, radius: 5)
       } compactTrailing: {
-        Clock(attributes: context.attributes, state: context.state, size: 13)
+        Clock(attributes: context.attributes, state: context.state, size: 13, stale: context.isStale)
       } minimal: {
         Mark(size: 20, radius: 5)
       }
+      .widgetURL(paneURL(context.attributes))
     }
   }
 }

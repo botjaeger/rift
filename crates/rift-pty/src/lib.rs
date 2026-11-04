@@ -3,6 +3,7 @@ pub mod daemon;
 pub mod graphics;
 pub mod ipc;
 pub mod launchd;
+pub mod privacy;
 pub mod service;
 pub mod session;
 

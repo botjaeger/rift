@@ -2,7 +2,7 @@ import { useLocalSearchParams, useRouter } from "expo-router";
 import { useEffect, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { canClose, canOperate } from "@/fleet";
+import { canClose, canMove, canOperate } from "@/fleet";
 import { CLAUDE_COLOR, panesText, paneRows, type StateTone } from "@/paneView";
 import { useApp, useLock } from "@/runtime";
 import { findPane, tabTitle } from "@/topology";
@@ -10,8 +10,13 @@ import { Icon } from "@/ui/Icon";
 import { canNewPane } from "@/ui/newTab";
 import { ErrorText } from "@/ui/Notice";
 import { colors, mono, monoMedium, tints, ui } from "@/ui/theme";
+import { ReorderRow, useReorder } from "@/ui/ReorderRow";
 import { useClose } from "@/ui/useClose";
+import { useMove } from "@/ui/useMove";
 import { useToast } from "@/ui/useToast";
+
+/** A row's height (`styles.row`): rows sit edge to edge. */
+const ROW_H = 56;
 
 /** The state's text colour on the list (the current row's accent tint included). */
 const TONE: Record<StateTone, string> = {
@@ -46,6 +51,15 @@ export default function PanesScreen() {
   const { say, toast } = useToast();
   const closePane = useClose(key, paneId, setError, say, true);
   const closeable = canClose(host);
+  // a long press lifts a row and drags it to another place; Move up / Move down do the same for a screen reader
+  const reorder = useReorder();
+  const move = useMove(key, setError, say);
+  const movable = canMove(host) && rows.length > 1;
+  const onMove = (from: number, to: number) => {
+    const r = rows[from];
+    if (r) move(r.id, "pane", to, r.name, to, rows.length);
+  };
+  const noMove = () => {};
 
   // another pane takes this one's place: Back still leads where it led
   const pick = (id: number) => {
@@ -62,6 +76,7 @@ export default function PanesScreen() {
     // content, so one nested under the title was drawn over it.
     <ScrollView
       style={[styles.fill, hidden && styles.hidden]}
+      scrollEnabled={reorder.scrollEnabled}
       contentContainerStyle={[styles.content, { paddingBottom: Math.max(30, insets.bottom + 2) }]}
       accessibilityElementsHidden={hidden}
       importantForAccessibility={hidden ? "no-hide-descendants" : "auto"}
@@ -79,12 +94,15 @@ export default function PanesScreen() {
           {rows.map((r, i) => {
             const on = r.id === paneId;
             return (
-              <View key={r.id} style={[styles.row, i < rows.length - 1 && styles.rule, on && styles.rowOn]}>
+              <ReorderRow key={r.id} index={i} count={rows.length} rowH={ROW_H} drag={reorder.drag} setDrag={reorder.setDrag} onMove={movable ? onMove : noMove}>
+              {(handle) => (
+              <View style={[styles.row, i < rows.length - 1 && styles.rule, on && styles.rowOn]}>
               <Pressable
                 accessibilityRole="button"
                 accessibilityState={{ selected: on }}
                 accessibilityLabel={`Pane ${r.number} of ${rows.length}: ${r.name}, ${r.state}${r.line ? `. ${r.line}` : ""}`}
                 onPress={() => pick(r.id)}
+                {...(movable ? handle : null)}
                 style={({ pressed }) => [styles.rowPress, pressed && styles.pressed]}
               >
                 <View style={[styles.tile, { backgroundColor: r.claude ? `${CLAUDE_COLOR}1f` : tints.accentBadge }]}>
@@ -112,6 +130,8 @@ export default function PanesScreen() {
                 </Pressable>
               ) : null}
               </View>
+              )}
+              </ReorderRow>
             );
           })}
         </View>

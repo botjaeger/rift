@@ -128,8 +128,8 @@ card cannot answer (a password, other input, a view-only device), and from an al
   then "End-to-end encrypted. The relay passes bytes it cannot read." and, when the computer cannot
   be reached, **Try again now**. The client records each path's state in `ConnState.paths`
   (`src/protocol/client.ts`); the wording is `src/ui/connStatus.ts` (tested in node).
-- **Tabs** (a sheet, from the pane's header title): every tab of that computer, needs you first,
-  then failed, working, idle. Chips filter: All, Needs you, Working, Failed, each with its count.
+- **Tabs** (a sheet, from the pane's header title): every tab of that computer, in the computer's
+  tab order. Chips filter: All, Needs you, Working, Failed, each with its count.
   A row: tile, title (**Here** on the open tab), the last line, a state pill ("Needs you", "✕ 2
   failed", "Working 3:56", "Idle 12m") and the pane count. A tap goes to that tab's pane in place of
   this one (Back still leads where it led). **New tab** at the foot opens the **New tab** sheet.
@@ -164,7 +164,11 @@ card cannot answer (a password, other input, a view-only device), and from an al
   with "studio-mac · tab 2 of 5" and a chevron, which opens the Tabs sheet; **Search output**
   (filters the blocks by command or output, "N of M"; not under a full-screen view); and **⋯**.
   Under it the pane picker: the pane's mark, name and "· 1/2", a dot and count for the tab's
-  other panes that need you, which opens the Panes sheet. There is no view switch: the pane shows
+  other panes that need you, which opens the Panes sheet. In the Tabs sheet (all tabs shown) and the
+  Panes sheet, a long press lifts a row and dragging reorders it on the desktop (`move`, offered
+  when the computer serves the `move` feature and the device may operate; the Tabs sheet takes the
+  place of the tab dropped on; screen readers get Move up / Move down actions; `src/ui/ReorderRow.tsx`,
+  maths in `src/reorder.ts`). There is no view switch: the pane shows
   a TUI (its screen) or blocks by one rule, see Full-screen programs. A sideways swipe across the blocks (or the picker's Next pane /
   Previous pane screen-reader actions) also moves to the tab's next or previous pane. **⋯** holds
   two switches: **Wrap long lines** for this pane (Settings › Panes › Wrap long lines sets the
@@ -457,15 +461,22 @@ before Phase 3 move over (`src/stores.ts`).
 - **Live Activity** (iOS 16.2+): each "Notify me" wait (a command run from this phone with Settings ›
   Notifications › My commands on, or Notify when done on the running card) shows the command, where
   it runs, a clock the system ticks by itself (`Text(timerInterval:)`) and its latest line on the
-  lock screen and in the Dynamic Island; its `done` turns it into ✓ or ✕ N, which stays 15
-  minutes. The widget extension `RiftLive` (`targets/RiftLive`, added by
+  lock screen and in the Dynamic Island (where = computer · tab, with the pane's number when the
+  tab has several); its `done` turns it into ✓ or ✕ N, which stays 15 minutes. A tap opens that
+  pane (`rift://host/<key>/pane/<id>`), where the running card's bell drops the wait; swiping it
+  off the lock screen dismisses it. One whose `done` came while the phone was disconnected (it is
+  not replayed) ends at the first topology after the reconnect that shows the pane, seen running
+  before, back at its prompt: ✓ or ✕ N from the pane's last command when that is the one asked,
+  with a "Finished" / "Failed" notification unless the computer already alerted through push. Not
+  updated for an hour (the app refreshes it every 20 minutes while it runs), it shows "Open Rift"
+  instead of the clock. The widget extension `RiftLive` (`targets/RiftLive`, added by
   `plugins/withLiveActivity.js`) needs no entitlement, so a free Apple ID signs it like the app;
   the app drives it through `modules/rift-live` (`src/live.ts` plans it).
 - **The APNs limit**: without Apple's developer program (`RIFT_NO_APNS=1`) there is no APNs, so
   nothing reaches the phone while the app is suspended except through ntfy: no Needs you alert
   (the computers' push and ntfy alerts are about finished commands only), and a Live Activity
-  keeps ticking but shows its last line and is not ended by a `done` that comes while the app
-  is suspended (iOS ends it after 8 hours; opening the app ends it at once). With an APNs key the
+  is not ended by a `done` that comes while the app is suspended: it shows "Open Rift" after an
+  hour, iOS ends it after 8 hours, and opening the app ends it once the computer answers. With an APNs key the
   same would need ActivityKit push tokens sent to the computer and a Needs you push from it.
 
 ## Push (alerts while the app is closed)

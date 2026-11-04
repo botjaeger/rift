@@ -3,7 +3,10 @@
 // running card's Notify when done), ended by its `done`. Pure; runtime.ts applies the plan.
 
 import type { ActivityItem, AskedView, HostView } from "./fleet";
-import { findPane, tabTitle } from "./topology";
+import { findPane, paneTitle, tabTitle } from "./topology";
+
+/** The pane's screen in the app (the deep link a notification tap opens; push.rs `pane_link`). */
+export const paneLink = (host: string, pane: number) => `rift://host/${encodeURIComponent(host)}/pane/${pane}`;
 
 /**
  * An activity shown now: the wait it shows, its id (null while the start is in flight), the line
@@ -14,13 +17,14 @@ export interface LiveShown {
   wait: AskedView;
   id: string | null;
   line: string;
-  ended?: { exit: number | null };
+  ended?: { exit: number | null; timed: boolean };
 }
 
 export interface LivePlan {
-  start: { key: string; wait: AskedView; command: string; place: string; startedAt: number; line: string }[];
+  start: { key: string; wait: AskedView; command: string; place: string; link: string; startedAt: number; line: string }[];
   update: { key: string; id: string; line: string }[];
-  end: { key: string; id: string | null; exit: number | null; line: string }[];
+  /** `timed`: it ends now (its `done` came); false when the time it ended is not known (no `done`). */
+  end: { key: string; id: string | null; exit: number | null; line: string; timed: boolean }[];
 }
 
 export const liveKey = (a: AskedView) => `${a.host}\n${a.pane}\n${a.command}\n${a.at}`;
@@ -52,7 +56,11 @@ export function livePlan(
         key,
         wait: a,
         command: a.command,
-        place: [h?.record.name, loc ? tabTitle(loc.tab) : null].filter(Boolean).join(" · "),
+        // the pane's number too when its tab has more than one
+        place: [h?.record.name, loc ? (loc.tab.panes.length > 1 ? paneTitle(loc) : tabTitle(loc.tab)) : null]
+          .filter(Boolean)
+          .join(" · "),
+        link: paneLink(a.host, a.pane),
         startedAt: started != null ? started * 1000 : a.at,
         line,
       });
@@ -62,7 +70,10 @@ export function livePlan(
     if (live.has(key)) continue;
     const { host, pane, command } = cur.wait;
     const done = finished.find((f) => f.host === host && f.pane === pane && f.command === command);
-    plan.end.push({ key, id: cur.id, exit: done ? done.exit : null, line: cur.line });
+    // one that finished while this device was away has no `done`: the pane's last command tells
+    const last = findPane(hosts.find((x) => x.record.key === host)?.windows ?? [], pane)?.pane;
+    const exit = done ? done.exit : last && !last.running && last.last_command === command ? last.last_exit : null;
+    plan.end.push({ key, id: cur.id, exit, line: cur.line, timed: done !== undefined });
   }
   return plan;
 }

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { questionKey } from "../src/answer";
 import { toBase64Url } from "../src/noise/bytes";
-import { ACK_TIMEOUT_MS, ASKED_TTL_MS, Fleet, describeCode, MAX_ACTIVITY, canClose, canOperate, hasFeature, isAsked, ntfyUnsupported, wrapsLines, type Notifier } from "../src/fleet";
+import { ACK_TIMEOUT_MS, ASKED_TTL_MS, Fleet, describeCode, MAX_ACTIVITY, canClose, canMove, canOperate, hasFeature, isAsked, ntfyUnsupported, wrapsLines, type Notifier } from "../src/fleet";
 import { routingId } from "../src/protocol/relay";
 import { LONG_COMMAND_MS } from "../src/notify";
 import { parsePairLink, type PairLink } from "../src/pairing";
@@ -55,7 +55,7 @@ function setup(opts: { gateway?: typeof GW; gatewayFor?: (url: string) => typeof
   const kv = new MemoryStore();
   let now = 1_000_000;
   const sockets: FakeGatewaySocket[] = [];
-  const notified: { title: string; body: string; data: unknown }[] = [];
+  const notified: { title: string; subtitle?: string; body: string; data: unknown }[] = [];
   const dismissed: { host: string; pane: number; ask: string }[] = [];
   let permissionAsks = 0;
   let grant = true;
@@ -334,6 +334,33 @@ describe("Fleet operate", () => {
     const v = await withHost("view");
     v.last().recv(welcome("view", ["close"]));
     expect(canClose(v.fleet.state.hosts[0])).toBe(false);
+  });
+
+  it("move reorders a tab or a pane; offered and sent only by a gateway with `move` that this device may operate", async () => {
+    const t = await withHost();
+    expect(canMove(t.fleet.state.hosts[0])).toBe(false);
+    const before = t.last().sent.length;
+    const old = await t.fleet.moveShell(GW_KEY, 12, "tab", 0);
+    expect(old).toMatchObject({ ok: false, code: "unsupported" });
+    expect(t.last().sent.length).toBe(before);
+    t.last().recv(welcome("operate", ["move"]));
+    expect(canMove(t.fleet.state.hosts[0])).toBe(true);
+    expect(canMove(undefined)).toBe(false);
+    const p = t.fleet.moveShell(GW_KEY, 12, "pane", 1);
+    const sent = t.last().sent.at(-1) as { id: string };
+    expect(sent).toEqual({ t: "move", id: sent.id, pane: 12, kind: "pane", to: 1 });
+    t.last().recv({ t: "ack", id: sent.id, ok: true });
+    expect(await p).toEqual({ ok: true });
+    // the desktop's refusal is worded for the user
+    const q = t.fleet.moveShell(GW_KEY, 12, "tab", 3);
+    const id = (t.last().sent.at(-1) as { id: string }).id;
+    t.last().recv({ t: "ack", id, ok: false, error: "busy", message: "a pinned or grouped tab stays in its own zone" });
+    const r = await q;
+    expect(r.ok ? "" : r.message).toBe("studio-mac could not move it. Try again.");
+    // a view-only device is not offered it even when the gateway serves it
+    const v = await withHost("view");
+    v.last().recv(welcome("view", ["move"]));
+    expect(canMove(v.fleet.state.hosts[0])).toBe(false);
   });
 
   it("a view device scrolls (the gateway decides what reaches a program) but never uploads", async () => {
@@ -913,6 +940,41 @@ describe("Fleet audit fixes", () => {
     reconnect(t);
     t.last().recv(topology(2, [12]));
     expect(t.fleet.hasPendingNotify).toBe(false);
+  });
+
+  it("a 'Notify me' whose command finished while disconnected ends at the next topology and tells", async () => {
+    const t = await withHost();
+    await t.fleet.updateSettings({ showCommandInNotification: true });
+    const p = t.fleet.run(GW_KEY, 12, "make", { notify: true });
+    t.last().recv({ t: "ack", id: (t.last().sent.at(-1) as { id: string }).id, ok: true });
+    await p;
+    const at = (pane: Record<string, unknown>) => {
+      const m = topology(1);
+      Object.assign(m.windows[0]!.tabs[0]!.panes[0]!, pane);
+      return m;
+    };
+    // still running after a reconnect: kept
+    t.last().recv(at({ job: "make", running: { started: 1, line: "cc a.c" } }));
+    reconnect(t);
+    t.last().recv(at({ job: "make", running: { started: 1, line: "cc b.c" } }));
+    expect(t.fleet.hasPendingNotify).toBe(true);
+    // its `done` went out while this device was away: at its prompt now
+    reconnect(t);
+    t.last().recv(at({ last_command: "make", last_exit: 2 }));
+    await Promise.resolve();
+    expect(t.fleet.hasPendingNotify).toBe(false);
+    expect(t.notified.map((n) => [n.title, n.subtitle])).toEqual([["✕ 2 · make", "Failed · studio-mac · rift"]]);
+  });
+
+  it("a 'Notify me' never seen running is not ended by a topology at the prompt", async () => {
+    const t = await withHost();
+    const p = t.fleet.run(GW_KEY, 12, "make", { notify: true });
+    t.last().recv({ t: "ack", id: (t.last().sent.at(-1) as { id: string }).id, ok: true });
+    await p;
+    reconnect(t);
+    t.last().recv(topology(1));
+    expect(t.fleet.hasPendingNotify).toBe(true);
+    expect(t.notified).toEqual([]);
   });
 
   it("Retry after an unreadable keychain loads and connects", async () => {

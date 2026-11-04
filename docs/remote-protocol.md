@@ -92,7 +92,7 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 
 ## Devices and permissions
 
-- `operate`: everything below. `view`: no `run`, `keys`, `text`, `paste`, `mouse`, `fit`, `open`, `close`, `start`,
+- `operate`: everything below. `view`: no `run`, `keys`, `text`, `paste`, `mouse`, `fit`, `open`, `close`, `move`, `start`,
   `upload` or
   `complete` (its history can hold secrets typed on a command line, and
   path completion lists any folder), and no `diff` of an untracked file
@@ -163,6 +163,8 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 {"t":"open","id":"n1","pane":12,"kind":"tab"}
 {"t":"close","id":"c1","pane":12,"kind":"pane"}
 {"t":"close","id":"c2","pane":12,"kind":"tab"}
+{"t":"move","id":"v1","pane":12,"kind":"tab","to":0}
+{"t":"move","id":"v2","pane":14,"kind":"pane","to":1}
 {"t":"chip","id":"m5","pane":12,"kind":"docker"}
 {"t":"reset_elapsed","id":"r7","pane":12}
 {"t":"scroll","id":"s1","pane":12,"lines":3}
@@ -247,6 +249,16 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 - `chip` (feature `prompt_chips`) asks what a pull request, interpreter, Docker
   or Time on tab chip opens: `kind` is `pr`, `python`, `php`, `docker` or
   `elapsed` (§ Prompt chip menus); answered with `chip`.
+- `move` (feature `move`; `{"t":"move","id":"v1","pane":12,"kind":"tab","to":0}`) reorders: `kind`
+  `tab` moves the tab holding `pane` to position `to`, counted over the tabs of the pane's
+  desktop process as `topology` lists them (a tab's `index`); `kind` `pane` moves `pane` to
+  position `to` among its tab's panes (0-based, as listed), exchanging its place in the split
+  layout with each pane it passes. The desktop keeps the active tab and pane, and refuses
+  (`ack` `busy`) a position outside the pane's own window or tab, or across the pinned / group
+  zone of a tab (as its own tab drag). Every connection gets the new `topology` before the plain
+  `ack`; `no_pane` for an unknown pane; `view` devices and a desktop with `remote_access` off answer
+  `forbidden`. A background shell cannot be moved. Limit: 4 per second per connection, apart from
+  `open` / `close`.
 - `reset_elapsed` (feature `prompt_chips`) restarts the clock of the tab
   holding `pane`, as the Time on tab card's Reset does on the desktop. Answered
   with `ack`; `view` devices and a desktop with `remote_access` off answer
@@ -358,7 +370,7 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 ## Gateway → client
 
 ```json
-{"t":"welcome","v":2,"host":"studio-mac","os":"macos","version":"0.1.0","device":"d3f1","permission":"operate","features":["screen","text","output","push_failures","push_ntfy","git","notify_off","chips","waiting","complete","running","open","close","fit","prompt_chips","closing","scroll","upload","upload_files","paste","mouse","clipboard"]}
+{"t":"welcome","v":2,"host":"studio-mac","os":"macos","version":"0.1.0","device":"d3f1","permission":"operate","features":["screen","text","output","push_failures","push_ntfy","git","notify_off","chips","waiting","complete","running","open","close","move","fit","prompt_chips","closing","scroll","upload","upload_files","paste","mouse","clipboard"]}
 {"t":"topology","windows":[{"pid":4242,"tabs":[{"index":0,"title":"rift","active":true,"panes":[{"id":12,"active":true,"cwd":"/Users/me/rift","job":null,"last_command":"cargo test","last_exit":0,"git":{"branch":"main","ahead":1,"behind":0,"dirty":true,"files":3,"added":42,"removed":7}}]}]}]}
 {"t":"snapshot","pane":12,"seq":41,"blocks":[Block],"has_older":true}
 {"t":"update","pane":12,"seq":42,"blocks":[Block],"removed":[80]}
@@ -380,7 +392,9 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 - `welcome` follows the handshake, then `topology`, which is sent again
   whenever it changes. A pane's `id` is the gateway's: the window's pid
   times 2^24 plus the window's own pane id (every window numbers its panes
-  from 1), so it names one pane among all windows. `features` lists what this gateway serves beyond
+  from 1), so it names one pane among all windows. Tabs come in the
+  window's tab-strip order, a tab's panes in its layout order (left to
+  right, top to bottom), not the order they were opened in. `features` lists what this gateway serves beyond
   Phase 2: `screen`, `text`, `output` (§ Phase 3), `push_failures`
   (`push.failures_only`, § Push), `push_ntfy` (`push.ntfy` and `visible`, § Push), `git`
   (a pane's `git` in `topology`, below), `notify_off` (`notify` with
@@ -389,7 +403,7 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
   `complete` (§ Phase 3), `running` (a pane's `running` in
   `topology`, below), `fit` (§ Phase 3), `prompt_chips` (a pane's `chips`
   in `topology`, below, and the `chip` and `reset_elapsed` requests, §
-  Prompt chip menus), `open` and `close`, `closing` (below), `scroll` and
+  Prompt chip menus), `open` and `close`, `move` (tab and pane reorder), `closing` (below), `scroll` and
   `upload`, `upload_files`, `paste` and `mouse` (above), `clipboard` (below), and `start` (listed only while
   the computer allows it: macOS, `remote_access`, durable sessions). A
   gateway that leaves
@@ -400,9 +414,11 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
   (any change, untracked files included), and the uncommitted diff against
   HEAD as `files` changed, lines `added` and `removed`. It is absent when
   the pane is not in a repository or the desktop has not looked yet. The
-  desktop refreshes it for the panes of each window's active tab (after a
-  `cd` or a finished command); a pane in another tab keeps the value from
-  when its tab was last active. Without the feature the field never appears
+  desktop refreshes it after a `cd` or a finished command, and every 3 s
+  while a window is in use or a phone is connected: the panes of each
+  window's active tab, and with a phone connected the panes of every tab.
+  Without a phone, a pane in another tab keeps the value from when its tab was
+  last active. Without the feature the field never appears
   and the app shows no git chips.
 - A pane's `chips` (gateways with the `prompt_chips` feature) are the prompt
   chips the desktop draws above that pane's command line, exactly as it

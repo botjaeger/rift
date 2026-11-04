@@ -39,6 +39,7 @@ import {
   type Feature,
   type GatewayHello,
   type CloseKind,
+  type MoveKind,
   type OpenKind,
   type ScreenMode,
   type Waiting,
@@ -84,6 +85,8 @@ interface Asked {
   at: number;
   /** The `notify` reached the computer (a push host): it alerts by itself. */
   sent: boolean;
+  /** A topology showed the pane running a command since it was asked. */
+  seen?: boolean;
 }
 
 export interface Notifier {
@@ -300,6 +303,11 @@ export function describeCode(code: string, hostName: string, fallback: string): 
  */
 export function canOperate(host: HostView): boolean {
   return (host.welcome?.permission ?? host.record.permission) === "operate";
+}
+
+/** Whether the phone offers dragging tabs and panes into another order: it may operate and its Rift serves `move`. */
+export function canMove(host: HostView | undefined): boolean {
+  return !!host && canOperate(host) && hasFeature(host, "move");
 }
 
 /** Whether the phone offers Close pane / Close tab for this computer: it may operate and its Rift serves `close`. */
@@ -538,9 +546,11 @@ export class Fleet {
           const since = this.welcomedAt.get(key);
           // the questions already waiting when it connected are on Now, not news
           this.alertAsks(key, msg.windows, since !== undefined);
+          this.markSeenAsks(key, msg.windows);
           if (since === undefined) return;
           this.welcomedAt.delete(key);
           this.dropUnreachableAsks(key, msg.windows, since);
+          this.finishMissedAsks(key, msg.windows, since);
         },
         onPane: (msg) =>
           this.store.update((s) => {
@@ -751,6 +761,51 @@ export class Fleet {
       return loc !== null && (a.pid === null || loc.window.pid === a.pid);
     };
     if (!this.asked.every(keep)) this.setAsked(this.asked.filter(keep));
+  }
+
+  /** Marks the asks whose pane the topology shows running a command (`seen`). */
+  private markSeenAsks(host: string, windows: Window[]): void {
+    let changed = false;
+    const list = this.asked.map((a) => {
+      if (a.host !== host || a.seen || !findPane(windows, a.pane)?.pane.running) return a;
+      changed = true;
+      return { ...a, seen: true };
+    });
+    if (changed) this.setAsked(list);
+  }
+
+  /**
+   * The first topology after a welcome: an ask made before it whose pane was seen running and now
+   * sits at its prompt finished while this device was away. Its `done` went to nobody (it is not
+   * replayed), so it ends here: told as finished (the exit status from the pane's last command
+   * when that is the one asked), unless the computer alerted through push by itself.
+   */
+  private finishMissedAsks(host: string, windows: Window[], since: number): void {
+    const done = (a: Asked) => {
+      if (a.host !== host || a.at > since || !a.seen) return false;
+      const loc = findPane(windows, a.pane);
+      return loc !== null && !loc.pane.running;
+    };
+    const gone = this.asked.filter(done);
+    if (gone.length === 0) return;
+    this.setAsked(this.asked.filter((a) => !done(a)));
+    const name = this.host(host)?.record.name ?? "your computer";
+    const settings = this.store.peek().settings;
+    const reg = this.pushHosts.get(host);
+    for (const a of gone) {
+      const loc = findPane(windows, a.pane)!;
+      const watching = this.appActive && this.viewing?.host === host && this.viewing.pane === a.pane;
+      if (watching || (reg && a.sent)) continue;
+      const text = doneText({
+        host: name,
+        tab: tabTitle(loc.tab),
+        command: a.command,
+        exit: loc.pane.last_command === a.command ? loc.pane.last_exit : null,
+        durationMs: null,
+        showCommand: settings.showCommandInNotification,
+      });
+      void this.deps.notifier.notify({ ...text, body: text.body ?? "", data: { host, pane: a.pane } }).catch(() => undefined);
+    }
   }
 
   /** Called whenever hasPendingNotify may have changed. */
@@ -1395,6 +1450,20 @@ export class Fleet {
       return { ok: false, code: "unsupported", message: `Rift on ${name} cannot close panes from the phone. Update it.` };
     const r = await (this.operating(host) ?? this.request(host, (c) => c.closeShell(pane, kind)));
     if (!r.ok && r.code === "busy") return { ...r, message: `${name} could not close it. Try again.` };
+    return r;
+  }
+
+  /**
+   * Moves the pane's tab (`kind` tab; `to` is the tab's place in the topology) or the pane (`to` is
+   * its place in its tab) on the computer (feature `move`); the topology update follows before the ack.
+   */
+  async moveShell(host: string, pane: number, kind: MoveKind, to: number): Promise<ActionResult> {
+    const h = this.host(host);
+    const name = h?.record.name ?? "the computer";
+    if (!hasFeature(h, "move"))
+      return { ok: false, code: "unsupported", message: `Rift on ${name} cannot reorder tabs from the phone. Update it.` };
+    const r = await (this.operating(host) ?? this.request(host, (c) => c.moveShell(pane, kind, to)));
+    if (!r.ok && r.code === "busy") return { ...r, message: `${name} could not move it. Try again.` };
     return r;
   }
 

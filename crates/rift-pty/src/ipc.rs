@@ -20,6 +20,8 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_FRAME: usize = 4 << 20;
 /// The service starts a shell with `Request::Spawn::args`.
 pub const FEATURE_ARGS: &str = "args";
+/// The service answers `Request::Privacy`.
+pub const FEATURE_PRIVACY: &str = "privacy";
 pub const FRAME_JSON: u8 = 0;
 pub const FRAME_OUTPUT: u8 = 1;
 pub const FRAME_INPUT: u8 = 2;
@@ -68,6 +70,9 @@ pub enum Request {
         session: u64,
     },
     List,
+    /// Ask what macOS lets the service (the app that runs the shells) do.
+    /// Only sent to a service that lists `privacy` in its hello.
+    Privacy,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -130,6 +135,11 @@ pub enum Event {
     },
     Error {
         message: String,
+    },
+    /// The answer to `Request::Privacy`.
+    Privacy {
+        /// The service has Full Disk Access (`None`: it cannot tell).
+        full_disk: Option<bool>,
     },
 }
 
@@ -392,6 +402,7 @@ mod tests {
 {"type":"clear_history","session":3}
 {"type":"kill","session":3}
 {"type":"list"}
+{"type":"privacy"}
 {"type":"hello","version":1,"pid":8,"features":["args"]}
 {"type":"spawned","session":3}
 {"type":"attached","session":3,"from_seq":10,"truncated":true}
@@ -401,6 +412,7 @@ mod tests {
 {"type":"exited","session":3}
 {"type":"sessions","sessions":[{"id":3,"pid":42,"cwd":"/tmp","job":null,"started":1700000000,"clients":[7],"retained_bytes":512}]}
 {"type":"error","message":"no such session"}
+{"type":"privacy","full_disk":true}
 "#;
 
     #[test]
@@ -431,6 +443,7 @@ mod tests {
             Request::ClearHistory { session: 3 },
             Request::Kill { session: 3 },
             Request::List,
+            Request::Privacy,
         ];
         let events = [
             Event::Hello {
@@ -472,6 +485,9 @@ mod tests {
             },
             Event::Error {
                 message: "no such session".into(),
+            },
+            Event::Privacy {
+                full_disk: Some(true),
             },
         ];
         let mut wire = String::new();

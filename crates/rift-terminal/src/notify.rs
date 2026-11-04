@@ -323,6 +323,18 @@ pub fn open_system_settings() {
     }
 }
 
+/// Open a System Settings link (`what` names the pane in the log); a
+/// suppressed run only logs.
+pub fn open_settings_url(url: &str, what: &str) {
+    if suppressed() {
+        log::info!("notify (suppressed): open System Settings › {what}");
+        return;
+    }
+    if cfg!(target_os = "macos") {
+        spawn("open", &[url]);
+    }
+}
+
 fn bundle_id() -> Option<String> {
     #[cfg(target_os = "macos")]
     {

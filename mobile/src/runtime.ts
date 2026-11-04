@@ -274,6 +274,11 @@ export function startPlatformWatchers(): () => void {
   endLeftoverLive();
   const unsubLive = fleet.store.subscribe(syncLive);
   syncLive();
+  // an activity goes stale an hour after its last update (RiftLiveModule `staleDate`): while
+  // this app runs it keeps them current, so stale means it no longer can (closed or suspended)
+  const liveTimer = setInterval(() => {
+    for (const shown of liveShown.values()) if (shown.id) void liveActivities.update(shown.id, shown.line);
+  }, LIVE_REFRESH_MS);
 
   return () => {
     netSub.remove();
@@ -284,9 +289,13 @@ export function startPlatformWatchers(): () => void {
     unsubLaunch();
     unsubStore();
     unsubLive();
+    clearInterval(liveTimer);
     watching = false;
   };
 }
+
+/** How often the shown Live Activities are refreshed while the app runs (well within their stale hour). */
+const LIVE_REFRESH_MS = 20 * 60_000;
 
 /** The Live Activities shown, by `liveKey` (live.ts). */
 const liveShown = new Map<string, LiveShown>();
@@ -299,10 +308,10 @@ function syncLive(): void {
   for (const st of plan.start) {
     const shown: LiveShown = { wait: st.wait, id: null, line: st.line };
     liveShown.set(st.key, shown);
-    void liveActivities.start(st.command, st.place, st.startedAt, st.line).then((id) => {
+    void liveActivities.start(st.command, st.place, st.link, st.startedAt, st.line).then((id) => {
       shown.id = id;
       // the wait ended while it started: end it now, with how it ended
-      if (id && shown.ended) void liveActivities.end(id, shown.ended.exit, shown.line);
+      if (id && shown.ended) void liveActivities.end(id, shown.ended.exit, shown.line, shown.ended.timed);
     });
   }
   for (const u of plan.update) {
@@ -310,9 +319,9 @@ function syncLive(): void {
     void liveActivities.update(u.id, u.line);
   }
   for (const e of plan.end) {
-    liveShown.get(e.key)!.ended = { exit: e.exit };
+    liveShown.get(e.key)!.ended = { exit: e.exit, timed: e.timed };
     liveShown.delete(e.key);
-    if (e.id) void liveActivities.end(e.id, e.exit, e.line);
+    if (e.id) void liveActivities.end(e.id, e.exit, e.line, e.timed);
   }
 }
 

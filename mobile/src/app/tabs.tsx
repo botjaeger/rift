@@ -18,7 +18,7 @@ import {
   type SheetFilter,
   type TabRow,
 } from "@/now";
-import { canClose, canOperate } from "@/fleet";
+import { canClose, canMove, canOperate } from "@/fleet";
 import { fleet, useApp, useLock } from "@/runtime";
 import { Tile } from "@/ui/Avatar";
 import { Icon } from "@/ui/Icon";
@@ -26,9 +26,14 @@ import { canNewTab } from "@/ui/newTab";
 import { ErrorText } from "@/ui/Notice";
 import { toggleA11y } from "@/ui/toggle";
 import { colors, mono, tint, tints, ui } from "@/ui/theme";
+import { ReorderRow, useReorder } from "@/ui/ReorderRow";
 import { useClose } from "@/ui/useClose";
+import { useMove } from "@/ui/useMove";
 import { useNow } from "@/ui/useNow";
 import { useToast } from "@/ui/useToast";
+
+/** The gap between the cards (`styles.listBody`). */
+const LIST_GAP = 6;
 
 const FILTERS: { filter: SheetFilter; text: string }[] = [
   { filter: "all", text: "All" },
@@ -47,7 +52,7 @@ const LOOK: Record<TabRow["kind"], { bg: string; fg: string; border: string }> =
 
 const pillText = (r: TabRow) => (r.kind === "needs" ? "Needs you" : r.kind === "failed" ? `✕ ${r.state}` : r.state);
 
-/** The Tabs sheet (opened from a pane's tab strip): every tab of the computer, needs you first. */
+/** The Tabs sheet (opened from a pane's tab strip): every tab of the computer, in its tab order. */
 export default function TabsSheet() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -94,12 +99,26 @@ export default function TabsSheet() {
   const { say, toast } = useToast();
   const closeTab = useClose(key, here, setError, say, true);
   const closeable = canClose(host);
+  // a long press lifts a tab and drags it over the others (only on the whole list: a filter hides the
+  // places between); Move up / Move down do the same for a screen reader. It takes the computer's place
+  // of the tab it is dropped on.
+  const reorder = useReorder();
+  const move = useMove(key, setError, say);
+  const [cardH, setCardH] = useState(64);
+  const movable = canMove(host) && filter === "all" && shown.length > 1;
+  const onMove = (from: number, to: number) => {
+    const r = shown[from];
+    const dest = shown[to];
+    if (r && r.pane !== null && dest) move(r.pane, "tab", dest.tab.index, r.title, to, shown.length);
+  };
+  const noMove = () => {};
 
   return (
     // The sheet's own ScrollView, as its root: iOS lays out a form sheet's first scroll view as the
     // sheet's content, so a list nested under the header was drawn over it.
     <ScrollView
       style={[styles.fill, hidden && styles.hidden]}
+      scrollEnabled={reorder.scrollEnabled}
       contentContainerStyle={[styles.sheet, { paddingBottom: Math.max(insets.bottom, 30) }]}
       accessibilityElementsHidden={hidden}
       importantForAccessibility={hidden ? "no-hide-descendants" : "auto"}
@@ -147,12 +166,14 @@ export default function TabsSheet() {
 
       <View style={styles.listBody} accessibilityRole="list">
         {toast}
-        {shown.map((r) => {
+        {shown.map((r, i) => {
           const isHere = r.tab.panes.some((p) => p.id === here);
           const look = LOOK[r.kind];
           return (
+            <ReorderRow key={r.key} index={i} count={shown.length} rowH={cardH + LIST_GAP} drag={reorder.drag} setDrag={reorder.setDrag} onMove={movable ? onMove : noMove}>
+            {(handle) => (
             <View
-              key={r.key}
+              onLayout={(e) => setCardH(e.nativeEvent.layout.height)}
               style={[
                 styles.card,
                 { borderColor: isHere ? tint(colors.accent, 0x55) : r.kind === "needs" ? look.border : colors.hairline },
@@ -167,6 +188,7 @@ export default function TabsSheet() {
               accessibilityState={{ selected: isHere }}
               disabled={tabPane(r.tab) === null}
               onPress={() => go(r)}
+              {...(movable && r.pane !== null ? handle : null)}
               style={({ pressed }) => [styles.cardPress, pressed && styles.pressed]}
             >
               <Tile agent={r.agent} program={r.program} size={38} radius={11} promptSize={13} />
@@ -203,6 +225,8 @@ export default function TabsSheet() {
               </Pressable>
             ) : null}
             </View>
+            )}
+            </ReorderRow>
           );
         })}
         {shown.length === 0 ? <Text style={styles.empty}>No tab is {EMPTY_WHAT[filter]}.</Text> : null}

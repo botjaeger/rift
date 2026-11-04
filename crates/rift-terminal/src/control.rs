@@ -270,6 +270,17 @@ pub enum Request {
         device: String,
         kind: rift_remote::protocol::CloseKind,
     },
+    /// A paired phone's `move`, sent by the remote gateway: the tab holding
+    /// `pane` moves to position `to` among this window's tabs, or `pane` to
+    /// position `to` among its tab's panes (as the desktop's tab drag and
+    /// pane swap). Accepted only while `remote_access` is on, like
+    /// `remote-input`.
+    RemoteMove {
+        pane: u64,
+        device: String,
+        kind: rift_remote::protocol::MoveKind,
+        to: usize,
+    },
     /// A paired phone's size for `pane` (the gateway's `fit`, already the
     /// smallest of its phones and clamped): the pane's shell is sized to the
     /// smaller of the window's own grid and `cols` × `rows` until released
@@ -334,6 +345,7 @@ impl Request {
             | Request::RemoteFit { .. }
             | Request::RemoteResetElapsed { .. }
             | Request::RemoteOpen { .. }
+            | Request::RemoteMove { .. }
             | Request::RemoteClose { .. } => Level::Remote,
             // what a click on a link anywhere does
             Request::OpenLink { .. } => Level::Links,

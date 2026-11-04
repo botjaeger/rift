@@ -419,9 +419,12 @@ fn handle(
             reply(Event::Hello {
                 version: ipc::PROTOCOL_VERSION,
                 pid: std::process::id(),
-                features: vec![ipc::FEATURE_ARGS.into()],
+                features: vec![ipc::FEATURE_ARGS.into(), ipc::FEATURE_PRIVACY.into()],
             });
         }
+        Request::Privacy => reply(Event::Privacy {
+            full_disk: crate::privacy::full_disk_access(),
+        }),
         Request::Spawn {
             shell,
             args,
@@ -768,6 +771,35 @@ mod tests {
             other => panic!("unexpected {other:?}"),
         }
         drop(stuck);
+    }
+
+    #[test]
+    fn the_service_lists_the_privacy_feature_and_answers_for_itself() {
+        let state = Arc::new(State::default());
+        let (mut ours, theirs) = UnixStream::pair().unwrap();
+        std::thread::spawn(move || serve(state, theirs));
+        ipc::send_json(
+            &mut ours,
+            &Request::Hello {
+                version: ipc::PROTOCOL_VERSION,
+                pid: 1,
+            },
+        )
+        .unwrap();
+        match crate::service::next_event(&mut ours).unwrap() {
+            Event::Hello { features, .. } => {
+                assert!(features.iter().any(|f| f == ipc::FEATURE_PRIVACY));
+                assert!(features.iter().any(|f| f == ipc::FEATURE_ARGS));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        ipc::send_json(&mut ours, &Request::Privacy).unwrap();
+        match crate::service::next_event(&mut ours).unwrap() {
+            Event::Privacy { full_disk } => {
+                assert_eq!(full_disk, crate::privacy::full_disk_access())
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[test]

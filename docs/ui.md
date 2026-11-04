@@ -1261,7 +1261,7 @@ the Settings tab (its tab, ⌘, or *Open Settings* in the palette) shows the
 page it showed; once closed, it opens again on General. Other app
 shortcuts (new tab, next tab, palette…) work from it and leave it.
 
-A 232 px sidebar: a search field, the twelve pages with icons (arrow keys
+A 232 px sidebar: a search field, the twelve pages (thirteen on macOS, with Permissions) with icons (arrow keys
 navigate pages; PageUp/PageDown scroll the body; in a short window the page
 rows close their 2 px gaps, then shorten to as little as 22 px, so the foot keeps its room) and *Open config.toml* at
 the foot (opens the file beside the page, in the Settings tab; ✕ closes it; for 3 s after config.toml is
@@ -1665,6 +1665,43 @@ description) left, control right; it runs to the bottom edge.
     · <host> · pair phones again after a restart` or `Failed, retrying:
     <reason>`).
   - The page refreshes its data at most once a second.
+- **Permissions** (macOS only; lock icon, between Remote access and About) —
+  *macOS privacy switches Rift can use. Status refreshes when you return from
+  System Settings.* A checklist, each row with a status pill (`Granted` green,
+  `Not granted` red, neutral otherwise) and an `Open Settings` button into the
+  System Settings pane:
+  - `Recommended` › `Full Disk Access` — *Desktop, Documents, Downloads, iCloud
+    Drive, external and network volumes*; its button opens Privacy & Security ›
+    Full Disk Access. Under it, one indented row per app that needs the
+    switch, the app that runs the shells first. With `durable_sessions` the
+    shells run in the session service, so there are two: `Rift Helper` (*Runs
+    your shells*; on an installed bundle the service is Rift Helper.app, which
+    macOS treats as its own app, so the switch for `Rift` alone does not help
+    the shells; without the helper bundle the row reads `Rift session
+    service`) and `Rift` (*This window: file explorer, editor, drops*). With
+    shells in the window process (`durable_sessions = false`) there is one,
+    `Rift` (*Runs your shells and this window*). A row whose switch is off adds
+    *· switch it on, or add it with +*; the `Rift Helper` row then also has
+    `Show in Finder`, which reveals Rift Helper.app (inside
+    `Rift.app/Contents/Library/LoginItems`) to drag into the list, since
+    macOS lists an app there only once it was added. Pill words: `Checking…`, `Granted`, `Not
+    granted`, `Unknown` (the app could not tell), `Unknown · restart Rift` (the
+    running session service is older than this Rift and cannot be asked) and
+    `Not running` (no session service).
+  - `Optional` › `Notifications` — *Banners when a command finishes or an agent
+    needs you*; the pill follows the system's notification permission
+    (`Granted`, `Not granted`, `Not asked yet`, or `Unknown · not running as
+    Rift.app`); the button opens System Settings › Notifications on Rift's
+    page, or reads `Allow…` and asks macOS while it has not been asked.
+  - Full Disk Access is read by opening a TCC database for reading (the
+    system one, then the user one: a Mac may have no user one), which
+    succeeds only with the grant and never prompts; the window probes
+    itself, the session service answers for itself over its socket. The page
+    reads when it opens and when the window regains focus while it is shown;
+    the service is asked off the UI thread. Settings search finds its rows
+    (`disk`, `downloads`). A headless run's `Open Settings` and `Show in
+    Finder` only log. Rift does not need, and the page does not list, Accessibility,
+    Screen Recording, Automation, Local Network or Developer Tools.
 - **About** — no title: the app icon (64 px) beside the `Rift` wordmark,
   centred a little above the middle of the body; under it the version
   (`v0.1.0`) with a copy button (tooltip *Copy version*; copies the version

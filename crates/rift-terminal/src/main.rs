@@ -19,6 +19,7 @@ mod menubar;
 mod mouse;
 mod notify;
 mod pane;
+mod permissions;
 mod progress;
 mod quit;
 mod remote;

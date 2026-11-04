@@ -159,6 +159,7 @@ export type Feature =
   | "running"
   | "open"
   | "close"
+  | "move"
   | "prompt_chips"
   | "start"
   | "scroll"
@@ -297,6 +298,18 @@ export interface CloseMsg {
   id: string;
   pane: number;
   kind: CloseKind;
+}
+/**
+ * What `move` reorders (feature `move`): the pane's tab among its window's tabs (`to` counts tabs
+ * as `topology` lists them), or the pane among its tab's panes.
+ */
+export type MoveKind = "tab" | "pane";
+export interface MoveMsg {
+  t: "move";
+  id: string;
+  pane: number;
+  kind: MoveKind;
+  to: number;
 }
 /** Starts a shell while no Rift window is open (feature `start`); the ack carries the new pane. */
 export interface StartMsg {
@@ -459,6 +472,7 @@ export type ClientMsg =
   | KeysMsg
   | OpenMsg
   | CloseMsg
+  | MoveMsg
   | StartMsg
   | ForgetMsg
   | PingMsg
@@ -1114,6 +1128,8 @@ export function isClientMsg(v: unknown): v is ClientMsg {
       return isId(v.id) && isUint(v.pane) && (v.kind === "tab" || v.kind === "pane");
     case "close":
       return isId(v.id) && isUint(v.pane) && (v.kind === "pane" || v.kind === "tab");
+    case "move":
+      return isId(v.id) && isUint(v.pane) && isUint(v.to) && (v.kind === "tab" || v.kind === "pane");
     case "start":
       return isId(v.id);
     case "forget":

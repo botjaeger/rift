@@ -34,6 +34,11 @@ export function cursorScrollY(cursorRow: number | undefined, rowHeight: number, 
   return Math.max(0, (cursorRow + 2) * rowHeight + padding - viewHeight);
 }
 
+/** Whether a scroller sits at its end (within `slop`): "the user is following the output". */
+export function atEnd(offset: number, content: number, view: number, slop: number): boolean {
+  return offset + view >= content - slop;
+}
+
 /**
  * The area a program is sized to after a layout. A new width is a rotation and always counts; with
  * `keepHeight` (the keyboard or a question card covers the view) the height is not the program's to
