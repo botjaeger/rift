@@ -1,6 +1,6 @@
 {
   "name": "rift-mobile",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
   "main": "expo-router/entry",
   "packageManager": "pnpm@11.7.0",

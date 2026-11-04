@@ -8,6 +8,27 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.25.0 — 2026-11-05
+
+No more "Operation not permitted" in Downloads or Documents, once and for all.
+
+### New
+
+- **Settings › Permissions** — A checklist of the macOS permissions Rift can use, each with its
+  live status and a button straight into the right System Settings pane. Full Disk Access is
+  recommended for both Rift and Rift Helper (the app that runs your shells, so it needs its own
+  switch); Show in Finder puts Rift Helper in reach to drag into the list. Notifications is
+  optional. Search Settings for "disk" or "downloads" to find it.
+- **Reorder from your phone** — Tabs and panes dragged in the phone app move on your computer too.
+
+### Improved
+
+- **Permissions survive updates** — Rift is now signed with one fixed identity, so a permission
+  you grant stays granted across updates. Grant Full Disk Access once more after this update; it
+  sticks from then on.
+- **Phone lists follow your tabs** — The phone shows tabs in your tab bar's order and panes in
+  their layout order, and git status stays fresh for every tab while a phone is connected.
+
 ## 0.24.1 — 2026-11-02
 
 ### Fixed

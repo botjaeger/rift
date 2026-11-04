@@ -6,6 +6,26 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.6.0 — 2026-11-05
+
+Reorder tabs and panes from your phone, and Live Activities that keep up. Needs Rift 0.25.0 on your computer for reordering.
+
+### New
+
+- **Drag to reorder** — Long-press a tab in the Tabs sheet, or a pane in the Panes sheet, and drag
+  it: the computer's tab bar and layout follow. Screen readers get Move up and Move down.
+
+### Improved
+
+- **Tabs in your order** — The Tabs sheet lists tabs as your computer's tab bar does, and panes in
+  their layout order.
+- **Live Activities** — They name the computer and tab (and the pane when a tab has several), a
+  tap opens that pane, and one that finished while the phone was offline ends with ✓ or ✕ when it
+  reconnects. One that has not been updated for an hour says "Open Rift" instead of a stale clock.
+- **The keyboard keeps you at the end** — Opening or closing the keyboard keeps the latest output
+  in view, and dragging the list down puts the keyboard away.
+- **Fresher git status** — Every tab's git status keeps updating while the phone is connected.
+
 ## 0.5.0 — 2026-11-02
 
 Your phone gets its own screen, and pasted things wait for you to press Send. Needs Rift 0.24.0 on your computer for all of it.
