@@ -22,7 +22,9 @@ describe("the redesign's sheets are wired", () => {
     expect(src("src/app/index.tsx")).not.toContain("openNewTab");
   });
   it("view-only devices get no New tab or New pane control", () => {
-    expect(src("src/app/tabs.tsx")).toContain("host && canOperate(host) ? (");
+    const tabs = src("src/app/tabs.tsx");
+    expect(tabs).toContain("const operate = !!host && canOperate(host);");
+    expect(tabs).toContain("{operate ? (");
     expect(src("src/app/panes.tsx")).toContain("host && loc && canOperate(host) ? (");
   });
   it("there is no split direction to choose", () => {

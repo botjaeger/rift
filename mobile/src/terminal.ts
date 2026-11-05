@@ -287,6 +287,28 @@ export function wordAt(lines: readonly (readonly ScreenRun[])[], at: Cell): [Cel
   ];
 }
 
+const rowIds = new WeakMap<object, number>();
+let nextRowId = 0;
+
+/**
+ * React keys for a screen's rows: each row's array (kept across frames by reduceScreen when its
+ * content comes back, a scroll's shifted rows) is one identity, so a moved row keeps its drawn
+ * view; equal rows on one screen (blank ones) count apart by their order.
+ */
+export function rowKeys(lines: readonly object[]): string[] {
+  const seen = new Map<number, number>();
+  return lines.map((l) => {
+    let id = rowIds.get(l);
+    if (id === undefined) {
+      id = nextRowId++;
+      rowIds.set(l, id);
+    }
+    const n = seen.get(id) ?? 0;
+    seen.set(id, n + 1);
+    return `${id}:${n}`;
+  });
+}
+
 /** The whole row under a cell, from its first column to its last character (the cell alone on a blank row). */
 export function lineAt(lines: readonly (readonly ScreenRun[])[], at: Cell): [Cell, Cell] {
   const cells = rowCells(lines[at.row] ?? []).filter((c) => c.text.trim() !== "");

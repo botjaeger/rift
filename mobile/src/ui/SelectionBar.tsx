@@ -12,10 +12,11 @@ export interface SelectionKey {
 }
 
 /**
- * The bar a selection shows (the SelectBlock and SelectTerminal boards), the same for block output
- * and a program's screen: how much is selected, "Copied" once it is (not on Android 13 and later,
- * whose system says it), else `note`; then the keys and ✕. Next to the selection (`top`), or at
- * the top or the bottom of the area it floats over (`low`), never over the selected text.
+ * The bar a selection shows (the "Feedback fixes, playable" board), the same for block output and a
+ * program's screen, and in the same place: docked over the pane's controls (the message box, the key
+ * row), which stay in place under it, hidden, so it never covers the selected text, a handle or the
+ * cursor, and nothing moves when it comes. How much is selected, "Copied" once it is (not on Android 13 and later,
+ * whose system says it), else `note`; then the keys and ✕.
  */
 export function SelectionBar({
   selected,
@@ -23,24 +24,16 @@ export function SelectionBar({
   note,
   keys,
   onCancel,
-  low,
-  top,
-  onHeight,
 }: {
   selected: string;
   copied: boolean;
   note?: string;
   keys: SelectionKey[];
   onCancel: () => void;
-  low: boolean;
-  /** A place of its own (points from the area's top), next to the selection; `low` otherwise. */
-  top?: number;
-  onHeight?: (h: number) => void;
 }) {
   return (
     <View
-      style={[styles.bar, top !== undefined ? { top } : low ? styles.low : styles.high]}
-      onLayout={onHeight ? (e) => onHeight(e.nativeEvent.layout.height) : undefined}
+      style={styles.bar}
       accessibilityRole="toolbar"
       accessibilityLabel="Selection"
     >
@@ -76,9 +69,8 @@ export function SelectionBar({
 
 const styles = StyleSheet.create({
   fill: { flex: 1 },
-  bar: { position: "absolute", left: 8, right: 8, gap: 6, padding: 6, borderRadius: 24, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.glassRim, elevation: 8, shadowColor: "#000", shadowOpacity: 0.6, shadowRadius: 14, shadowOffset: { width: 0, height: 6 } },
-  low: { bottom: 8 },
-  high: { top: 8 },
+  // in the flow, at the bottom: the controls' place
+  bar: { marginHorizontal: 10, marginTop: 6, marginBottom: 8, gap: 6, padding: 6, borderRadius: 24, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.glassRim },
   info: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, paddingTop: 4 },
   count: { fontFamily: mono, color: colors.text, fontSize: 12 },
   copied: { fontFamily: ui(500), color: colors.success, fontSize: 12 },

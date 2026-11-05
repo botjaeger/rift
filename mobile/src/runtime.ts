@@ -23,6 +23,7 @@ import { liveActivities } from "../modules/rift-live";
 import { livePlan, type LiveShown } from "./live";
 import { ASK_CATEGORY, ASK_OPEN_CATEGORY, pushTokenProblem } from "./notify";
 import { OTA_CHECK_INTERVAL_MS, OtaChecks, otaChecker, type OtaStatus } from "./ota";
+import type { ScreenState } from "./protocol/store";
 import { MemoryStore, type KeyValueStore } from "./stores";
 
 /** Cryptographic randomness: expo-crypto (the OS generator), or Web Crypto. Never Math.random. */
@@ -159,6 +160,28 @@ fleet.store.subscribe(() => {
 /** The app state, re-rendering at most once per publish interval. */
 export function useApp(): AppState {
   return useSyncExternalStore(fleet.store.subscribe, fleet.store.getSnapshot, fleet.store.getSnapshot);
+}
+
+const screenSubscribe = (l: () => void) => {
+  const a = fleet.store.subscribe(l);
+  const b = fleet.screenTick.subscribe(l);
+  return () => {
+    a();
+    b();
+  };
+};
+
+/**
+ * The followed pane's screen as it stands, `host`'s pane `paneId` only (else null): re-renders
+ * with every frame (`fleet.screenTick`), which the app state takes quietly so that only this
+ * screen redraws while a program scrolls.
+ */
+export function useScreen(host: string, paneId: number): ScreenState | null {
+  const read = () => {
+    const p = fleet.store.peek().pane;
+    return p?.host === host && p.paneId === paneId ? p.screen : null;
+  };
+  return useSyncExternalStore(screenSubscribe, read, read);
 }
 
 // --- network and app state -----------------------------------------------------------------

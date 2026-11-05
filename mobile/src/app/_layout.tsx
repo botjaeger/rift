@@ -16,6 +16,7 @@ import { shouldOfferRestart } from "@/ota";
 import { APP_UPDATE } from "@/release";
 import { appLock, authenticate, fleet, kv, startPlatformWatchers, useApp, useLock } from "@/runtime";
 import { loadSeenRelease, saveSeenRelease } from "@/stores";
+import { paneAnimation } from "@/paneAnimation";
 import { LockGate } from "@/ui/LockGate";
 import { Splash } from "@/ui/Splash";
 import { colors } from "@/ui/theme";
@@ -228,7 +229,17 @@ export default function RootLayout() {
             <Stack.Screen name="host/[key]/index" options={{ headerShown: false, title: "Host" }} />
             {/* Back by the edge swipe only: iOS 26 takes a swipe anywhere as Back, which the pane's
                 swipe between panes and its sideways-scrolling blocks need. */}
-            <Stack.Screen name="host/[key]/pane/[id]" options={{ headerShown: false, title: "Pane", fullScreenGestureEnabled: false }} />
+            {/* The tab row's ‹ and › replace the pane (pane/[id].tsx, `dir`): the previous tab
+                comes in from the left, the next from the right, as a swipe between them moves. */}
+            <Stack.Screen
+              name="host/[key]/pane/[id]"
+              options={({ route }) => ({
+                headerShown: false,
+                title: "Pane",
+                fullScreenGestureEnabled: false,
+                animation: paneAnimation((route.params as { dir?: string } | undefined)?.dir),
+              })}
+            />
             <Stack.Screen name="control-keys" options={{ headerShown: false, title: "Keys" }} />
             <Stack.Screen name="answer" options={{ headerShown: false, title: "Answer" }} />
             <Stack.Screen name="diagnostics" options={{ title: "Diagnostics" }} />

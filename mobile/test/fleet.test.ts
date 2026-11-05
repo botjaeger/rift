@@ -1112,6 +1112,30 @@ describe("Fleet Phase 3", () => {
     expect(t.fleet.state.pane?.screen).toBeNull();
   });
 
+  it("a frame of new rows tells the screen's own view, not every screen; a change of shape tells all", async () => {
+    const t = await phase3();
+    t.fleet.setScreenMode(GW_KEY, 12, "auto");
+    t.last().recv(screen());
+    t.fleet.store.flush();
+    t.fleet.screenTick.flush();
+    let app = 0;
+    let tick = 0;
+    t.fleet.store.subscribe(() => app++);
+    t.fleet.screenTick.subscribe(() => tick++);
+    t.last().recv(screen({ full: false, lines: [[1, [[":q", null, null, 0]]]] }));
+    // no publish of the app state is scheduled for it (its timer would run within a frame)
+    vi.advanceTimersByTime(40);
+    t.fleet.screenTick.flush();
+    // Portals and the other screens do not render for it; the pane's view reads it
+    expect([app, tick]).toEqual([0, 1]);
+    expect(t.fleet.store.peek().pane?.screen?.lines[1]).toEqual([[":q", null, null, 0]]);
+    // the primary screen again: the pane switches to its blocks, everyone hears
+    t.last().recv(screen({ full: false, alt: false, lines: [] }));
+    t.fleet.store.flush();
+    t.fleet.screenTick.flush();
+    expect([app, tick]).toEqual([1, 2]);
+  });
+
   it("a screen for another pane is ignored; opening another pane drops the screen", async () => {
     const t = await phase3();
     t.fleet.setScreenMode(GW_KEY, 12, "auto");

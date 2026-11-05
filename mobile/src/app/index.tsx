@@ -1,23 +1,25 @@
 import { useActionScope } from "@/ui/useActionScope";
 import { useIsFocused, usePathname, useRouter } from "expo-router";
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { AccessibilityInfo, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { primaryChoice } from "@/answer";
-import { filterHome, homeChoiceLabel, homeCounts, idleSince, quickChoices, seenWorking, tabKey, tabKind, tabRow, trackIdle, type HomeFilter, type RowContext, type TabRow } from "@/now";
+import { filterHome, homeChoiceLabel, homeCounts, idleSince, quickChoices, sameTabRow, seenWorking, tabKey, tabKind, tabRow, trackIdle, type HomeFilter, type RowContext, type TabRow } from "@/now";
 import { canOperate, type HostView } from "@/fleet";
 import { needsAuthBeforeRun } from "@/lock";
 import { authenticate, fleet, useApp } from "@/runtime";
 import { restoreTarget } from "@/stores";
 import { Tile } from "@/ui/Avatar";
 import { LINE_COLOR } from "@/ui/ConnectionSheet";
-import { hostLine, updating } from "@/ui/connStatus";
+import { hostLine } from "@/ui/connStatus";
+import { hostDot } from "@/ui/hostDot";
 import { FirstRun } from "@/ui/FirstRun";
 import { Icon } from "@/ui/Icon";
 import { confirmDestructive } from "@/ui/confirm";
 import { canNewTab } from "@/ui/newTab";
 import { ErrorText } from "@/ui/Notice";
 import { ProgressBar } from "@/ui/ProgressBar";
+import { KIND_COLOR, StatusMark } from "@/ui/StatusMark";
 import { SwipeAction } from "@/ui/SwipeAction";
 import { tabBottom, titleTop } from "@/ui/Screen";
 import { toggleA11y } from "@/ui/toggle";
@@ -27,13 +29,6 @@ import { useNow } from "@/ui/useNow";
 /** The last pane is reopened once per app run, on the first launch of Portals. */
 let restored = false;
 
-const STATE_COLOR: Record<TabRow["kind"], string> = {
-  needs: colors.warning,
-  working: colors.accent,
-  failed: colors.text,
-  idle: colors.textMuted,
-};
-
 const CHIPS: { filter: HomeFilter; text: (n: number) => string; color: string }[] = [
   { filter: "needs", text: (n) => `${n} needs you`, color: colors.warning },
   { filter: "working", text: (n) => `${n} working`, color: colors.accent },
@@ -42,25 +37,6 @@ const CHIPS: { filter: HomeFilter; text: (n: number) => string; color: string }[
 
 const openPane = (router: ReturnType<typeof useRouter>, host: string, pane: number) =>
   router.push({ pathname: "/host/[key]/pane/[id]", params: { key: host, id: String(pane) } });
-
-/** The status dot: green while connected, the accent while trying, red when it cannot be reached. */
-function dotColor(host: HostView): string {
-  // an update restart is not a fault, and a quit is the user's own doing
-  if (updating(host.conn)) return colors.accent;
-  if (host.conn.failure === "host_quit") return colors.textDim;
-  switch (host.conn.status) {
-    case "open":
-      return colors.success;
-    case "connecting":
-      return colors.accent;
-    case "closed":
-      return host.conn.retryAt !== null || host.conn.retryInMs !== null ? colors.error : colors.textDim;
-    case "failed":
-      return colors.error;
-    default:
-      return colors.textDim;
-  }
-}
 
 /** A coding agent's question answered in place (Main mockup): the pills, then "Open". */
 function AnswerPills({ row, host }: { row: TabRow; host: HostView }) {
@@ -140,13 +116,23 @@ function AnswerPills({ row, host }: { row: TabRow; host: HostView }) {
   );
 }
 
-function TabRowView({ row, host, last, answerHere }: { row: TabRow; host: HostView; last: boolean; answerHere: boolean }) {
+interface TabRowProps {
+  row: TabRow;
+  host: HostView;
+  last: boolean;
+  answerHere: boolean;
+}
+
+// memoized: Portals stays mounted under every pane, and its rows are built afresh on each publish
+const TabRowView = memo(TabRowBody, (a: TabRowProps, b: TabRowProps) => a.last === b.last && a.answerHere === b.answerHere && a.host.record.name === b.host.record.name && sameTabRow(a.row, b.row));
+
+function TabRowBody({ row, host, last, answerHere }: TabRowProps) {
   const router = useRouter();
   const needs = row.kind === "needs";
   const question = row.ask ? row.ask.waiting.prompt.split("\n")[0]!.trim() : "";
   const inline = answerHere && needs && row.operate && row.ask?.waiting.kind === "choice" && quickChoices(row.ask.waiting) !== null;
-  // compact rows show the question as their second line
-  const line = needs && !inline && question ? question : row.line;
+  // the line carries the question ("claude · waiting for you · Edit x?"); the inline answer shows it whole
+  const line = row.line;
   return (
     <View style={[styles.row, needs && styles.rowNeeds, !last && styles.rowRule, inline && styles.rowInline]}>
       <Pressable
@@ -161,20 +147,24 @@ function TabRowView({ row, host, last, answerHere }: { row: TabRow; host: HostVi
           <Tile agent={row.agent} program={row.program} />
         </View>
         <View style={styles.rowText}>
-          <View style={styles.titleLine}>
-            <Text style={styles.title} numberOfLines={1}>
-              {row.title}
-            </Text>
-            <Text style={[styles.state, { color: STATE_COLOR[row.kind] }]} numberOfLines={1}>
-              {row.state}
-            </Text>
-          </View>
+          <Text style={styles.title} numberOfLines={1}>
+            {row.title}
+          </Text>
           <Text style={styles.line} numberOfLines={1}>
             {line}
           </Text>
           {inline ? (
             <Text style={styles.question}>
               {question}
+            </Text>
+          ) : null}
+        </View>
+        {/* the desktop tab's mark, then since when (the state in words is in the label) */}
+        <View style={styles.side}>
+          <StatusMark kind={row.kind} />
+          {row.when ? (
+            <Text style={[styles.when, { color: row.kind === "idle" ? colors.textMuted : KIND_COLOR[row.kind] }]} numberOfLines={1}>
+              {row.when}
             </Text>
           ) : null}
         </View>
@@ -228,7 +218,7 @@ function HostCard({ host, rows, now, answerHere }: { host: HostView; rows: TabRo
     <SwipeAction label={`Unpair ${name}`} text="Unpair" radius={16} onAction={() => void unpair()}>
       <View style={styles.card} accessibilityLabel={name}>
         <View style={[styles.head, rows.length > 0 && styles.headRule]}>
-          <View style={[styles.dot, { backgroundColor: dotColor(host) }]} />
+          <View style={[styles.dot, { backgroundColor: hostDot(host) }]} />
           <View style={styles.headText}>
             <View style={styles.nameLine}>
               <Text style={styles.name} numberOfLines={1}>
@@ -472,9 +462,9 @@ const styles = StyleSheet.create({
   rowMainCompact: { alignItems: "center", minHeight: 64 },
   tileBox: { flexShrink: 0 },
   rowText: { flex: 1, minWidth: 0, gap: 3 },
-  titleLine: { flexDirection: "row", alignItems: "center", gap: 8 },
-  title: { flex: 1, minWidth: 0, fontFamily: ui(600), color: colors.textBright, fontSize: 15 },
-  state: { fontFamily: ui(500), fontSize: 12 },
+  title: { fontFamily: ui(600), color: colors.textBright, fontSize: 15 },
+  side: { flexShrink: 0, minWidth: 36, alignItems: "flex-end", justifyContent: "center", gap: 5, alignSelf: "center" },
+  when: { fontFamily: ui(500), fontSize: 11, fontVariant: ["tabular-nums"] },
   line: { fontFamily: mono, color: colors.textMuted, fontSize: 12 },
   question: { fontFamily: ui(400), color: colors.text, fontSize: 14, lineHeight: 20, marginTop: 4 },
   pillsBox: { gap: 8, paddingLeft: 68, paddingRight: 16 },

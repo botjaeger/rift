@@ -1,6 +1,6 @@
 import * as Clipboard from "expo-clipboard";
 import { useFocusEffect } from "expo-router";
-import { memo, useCallback, useEffect, useRef, useState, type RefObject } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import {
   AccessibilityInfo,
   AppState,
@@ -49,11 +49,11 @@ import { DRAG_SLOP, DragVelocity, dragLines, dragScrollsPane, Fling, ScrollCoale
 import { draftKey } from "@/fleet";
 import { nativeAttached, pending, PENDING_FULL, readClipboard, type AttachRules, type Attached } from "@/pending";
 import { programSend } from "@/paneView";
-import { barStaysLow, promptText, textToCopy } from "@/selection";
+import { promptText, textToCopy } from "@/selection";
 import { SelectionBar } from "./SelectionBar";
 import * as haptics from "@/haptics";
 import { fullScreenRow, rowWithPaste } from "@/controlKeys";
-import { CELL_RATIO, textRoom, cellAt, cursorScrollY, drawnText, fitArea, fitFont, lastTextRow, lineAt, ordered, screenSpan, selectionText, wordAt, wordStep, type Cell, LINE_RATIO, rowPieces, rowSegments, screenDefaults, segmentColors, showsKeyRow, type Piece } from "@/terminal";
+import { CELL_RATIO, rowKeys, textRoom, cellAt, cursorScrollY, drawnText, fitArea, fitFont, lastTextRow, lineAt, ordered, screenSpan, selectionText, wordAt, wordStep, type Cell, LINE_RATIO, rowPieces, rowSegments, screenDefaults, segmentColors, showsKeyRow, type Piece } from "@/terminal";
 import { ControlRow, NO_STICKY, type Sticky } from "./ControlRow";
 import { ScreenSkeleton } from "./PaneLoading";
 import { useOpenShell } from "./useOpenShell";
@@ -273,11 +273,12 @@ function Grid({
   const defaults = screenDefaults(screen, DEFAULTS);
   const scroll = fit.scroll || rowWidth > width - PADDING_X * 2;
   const [cursorRow, cursorCol] = screen.cursor ?? [-1, -1];
+  const keys = rowKeys(screen.lines);
   const rows = (
     <View ref={rowsRef} collapsable={false}>
       {screen.lines.map((runs, r) => (
         <Row
-          key={r}
+          key={keys[r]}
           runs={runs}
           cursorCol={r === cursorRow ? cursorCol : null}
           fontSize={fontSize}
@@ -330,6 +331,7 @@ export function TerminalView({
   canMouse,
   keepHeight,
   onPasted,
+  onBar,
 }: {
   hostKey: string;
   paneId: number;
@@ -358,6 +360,8 @@ export function TerminalView({
   keepHeight?: boolean;
   /** Something pasted waits in the pane's message box: show it. */
   onPasted?: () => void;
+  /** With `bare`: the selection bar while text is selected, else null; the pane draws it over its own controls. */
+  onBar?: (bar: ReactNode | null) => void;
 }) {
   const s = useApp();
   const scope = useActionScope(`${hostKey}:${paneId}`);
@@ -598,6 +602,8 @@ export function TerminalView({
   // what the selection last put on the clipboard (null: nothing since it began)
   const [copiedText, setCopiedText] = useState<string | null>(null);
   const selecting = selection !== null;
+  // the screen gives way to blocks (or the pane closes) mid-selection: the pane's controls come back
+  useEffect(() => () => onBar?.(null), [onBar]);
   // the dragged handle, for the loupe (null: no handle is moving)
   const [loupe, setLoupe] = useState<{ row: number; edge: number } | null>(null);
   // a program on the computer copied to this phone: the same word for it
@@ -906,7 +912,8 @@ export function TerminalView({
   }, []);
   const onArea = (e: LayoutChangeEvent) => {
     const { width, height } = e.nativeEvent.layout;
-    setArea((a) => fitArea(a, { width, height }, keyboardUp.current || !!keepHeight || screen?.ageMs != null));
+    // the docked selection bar takes the keys' place for a moment: the program keeps its size
+    setArea((a) => fitArea(a, { width, height }, keyboardUp.current || !!keepHeight || screen?.ageMs != null || selecting));
     local.current.viewH = height;
     measureLocal();
     toEnd();
@@ -974,6 +981,38 @@ export function TerminalView({
     : "Terminal screen";
 
   const selectedNow = selection && shown ? selectionText(shown.lines, selection.a, selection.b) : "";
+  // The selection bar, docked where the controls are: over this view's keys, or (`bare`) handed to
+  // the pane for its message box. Made only when what it shows changes; its keys reach the latest
+  // handlers through `barActs` (a new element every render would re-render the pane in a loop).
+  const barActs = useRef({ widen, toPrompt, endSelection });
+  useEffect(() => {
+    barActs.current = { widen, toPrompt, endSelection };
+  });
+  const barCopied = copiedText !== null && copiedText === selectedNow;
+  const prompts = operate && !!bare;
+  const selectionBar = useMemo(
+    () =>
+      selecting ? (
+        <SelectionBar
+          selected={selectedNow}
+          copied={barCopied}
+          note={loupe ? "lift to copy" : "screen held"}
+          keys={[
+            { label: "Word", hint: "Select whole words", onPress: () => barActs.current.widen("word") },
+            { label: "Line", hint: "Select whole lines", onPress: () => barActs.current.widen("line") },
+            { label: "Screen", hint: "Select the whole screen", onPress: () => barActs.current.widen("screen") },
+            ...(prompts ? [{ label: "To prompt", hint: "Put the selection in the command line", onPress: () => barActs.current.toPrompt(), sep: true }] : []),
+          ]}
+          onCancel={() => barActs.current.endSelection()}
+        />
+      ) : null,
+    [selecting, selectedNow, barCopied, loupe, prompts],
+  );
+  useEffect(() => {
+    if (bare) onBar?.(selectionBar);
+  }, [bare, selectionBar, onBar]);
+  const keysUnder = selecting && !bare && operate;
+  const [barH, setBarH] = useState(0);
   // a desktop in use keeps its size: then the phone fits what comes to its width
   const fittedHere = held && (shown?.cols ?? 0) <= (cols ?? 0);
   const grid = shown ? (
@@ -1020,22 +1059,7 @@ export function TerminalView({
         )}
       </View>
       {screen && (zoomShown || readerOn) && !selecting ? zoomRow : null}
-      {selecting ? (
-        <SelectionBar
-          selected={selectedNow}
-          copied={copiedText !== null && copiedText === selectedNow}
-          note={loupe ? "lift to copy" : "screen held"}
-          // at the bottom, in thumb reach, unless the selection's last row is where the bar would be
-          low={barStaysLow(Math.max(selection.a.row, selection.b.row), shown!.lines.length, area.height)}
-          keys={[
-            { label: "Word", hint: "Select whole words", onPress: () => widen("word") },
-            { label: "Line", hint: "Select whole lines", onPress: () => widen("line") },
-            { label: "Screen", hint: "Select the whole screen", onPress: () => widen("screen") },
-            ...(operate && bare ? [{ label: "To prompt", hint: "Put the selection in the command line", onPress: toPrompt, sep: true }] : []),
-          ]}
-          onCancel={endSelection}
-        />
-      ) : copied ? (
+      {!selecting && copied ? (
         <View style={styles.copiedBar} pointerEvents="none">
           <Text style={styles.selectKeyText}>Copied</Text>
         </View>
@@ -1044,7 +1068,16 @@ export function TerminalView({
       {/* without the key bar (the message input below, or view only), a refused scroll or paste says why here */}
       {error && (bare || !operate) ? <ErrorText style={styles.bareError}>{error}</ErrorText> : null}
       {bare ? null : operate ? (
-        <View style={styles.bar} accessibilityLabel="Keys">
+        // the selection bar is docked over the keys (hidden in place under it): it never covers a
+        // row of the program, the selection's handles or the cursor, and nothing moves
+        <View style={keysUnder ? { minHeight: barH } : null}>
+        <View
+          style={[styles.bar, keysUnder && styles.underBar]}
+          accessibilityLabel="Keys"
+          pointerEvents={keysUnder ? "none" : "auto"}
+          accessibilityElementsHidden={keysUnder}
+          importantForAccessibility={keysUnder ? "no-hide-descendants" : "auto"}
+        >
           {atPrompt ? (
             <WarningText>This pane is at its prompt: typed text goes to programs only.</WarningText>
           ) : null}
@@ -1071,8 +1104,17 @@ export function TerminalView({
             />
           ) : null}
         </View>
+        {keysUnder ? (
+          <View style={styles.dock} onLayout={(e) => setBarH(e.nativeEvent.layout.height)}>
+            {selectionBar}
+          </View>
+        ) : null}
+        </View>
       ) : (
-        <Text style={styles.viewOnly}>View only: this device cannot type here.</Text>
+        <>
+          {selectionBar}
+          <Text style={styles.viewOnly}>View only: this device cannot type here.</Text>
+        </>
       )}
     </View>
   );
@@ -1095,6 +1137,9 @@ const styles = StyleSheet.create({
     borderTopColor: colors.hairline,
   },
   // the FullScreen board: the keys on the chrome ground
+  // the selection bar over the keys (hidden in place under it)
+  underBar: { opacity: 0 },
+  dock: { position: "absolute", left: 0, right: 0, bottom: 0, backgroundColor: colors.chrome },
   bar: {
     backgroundColor: colors.chrome,
     borderTopWidth: 1,

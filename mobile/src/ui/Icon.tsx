@@ -58,6 +58,11 @@ const ICONS = {
   editKeys: { ios: "slider.horizontal.3", android: "tune", web: "tune" },
 
   chevronDown: { ios: "chevron.down", android: "expand_more", web: "expand_more" },
+  // the computer menu's Connection row
+  wifi: { ios: "wifi", android: "wifi", web: "wifi" },
+  // the tab row's ‹ ›: one shape both ways (back and forward differ on Android)
+  chevronLeft: { ios: "chevron.left", android: "chevron_left", web: "chevron_left" },
+  chevronRight: { ios: "chevron.right", android: "chevron_right", web: "chevron_right" },
   more: { ios: "ellipsis", android: "more_horiz", web: "more_horiz" },
   copy: { ios: "doc.on.doc", android: "content_copy", web: "content_copy" },
   edit: { ios: "pencil", android: "edit", web: "edit" },

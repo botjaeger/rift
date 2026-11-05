@@ -1,11 +1,12 @@
 import * as Clipboard from "expo-clipboard";
 import { memo, useEffect, useState, type ReactNode } from "react";
-import { AccessibilityInfo, Animated, Easing, Pressable, StyleSheet, Text, View, type StyleProp, type ViewStyle } from "react-native";
+import { AccessibilityInfo, Pressable, StyleSheet, Text, View, type StyleProp, type ViewStyle } from "react-native";
 import { failureMessage, lastLines, parseLogLines } from "@/paneView";
 import type { Block } from "@/protocol/types";
 import { formatClock } from "./format";
 import { Icon } from "./Icon";
 import { SelectableText } from "./SelectableText";
+import { Spinner } from "./StatusMark";
 import { colors, mono, radius, tints, ui } from "./theme";
 import { toggleA11y } from "./toggle";
 
@@ -61,32 +62,6 @@ export function FoldRow({ count, onShow }: { count: number; onShow: () => void }
       <Text style={[styles.foldText, styles.foldMid]}>{count} earlier commands succeeded</Text>
       <Text style={styles.foldShow}>Show</Text>
     </Pressable>
-  );
-}
-
-/** The running block's arc, turning once a second (still under Reduce Motion). */
-function Spinner() {
-  const [turn] = useState(() => new Animated.Value(0));
-  const [still, setStill] = useState(false);
-  useEffect(() => {
-    let live = true;
-    void AccessibilityInfo.isReduceMotionEnabled().then((r) => live && setStill(r));
-    return () => {
-      live = false;
-    };
-  }, []);
-  useEffect(() => {
-    if (still) return;
-    const loop = Animated.loop(Animated.timing(turn, { toValue: 1, duration: 1000, easing: Easing.linear, useNativeDriver: true }));
-    loop.start();
-    return () => loop.stop();
-  }, [still, turn]);
-  return (
-    <Animated.View
-      accessibilityElementsHidden
-      importantForAccessibility="no-hide-descendants"
-      style={[styles.spinner, { transform: [{ rotate: turn.interpolate({ inputRange: [0, 1], outputRange: ["0deg", "360deg"] }) }] }]}
-    />
   );
 }
 
@@ -223,7 +198,7 @@ export const RunningCard = memo(function RunningCard({
       onOpen={() => onActions(block.id)}
       head={
         <>
-          <Spinner />
+          <Spinner style={styles.spinner} />
           <Text style={styles.command}>{block.command || " "}</Text>
           <Elapsed ms={block.duration_ms} />
         </>

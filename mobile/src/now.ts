@@ -360,8 +360,14 @@ export interface TabRow {
   agent: boolean;
   /** The program in the row's pane, for its mark. */
   program: string | null;
+  /** The state in words ("Working 3:56"), for screen readers. */
   state: string;
+  /** What the pane that speaks for the tab does, its pane count first: "2 panes · claude · waiting for you · Allow edits?". */
   line: string;
+  /** The same without the pane count (a list that shows the count as its own mark). */
+  paneLine: string;
+  /** The short time beside the status mark: "3:56", "2m", "✕ 101", or "". */
+  when: string;
   /** The question of the asking pane, with the pane it was asked in. */
   ask: { pane: number; waiting: Waiting; program: string | null } | null;
   /** Whether this device may answer it. */
@@ -380,51 +386,125 @@ export interface RowContext {
 
 const firstLine = (s: string) => s.split("\n")[0]!.trim();
 
-/** The tab's row. `idle`: the since-map of idle agents (`idleSince`). */
-export function tabRow(h: HostView, tab: Tab, ctx: RowContext, idle: ReadonlyMap<string, number> = idleSince): TabRow {
-  const host = h.record.key;
-  const p = focusPane(tab);
-  const kind = tabKind(tab);
-  const pane = tabPane(tab) ?? p?.id ?? null;
-  const program = p ? programName(p) : null;
-  const agent = isAgentProgram(program) || !!p?.running?.title;
-  const key = tabKey(host, tab);
-  const cwd = p?.cwd ? tildePath(p.cwd) : null;
-  const waiting = p?.waiting;
+/** One pane's state: what it asks, runs, failed at or waits on. */
+export function paneKind(p: Pane): TabKind {
+  if (p.waiting) return "needs";
+  if (isWorking(p)) return "working";
+  if (!isLive(p) && p.last_exit !== null && p.last_exit !== 0) return "failed";
+  return "idle";
+}
+
+/** One pane as a row says it: its state, what it does (its program left out) and since when. */
+export interface PaneSummary {
+  kind: TabKind;
+  program: string | null;
+  agent: boolean;
+  /** "waiting for you · Allow edits?", "cargo test · running", "~/code · idle · ls ✓". */
+  activity: string;
+  /** "Needs you · 2m": the state in words, for screen readers. */
+  state: string;
+  /** "2m", "3:56", "✕ 101", or "" when unknown. */
+  when: string;
+}
+
+/** A pane's summary; `key`: its idle-since key (`host:pane`). */
+export function paneSummary(host: string, p: Pane, ctx: RowContext, idle: ReadonlyMap<string, number> = idleSince): PaneSummary {
+  const kind = paneKind(p);
+  const program = programName(p);
+  const agent = isAgentProgram(program) || !!p.running?.title;
+  const cwd = p.cwd ? tildePath(p.cwd) : null;
+  const command = p.last_command ?? p.job ?? "";
   let elapsedMs: number | null = null;
-  if (kind === "working" && p) {
-    const command = p.last_command ?? p.job ?? "";
+  if (kind === "working") {
     const at =
       p.running?.started != null
         ? p.running.started * 1000
         : (ctx.asked.find((a) => a.host === host && a.pane === p.id && a.command === command)?.at ?? null);
     elapsedMs = at === null ? null : ctx.now - at;
   }
-  const since =
-    kind === "needs" && waiting && p ? ctx.waitingSince(host, p.id, waiting) : kind === "idle" ? (idle.get(key) ?? null) : null;
-  const state = stateText(kind, { ageMs: since === null ? null : ctx.now - since, elapsedMs, failed: failedCount(tab) });
-  const last = p?.running?.line || p?.last_command || p?.job || "";
-  let line: string;
-  if (kind === "needs" && waiting) {
-    line = ctx.multi ? firstLine(waiting.prompt) : [program, cwd, p?.git?.branch].filter(Boolean).join(" · ");
-  } else if (agent) {
-    line = [ctx.multi ? null : program, p?.running?.idle && !p.running.line ? "waiting for your prompt" : last].filter(Boolean).join(" · ");
-  } else {
-    line = [ctx.multi ? null : p?.job, cwd, last].filter(Boolean).join(" · ");
-  }
+  const since = kind === "needs" && p.waiting ? ctx.waitingSince(host, p.id, p.waiting) : kind === "idle" ? (idle.get(`${host}:${p.id}`) ?? null) : null;
+  const ageMs = since === null ? null : ctx.now - since;
+  const state = stateText(kind, { ageMs, elapsedMs, failed: kind === "failed" ? 1 : 0 });
+  const detail = p.running?.line || p.running?.title || "";
+  let activity: string;
+  if (kind === "needs" && p.waiting) activity = ["waiting for you", firstLine(p.waiting.prompt)].filter(Boolean).join(" · ");
+  else if (kind === "working") activity = agent ? ["running", detail].filter(Boolean).join(" · ") : [command || p.job, "running", p.running?.line].filter(Boolean).join(" · ");
+  else if (kind === "failed") activity = `${command} · exited ${p.last_exit}`;
+  else if (agent) activity = ["idle", p.running?.title || "waiting for your prompt"].join(" · ");
+  else activity = [cwd, "idle", p.last_command ? `${p.last_command}${p.last_exit === 0 ? " ✓" : ""}` : null].filter(Boolean).join(" · ");
+  const when =
+    kind === "working" ? (elapsedMs === null ? "" : formatClock(elapsedMs)) : kind === "failed" ? `✕ ${p.last_exit}` : ageMs === null ? "" : agoCompact(ageMs);
+  return { kind, program, agent, activity, state, when };
+}
+
+/** A pane's line: its program, then what it does (a shell's command already names itself). */
+export function paneLine(s: PaneSummary): string {
+  return s.agent && s.program ? `${s.program} · ${s.activity}` : s.activity;
+}
+
+/**
+ * Whether two builds of a row draw the same. Rows are built afresh on every publish of the app's
+ * store and every clock tick; a list re-renders only the rows this says changed (a long list
+ * re-rendered whole kept a phone's JS thread busy, and taps and drags waited behind it).
+ */
+export function sameTabRow(a: TabRow, b: TabRow): boolean {
+  return (
+    a.key === b.key &&
+    a.host === b.host &&
+    a.hostName === b.hostName &&
+    a.pane === b.pane &&
+    a.title === b.title &&
+    a.kind === b.kind &&
+    a.agent === b.agent &&
+    a.program === b.program &&
+    a.state === b.state &&
+    a.line === b.line &&
+    a.paneLine === b.paneLine &&
+    a.when === b.when &&
+    a.operate === b.operate &&
+    a.panes === b.panes &&
+    a.tab.pinned === b.tab.pinned &&
+    a.tab.index === b.tab.index &&
+    a.ask?.pane === b.ask?.pane &&
+    a.ask?.program === b.ask?.program &&
+    a.ask?.waiting === b.ask?.waiting
+  );
+}
+
+/** The tab's row. `idle`: the since-map of idle agents (`idleSince`). */
+export function tabRow(h: HostView, tab: Tab, ctx: RowContext, idle: ReadonlyMap<string, number> = idleSince): TabRow {
+  const host = h.record.key;
+  const p = focusPane(tab);
+  const kind = tabKind(tab);
+  const pane = tabPane(tab) ?? p?.id ?? null;
+  const key = tabKey(host, tab);
+  const s = p ? paneSummary(host, p, ctx, idle) : null;
+  const failed = failedCount(tab);
+  // the tab's words come from its state (several panes can fail); the line from its lead pane
+  const state = kind === "failed" ? stateText(kind, { ageMs: null, elapsedMs: null, failed }) : (s?.state ?? stateText(kind, { ageMs: null, elapsedMs: null, failed }));
+  // the mark is the tab's: a failed tab whose speaking pane did not fail shows a failed pane's time
+  const failing = kind === "failed" && s?.kind !== "failed" ? tab.panes.find((q) => !isLive(q) && q.last_exit !== null && q.last_exit !== 0) : undefined;
+  const when = failing ? paneSummary(host, failing, ctx, idle).when : (s?.when ?? "");
+  const more = tab.panes.length > 1 ? `${tab.panes.length} panes · ` : "";
+  // a tab named after its folder ("~", "rift") says no more for the folder leading its line
+  const title = tabTitle(tab);
+  const place = p?.cwd ? tildePath(p.cwd) : null;
+  if (s && place && (place === title || place.split("/").at(-1) === title) && s.activity.startsWith(`${place} · `)) s.activity = s.activity.slice(place.length + 3);
   return {
     key,
     host,
     hostName: h.record.name,
     tab,
     pane,
-    title: p?.running?.title || tabTitle(tab),
+    title,
     kind,
-    agent,
-    program,
+    agent: s?.agent ?? false,
+    program: s?.program ?? null,
     state,
-    line,
-    ask: waiting && p ? { pane: p.id, waiting, program } : null,
+    line: s ? more + paneLine(s) : more.replace(/ · $/, ""),
+    paneLine: s ? paneLine(s) : "",
+    when,
+    ask: p?.waiting ? { pane: p.id, waiting: p.waiting, program: s?.program ?? null } : null,
     operate: (h.welcome?.permission ?? h.record.permission) === "operate",
     panes: tab.panes.length,
   };

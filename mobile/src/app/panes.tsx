@@ -3,33 +3,26 @@ import { useEffect, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { canClose, canMove, canOperate } from "@/fleet";
-import { CLAUDE_COLOR, panesText, paneRows, type StateTone } from "@/paneView";
-import { useApp, useLock } from "@/runtime";
+import { paneKind, paneSummary, type RowContext } from "@/now";
+import { CLAUDE_COLOR, panesText, paneRows } from "@/paneView";
+import { fleet, useApp, useLock } from "@/runtime";
 import { findPane, tabTitle } from "@/topology";
 import { Icon } from "@/ui/Icon";
+import { LIST_ROW_H, ListRow } from "@/ui/ListRow";
 import { canNewPane } from "@/ui/newTab";
 import { ErrorText } from "@/ui/Notice";
-import { colors, mono, monoMedium, tints, ui } from "@/ui/theme";
+import { colors, monoMedium, tints, ui } from "@/ui/theme";
 import { ReorderRow, useReorder } from "@/ui/ReorderRow";
 import { useClose } from "@/ui/useClose";
 import { useMove } from "@/ui/useMove";
+import { useNow } from "@/ui/useNow";
 import { useToast } from "@/ui/useToast";
 
-/** A row's height (`styles.row`): rows sit edge to edge. */
-const ROW_H = 56;
-
-/** The state's text colour on the list (the current row's accent tint included). */
-const TONE: Record<StateTone, string> = {
-  running: colors.accent,
-  needs: colors.warning,
-  failed: colors.text,
-  idle: colors.textMuted,
-};
-
 /**
- * The Panes page (the TabPanes board; a full page, opened from the pane picker or a Switcher card):
- * the tab's panes, each with its mark, name, last line and state; the open one on the accent tint.
- * A tap opens that pane in place of this one; a long press drags it to another place.
+ * The Panes page (a full page, opened from the pane row or a tab's "N panes"): the tab's panes as
+ * the Tabs page's rows, each with its program's tile, name, what it does, its status mark and
+ * since when; the open one on the accent tint. A tap opens that pane in place of this one; the
+ * grip drags it to another place.
  */
 export default function PanesScreen() {
   const { key, pane: paneParam, from } = useLocalSearchParams<{ key: string; pane: string; from?: string }>();
@@ -48,6 +41,8 @@ export default function PanesScreen() {
   const host = s.hosts.find((h) => h.record.key === key);
   const loc = host ? findPane(host.windows, paneId) : null;
   const rows = loc ? paneRows(loc.tab) : [];
+  const now = useNow(loc?.tab.panes.some((p) => paneKind(p) === "working") ? 1000 : 30_000);
+  const ctx: RowContext = { now, multi: false, waitingSince: (h, p, w) => fleet.waitingSince(h, p, w), asked: s.asked };
   const [error, setError] = useState<string | null>(null);
   const { say, toast } = useToast();
   const closePane = useClose(key, paneId, setError, say, true);
@@ -90,7 +85,7 @@ export default function PanesScreen() {
           <Text style={styles.title} accessibilityRole="header" numberOfLines={1}>
             {loc ? tabTitle(loc.tab) : "Panes"}
           </Text>
-          {loc ? <Text style={styles.count}>{`${panesText(rows.length)}${movable ? " · hold a row, then drag it" : ""}`}</Text> : null}
+          {loc ? <Text style={styles.count}>{`${panesText(rows.length)}${movable ? " · drag to reorder" : ""}`}</Text> : null}
         </View>
       </View>
       {toast}
@@ -99,44 +94,31 @@ export default function PanesScreen() {
         <View style={styles.list} accessibilityRole="list" accessibilityLabel={`Panes in ${tabTitle(loc.tab)}`}>
           {rows.map((r, i) => {
             const on = r.id === paneId;
+            const p = loc.tab.panes[i]!;
+            const sum = paneSummary(key, p, ctx);
             return (
-              <ReorderRow key={r.id} index={i} count={rows.length} rowH={ROW_H} enabled={movable} drag={reorder.drag} setDrag={reorder.setDrag} onMove={onMove}>
-              {(handle) => (
-              <View style={[styles.row, i < rows.length - 1 && styles.rule, on && styles.rowOn]}>
-              <Pressable
-                accessibilityRole="button"
-                accessibilityState={{ selected: on }}
-                accessibilityLabel={`Pane ${r.number} of ${rows.length}: ${r.name}, ${r.state}${r.line ? `. ${r.line}` : ""}`}
-                onPress={() => pick(r.id)}
-                {...handle}
-                style={({ pressed }) => [styles.rowPress, pressed && styles.pressed]}
-              >
-                <View style={[styles.tile, { backgroundColor: r.claude ? `${CLAUDE_COLOR}1f` : tints.accentBadge }]}>
-                  <Text style={[styles.mark, { color: r.claude ? CLAUDE_COLOR : colors.accent }]}>{r.mark}</Text>
-                </View>
-                <View style={styles.text}>
-                  <Text style={styles.name} numberOfLines={1}>
-                    {r.name}
-                  </Text>
-                  {/* textMuted on the open row: textDim is 4.3:1 on the accent tint (palette.ts) */}
-                  <Text style={[styles.line, on && { color: colors.textMuted }]} numberOfLines={1}>
-                    {r.line}
-                  </Text>
-                </View>
-                <Text style={[styles.state, { color: TONE[r.tone] }]}>{r.state}</Text>
-              </Pressable>
-              {closeable ? (
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel={`Close pane ${r.name}`}
-                  onPress={() => closePane(r.id, "pane")}
-                  style={({ pressed }) => [styles.rowClose, pressed && styles.pressed]}
-                >
-                  <Icon name="close" size={14} color={colors.textMuted} />
-                </Pressable>
-              ) : null}
-              </View>
-              )}
+              <ReorderRow key={r.id} grip index={i} count={rows.length} rowH={LIST_ROW_H} enabled={movable} drag={reorder.drag} setDrag={reorder.setDrag} onMove={onMove}>
+                {(handle) => (
+                  <ListRow
+                    handle={handle}
+                    movable={movable}
+                    lead={
+                      <View style={[styles.tile, { backgroundColor: r.claude ? `${CLAUDE_COLOR}1f` : tints.accentBadge }]}>
+                        <Text style={[styles.mark, { color: r.claude ? CLAUDE_COLOR : colors.accent }]}>{r.mark}</Text>
+                      </View>
+                    }
+                    title={r.name}
+                    // the title names the program: the line says what it does
+                    line={sum.activity}
+                    kind={sum.kind}
+                    when={sum.when}
+                    label={`Pane ${r.number} of ${rows.length}: ${r.name}, ${sum.state}, ${sum.activity}`}
+                    selected={on}
+                    onPress={() => pick(r.id)}
+                    onClose={closeable ? () => closePane(r.id, "pane") : undefined}
+                    closeLabel={`Close pane ${r.name}`}
+                  />
+                )}
               </ReorderRow>
             );
           })}
@@ -172,19 +154,10 @@ const styles = StyleSheet.create({
   titles: { flex: 1, minWidth: 0, gap: 3 },
   title: { fontFamily: ui(600), color: colors.textBright, fontSize: 22 },
   count: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13 },
-  list: { borderRadius: 16, borderWidth: 1, borderColor: colors.hairline, backgroundColor: colors.surface, overflow: "hidden" },
-  row: { height: 56, flexDirection: "row", alignItems: "center" },
-  rowPress: { flex: 1, minWidth: 0, height: 56, flexDirection: "row", alignItems: "center", gap: 12, paddingLeft: 14, paddingRight: 6 },
-  // the row's ✕: a 44 pt target
-  rowClose: { width: 44, height: 44, marginRight: 4, alignItems: "center", justifyContent: "center" },
-  rule: { borderBottomWidth: 1, borderBottomColor: colors.hairline },
-  rowOn: { backgroundColor: tints.running },
+  // edge to edge, as the Tabs page's rows
+  list: { marginHorizontal: -16, borderTopWidth: 1, borderTopColor: colors.hairline },
   tile: { width: 32, height: 32, borderRadius: 9, alignItems: "center", justifyContent: "center" },
   mark: { fontFamily: monoMedium, fontSize: 12 },
-  text: { flex: 1, minWidth: 0, gap: 2 },
-  name: { fontFamily: ui(600), color: colors.textBright, fontSize: 15 },
-  line: { fontFamily: mono, color: colors.textDim, fontSize: 12 },
-  state: { fontFamily: ui(500), fontSize: 12 },
   disabled: { opacity: 0.45 },
   newPane: {
     height: 50,

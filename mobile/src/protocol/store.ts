@@ -136,6 +136,17 @@ export interface ScreenState {
 }
 
 const EMPTY_ROW: ScreenRun[] = [];
+
+/** A row's content as one string (its runs' text and styles), remembered per array. */
+const rowTexts = new WeakMap<ScreenRun[], string>();
+function rowText(runs: ScreenRun[]): string {
+  let t = rowTexts.get(runs);
+  if (t === undefined) {
+    t = JSON.stringify(runs);
+    rowTexts.set(runs, t);
+  }
+  return t;
+}
 const NO_RULES: ReadonlyMap<number, string> = new Map();
 
 /**
@@ -148,7 +159,12 @@ export function reduceScreen(prev: ScreenState | null, msg: ScreenMsg | ScreenEn
   const base = msg.full || !prev ? [] : prev.lines;
   const lines: ScreenRun[][] = [];
   for (let r = 0; r < msg.rows; r++) lines.push(base[r] ?? EMPTY_ROW);
-  for (const [row, runs] of msg.lines) if (row < msg.rows) lines[row] = runs;
+  // A row that comes again with what an earlier row held (a scroll moves every row by its lines)
+  // keeps that row's array: the view keys rows by it and moves the drawn row instead of drawing
+  // it again, so a scroll redraws only the rows it brings in.
+  const had = new Map<string, ScreenRun[]>();
+  for (const l of prev?.lines ?? []) had.set(rowText(l), l);
+  for (const [row, runs] of msg.lines) if (row < msg.rows) lines[row] = had.get(rowText(runs)) ?? runs;
   const stale = !msg.full && (prev?.stale ?? false);
   // colours and rules ride on every frame (diffs too): `rules` is the whole list, omitted when
   // there are none; absent colours (an older desktop) are the phone's own
@@ -165,6 +181,16 @@ export function reduceScreen(prev: ScreenState | null, msg: ScreenMsg | ScreenEn
     stale,
     ageMs: msg.age_ms ?? null,
   };
+}
+
+/**
+ * Whether two frames of a screen differ only in their rows, cursor, rules or age: what the pane's
+ * own view follows. There or not, alternate or not, its size, its colours, stale, held behind:
+ * those the rest of the app reads too.
+ */
+export function screenShapeSame(a: ScreenState | null, b: ScreenState | null): boolean {
+  if (a === null || b === null) return a === b;
+  return a.alt === b.alt && a.cols === b.cols && a.rows === b.rows && a.stale === b.stale && a.fg === b.fg && a.bg === b.bg && (a.ageMs === null) === (b.ageMs === null);
 }
 
 /** The screen kept, out of date, across a re-subscribe or reconnect (the client's `onScreenStale`). */

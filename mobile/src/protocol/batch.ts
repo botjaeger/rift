@@ -54,6 +54,14 @@ export class BatchedStore<T> {
     this.timer = setTimeout(() => this.flush(), due - now);
   }
 
+  /**
+   * Applies `fn` without telling the listeners: what `peek` reads, and what the next publish
+   * carries. For a write only some readers follow, through their own signal (a screen frame).
+   */
+  quiet(fn: (state: T) => T): void {
+    this.current = fn(this.current);
+  }
+
   /** Publishes pending writes now. */
   flush(): void {
     if (this.timer) clearTimeout(this.timer);

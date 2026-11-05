@@ -7,6 +7,7 @@ import {
   homeChoiceLabel,
   homeCounts,
   quickChoices,
+  sameTabRow,
   sheetCounts,
   sheetRows,
   stateText,
@@ -96,20 +97,50 @@ describe("tabRow", () => {
   const h = host([asking, working, idleAgent, failed]);
   const rows = (c: RowContext, idle = new Map<string, number>()) => h.windows[0]!.tabs.map((t) => tabRow(h, t, c, idle));
 
-  it("builds the one-computer rows: agent title, program · place lines, ticking clock, failed count", () => {
+  it("titles a row by its tab; its line is the lead pane's program and what it does; the short time goes beside the mark", () => {
     const [a, w, i, f] = rows(ctx({ waitingSince: () => NOW - 120_000 }), new Map([[tabKey("A", idleAgent), NOW - 12 * 60_000]]));
-    expect(a).toMatchObject({ title: "RIFT", state: "Needs you · 2m", line: "claude · ~/zzz/rift · main", agent: true, panes: 1 });
+    expect(a).toMatchObject({ title: "RIFT", state: "Needs you · 2m", line: "claude · waiting for you · Edit mobile/src/app/index.tsx?", when: "2m", agent: true, panes: 1 });
     expect(a!.ask).toMatchObject({ pane: 1, program: "claude" });
-    expect(w).toMatchObject({ title: "Quill engine", state: "Working 3:56", line: "claude · pnpm test — 14 passed" });
-    expect(i).toMatchObject({ title: "Code changes overview", state: "Idle 12m", line: "claude · waiting for your prompt" });
-    expect(f).toMatchObject({ title: "flow", state: "2 failed", agent: false, panes: 3 });
-    expect(f!.line).toBe("~/xxx/flow · psa");
+    // an agent's session title is its line now, never the row's title
+    expect(w).toMatchObject({ title: "q", state: "Working 3:56", line: "claude · running · pnpm test — 14 passed", when: "3:56" });
+    expect(i).toMatchObject({ title: "c", state: "Idle 12m", line: "claude · idle · Code changes overview", when: "12m" });
+    // several panes: their count leads the line; the tab's words count its failures
+    expect(f).toMatchObject({ title: "flow", state: "2 failed", line: "3 panes · psa · exited 1", when: "✕ 1", agent: false, panes: 3 });
   });
 
-  it("shows the question as the line, and no program, when several computers are on screen", () => {
-    const [a, w] = rows(ctx({ multi: true }));
-    expect(a!.line).toBe("Edit mobile/src/app/index.tsx?");
-    expect(w!.line).toBe("pnpm test — 14 passed");
+  it("tells a row built again with what it draws from one that changed", () => {
+    const c = ctx({ waitingSince: () => NOW - 120_000 });
+    const [a1, w1] = rows(c);
+    const [a2, w2] = rows(c);
+    // built afresh from the same state: a new object that draws the same
+    expect(a2).not.toBe(a1);
+    expect(sameTabRow(a1!, a2!)).toBe(true);
+    expect(sameTabRow(w1!, w2!)).toBe(true);
+    // a second later the working clock moved: that row draws again, the asking one does not
+    const later = rows(ctx({ now: NOW + 1000, waitingSince: () => NOW - 120_000 }));
+    expect(sameTabRow(w1!, later[1]!)).toBe(false);
+    expect(sameTabRow(a1!, later[0]!)).toBe(true);
+    expect(sameTabRow(a1!, { ...a1!, title: "other" })).toBe(false);
+    expect(sameTabRow(a1!, { ...a1!, when: "9m" })).toBe(false);
+    expect(sameTabRow(a1!, { ...a1!, tab: { ...a1!.tab, pinned: !a1!.tab.pinned } })).toBe(false);
+  });
+
+
+  it("puts the failed pane's time beside a failed tab's mark, whichever pane speaks for it", () => {
+    const split = tab([pane(20, { last_command: "make", last_exit: 2 }), pane(21, { active: true, cwd: "/Users/me/code", last_command: "ls", last_exit: 0 })], "build");
+    const r = tabRow(host([split]), split, ctx(), new Map());
+    expect(r).toMatchObject({ kind: "failed", when: "✕ 2" });
+  });
+  it("words a shell's command, an idle shell and an unknown time", () => {
+    const shell = tab([pane(9, { job: "cargo", last_command: "cargo test", running: { started: null, line: "" } })], "api");
+    expect(tabRow(host([shell]), shell, ctx(), new Map())).toMatchObject({ line: "cargo test · running", when: "" });
+    const idleShell = tab([pane(10, { cwd: "/Users/me/code", last_command: "ls", last_exit: 0 })], "work");
+    expect(tabRow(host([idleShell]), idleShell, ctx(), new Map())).toMatchObject({ kind: "idle", line: "~/code · idle · ls ✓", when: "" });
+    // a tab named after its folder: the line leaves the folder out
+    const home = tab([pane(12, { cwd: "/Users/me/code", last_command: "ls", last_exit: 0 })], "code");
+    expect(tabRow(host([home]), home, ctx(), new Map()).line).toBe("idle · ls ✓");
+    const fresh = tab([pane(11, {})], "new");
+    expect(tabRow(host([fresh]), fresh, ctx(), new Map()).line).toBe("idle");
   });
 
   it("takes the start of a working pane from a Notify me when the computer sends none", () => {

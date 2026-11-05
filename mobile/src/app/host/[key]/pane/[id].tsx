@@ -1,6 +1,6 @@
 import { FlashList, type FlashListRef } from "@shopify/flash-list";
 import { Stack, useFocusEffect, useIsFocused, useLocalSearchParams, useRouter } from "expo-router";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   AccessibilityInfo,
   BackHandler,
@@ -20,11 +20,11 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { askingTitle, questionKey } from "@/answer";
 import { chipItems } from "@/promptChips";
 import { canClose, canOperate, draftKey, hasFeature, isAsked, wrapsLines } from "@/fleet";
-import { foldBlocks, paneName, programName, swipeTarget, tabPane, type PaneItem } from "@/now";
+import { foldBlocks, paneKind, paneName, programName, swipeTarget, tabKind, tabPane, type PaneItem } from "@/now";
 import { bareScreen as screenIsBare, CLAUDE_COLOR, paneMark, runsAgent, screenView, waitingOthers } from "@/paneView";
 import { canLoadOlder, MAX_BLOCKS } from "@/protocol/store";
 import type { Block } from "@/protocol/types";
-import { fleet, useApp } from "@/runtime";
+import { fleet, useApp, useScreen } from "@/runtime";
 import { pending } from "@/pending";
 import { atEnd, screenProgram, showsTerminal } from "@/terminal";
 import { findPane, paneTitle, runningCommand, tabTitle } from "@/topology";
@@ -33,6 +33,10 @@ import { FailedCard, FoldRow, RunningCard } from "@/ui/BlockCards";
 import { BlockView } from "@/ui/BlockView";
 import { SelectionItem, SelectionScope, type SelectionScopeHandle } from "@/ui/SelectionScope";
 import { Composer } from "@/ui/Composer";
+import { ComputerMenu } from "@/ui/ComputerMenu";
+import { hostLine } from "@/ui/connStatus";
+import { hostDot } from "@/ui/hostDot";
+import { StatusMark } from "@/ui/StatusMark";
 import { usePending } from "@/ui/usePending";
 import { Button } from "@/ui/Button";
 import { Icon } from "@/ui/Icon";
@@ -40,6 +44,7 @@ import { ErrorText } from "@/ui/Notice";
 import { useHostNotifications } from "@/ui/useHostNotifications";
 import { BlockSkeleton, PaneCard, PaneStrip } from "@/ui/PaneLoading";
 import { openingTitle, paneLoad } from "@/ui/paneLoad";
+import { canNewPane, canNewTab } from "@/ui/newTab";
 import { headerTop } from "@/ui/Screen";
 import { TabBar } from "@/ui/TabBar";
 import { TerminalView } from "@/ui/TerminalView";
@@ -85,15 +90,21 @@ export default function PaneScreen() {
   const list = useRef<FlashListRef<PaneItem>>(null);
   const atBottom = useRef(true);
   const [menu, setMenu] = useState(false);
+  // the computer menu (the header's name)
+  const [computers, setComputers] = useState(false);
+  // the selection bar while text is selected in the output (SelectionScope) or on the screen (TerminalView)
+  const [selBar, setSelBar] = useState<ReactNode | null>(null);
+  const [barH, setBarH] = useState(0);
   // Android's Back closes the open menu, not the pane under it
   useEffect(() => {
-    if (!menu) return;
+    if (!menu && !computers) return;
     const sub = BackHandler.addEventListener("hardwareBackPress", () => {
       setMenu(false);
+      setComputers(false);
       return true;
     });
     return () => sub.remove();
-  }, [menu]);
+  }, [menu, computers]);
   // a close that brought us here says so (useClose), then the toast goes as any other
   const [toast, setToast] = useState(toastParam ?? "");
   const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -184,7 +195,8 @@ export default function PaneScreen() {
 
   // The view follows the pane: its screen while a full-screen program runs, blocks otherwise.
   const screenFeature = hasFeature(host, "screen");
-  const screen = pane?.screen ?? null;
+  // every frame, read here only: the app state takes rows quietly (fleet.screenTick)
+  const screen = useScreen(key, paneId);
   // TUI or blocks by one rule, no switch (screenView): the alternate screen, an agent (on either
   // screen: Claude Code picks its renderer per launch) or a program no block holds show the
   // screen (gateway mode `on` unless only the alternate screen asks); everything else, blocks.
@@ -214,7 +226,8 @@ export default function PaneScreen() {
   }, [fullScreen]);
   const loaded = fullScreen ? screen !== null : state !== null;
   const waitingForPane = !closed && !(status === "open" && loaded);
-  const now = useNow(1000, waitingForPane && focused);
+  // ticks while the pane loads or the computer menu (its "trying again in" lines) is open
+  const now = useNow(1000, (waitingForPane || computers) && focused);
   const hostName = host?.record.name ?? "this computer";
   const load = host && !closed ? paneLoad({
     conn: host.conn,
@@ -242,6 +255,8 @@ export default function PaneScreen() {
   const wrap = wrapsLines(s, key, paneId);
   const operate = host ? canOperate(host) : false;
   const closeable = canClose(host);
+  const canSplit = !!host && !closed && canNewPane(host, paneId);
+  const canOpenTab = !!host && !closed && canNewTab(host);
   const onClose = useClose(key, paneId, setError, say);
   const onActions = useCallback(
     (blockId: number) => router.push({ pathname: "/block", params: { key, pane: String(paneId), block: String(blockId) } }),
@@ -296,14 +311,14 @@ export default function PaneScreen() {
       setTimeout(() => list.current?.scrollToIndex({ index, viewPosition: 0.2, animated: false }), ms);
   }, [target, items, state]);
 
-  // the output's selection scope: its bar is placed again after a scroll
+  // the output's selection scope: it measures the selected field again after a scroll
   const selectionScope = useRef<SelectionScopeHandle>(null);
   // Judged when a drag or fling ends, not on every scroll event: the list shrinking under the
   // keyboard also reports a scroll, with the end now out of reach, and that read as "scrolled up".
   const onScrollEnd = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
     atBottom.current = atEnd(contentOffset.y, contentSize.height, layoutMeasurement.height, BOTTOM_SLOP);
-    // a selection's bar goes back next to the selected text, wherever the scroll left it
+    // the selected field moved: a tap on it (or its handles) must still keep the selection
     selectionScope.current?.refresh();
   }, []);
 
@@ -403,38 +418,37 @@ export default function PaneScreen() {
   // streaming output re-renders many times a second (a rebuilt gesture drops a swipe in progress)
   const prevPane = prevTab ? tabPane(prevTab) : null;
   const nextPane = nextTab ? tabPane(nextTab) : null;
+  // the next tab slides in from the right, the previous one from the left (the pane screen's
+  // animation reads `dir`, _layout.tsx)
   const goPaneOf = useCallback(
-    (to: number | null) => {
-      if (to !== null) router.replace({ pathname: "/host/[key]/pane/[id]", params: { key, id: String(to) } });
+    (to: number | null, dir: "next" | "prev") => {
+      if (to !== null) router.replace({ pathname: "/host/[key]/pane/[id]", params: { key, id: String(to), dir } });
     },
     [router, key],
   );
-  const onPrevTab = useCallback(() => goPaneOf(prevPane), [goPaneOf, prevPane]);
-  const onNextTab = useCallback(() => goPaneOf(nextPane), [goPaneOf, nextPane]);
+  const onPrevTab = useCallback(() => goPaneOf(prevPane, "prev"), [goPaneOf, prevPane]);
+  const onNextTab = useCallback(() => goPaneOf(nextPane, "next"), [goPaneOf, nextPane]);
   const openSwitcher = useCallback(() => router.push({ pathname: "/tabs", params: { key, pane: String(paneId) } }), [router, key, paneId]);
+  // the tab row under the header: on its side the screen needs every row
   const tabBar =
-    loc && tab && !compact ? (
+    loc && tab && !compact && !closed ? (
       <TabBar
         title={tabTitle(loc.tab)}
+        kind={tabKind(loc.tab)}
         number={tabNumber}
         count={tabCount}
         prev={prevTab ? tabTitle(prevTab) : null}
         next={nextTab ? tabTitle(nextTab) : null}
-        panes={tab.panes.length}
-        pane={Math.max(0, tab.panes.findIndex((p) => p.id === paneId))}
         onPrev={onPrevTab}
         onNext={onNextTab}
         onOpen={openSwitcher}
       />
     ) : null;
-  // where the bar is drawn: with the command line (not under a question, not over a program's own keys)
-  const barShown = !!tabBar && !!host && !closed && operate && !(asking && waiting) && (!fullScreen || bareScreen);
   const composer =
     closed || !host ? null : operate ? (
       // the board's 30 pt under the command line: the home indicator's inset, less the
       // command line's own 8 pt
       <View style={{ paddingBottom: bottomInset, backgroundColor: colors.chrome }}>
-        {tabBar}
         <Composer
           hostKey={key}
           paneId={paneId}
@@ -467,6 +481,25 @@ export default function PaneScreen() {
     ) : (
       composer
     );
+  // while text is selected its bar is docked where the controls are: drawn over them, which stay
+  // in place, hidden, so the output does not move under the finger. A question card stays: it is
+  // the pane's answer, not its controls.
+  const docked = selBar !== null && !(asking && waiting);
+  // controls shorter than the bar (no chips row): the place grows to the bar, all of it in reach
+  const dockedFooter = (
+    <View style={docked ? { minHeight: barH + bottomInset } : null}>
+      {/* over a question card, which stays, the bar goes above it */}
+      {selBar !== null && !docked ? <View style={styles.overCard}>{selBar}</View> : null}
+      <View style={docked ? styles.underBar : null} pointerEvents={docked ? "none" : "auto"} accessibilityElementsHidden={docked} importantForAccessibility={docked ? "no-hide-descendants" : "auto"}>
+        {footer}
+      </View>
+      {docked ? (
+        <View style={[styles.dock, { bottom: bottomInset }]} onLayout={(e) => setBarH(e.nativeEvent.layout.height)}>
+          {selBar}
+        </View>
+      ) : null}
+    </View>
+  );
 
   return (
     <KeyboardAvoidingView style={styles.fill} behavior="padding">
@@ -486,25 +519,25 @@ export default function PaneScreen() {
               </View>
             ) : null}
           </Pressable>
+          {/* the computer: its name opens the computer menu; the tab's name is on the tab row */}
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={loc ? tabTitle(loc.tab) + ", tab " + tabNumber + " of " + tabCount + " on " + hostName + ". Switch tab" : (cachedTitle ?? hostName)}
-            disabled={!loc || closed}
-            onPress={() => router.push({ pathname: "/tabs", params: { key, pane: String(paneId) } })}
+            accessibilityLabel={host ? `${hostName}, ${hostLine(host.conn, now, null).text}. Computers` : hostName}
+            accessibilityState={{ expanded: computers }}
+            disabled={!host}
+            onPress={() => {
+              setMenu(false);
+              setComputers((c) => !c);
+            }}
             style={({ pressed }) => [styles.titleButton, pressed && styles.pressed]}
           >
             <View style={styles.titleLine}>
-              {/* the tab's own name and place are on the tab bar over the command line */}
+              {host ? <View style={[styles.hostDot, { backgroundColor: hostDot(host) }]} /> : null}
               <Text style={styles.title} numberOfLines={1}>
-                {loc && barShown ? hostName : loc ? tabTitle(loc.tab) : (cachedTitle ?? hostName)}
+                {hostName}
               </Text>
-              {loc && !closed ? <Icon name="chevronDown" size={16} color={colors.textMuted} /> : null}
+              {host ? <Icon name="chevronDown" size={16} color={colors.textMuted} /> : null}
             </View>
-            {host && (loc || cachedTitle) && !(loc && barShown) ? (
-              <Text style={[styles.subtitle, compact && styles.hidden]} numberOfLines={1}>
-                {loc ? hostName + " · tab " + tabNumber + " of " + tabCount : hostName}
-              </Text>
-            ) : null}
           </Pressable>
           {!host || closed ? null : (
             <View style={styles.actions}>
@@ -522,7 +555,10 @@ export default function PaneScreen() {
                 accessibilityRole="button"
                 accessibilityLabel="More"
                 accessibilityState={{ expanded: menu }}
-                onPress={() => setMenu((m) => !m)}
+                onPress={() => {
+                  setComputers(false);
+                  setMenu((m) => !m);
+                }}
                 style={({ pressed }) => [styles.action, pressed && styles.pressed]}
               >
                 <Icon name="more" size={19} color={colors.text} />
@@ -530,7 +566,10 @@ export default function PaneScreen() {
             </View>
           )}
         </View>
-        {loc && tab && !closed && !compact && (tab.panes.length > 1 || !barShown) ? (
+      </View>
+      {tabBar}
+      {loc && tab && !closed && !compact && tab.panes.length > 1 ? (
+        <View style={styles.paneRow}>
           <View style={styles.pickRow}>
             <Pressable
               accessibilityRole="button"
@@ -547,6 +586,7 @@ export default function PaneScreen() {
               <Text style={styles.pickName} numberOfLines={1}>
                 {pickName}
               </Text>
+              {loc ? <StatusMark kind={paneKind(loc.pane)} /> : null}
               {/* textMuted: the mockup's textDim is 4.3:1 on the picker's glass (palette.ts) */}
               <Text style={styles.pickPos}>
                 · {paneNumber}/{tab.panes.length}
@@ -561,8 +601,8 @@ export default function PaneScreen() {
               <Icon name="chevronDown" size={14} color={colors.textMuted} />
             </Pressable>
           </View>
-        ) : null}
-      </View>
+        </View>
+      ) : null}
       {load?.strip ? <PaneStrip strip={load.strip} onPress={details} /> : null}
       {waiting && status === "open" && !asking ? (
         <Pressable
@@ -598,13 +638,14 @@ export default function PaneScreen() {
               canUpload={hasFeature(host, "upload") && operate}
               canUploadFiles={hasFeature(host, "upload_files") && operate}
               onPasted={() => setPastedPane(paneId)}
+              onBar={setSelBar}
               canPaste={hasFeature(host, "paste") && operate}
               canMouse={hasFeature(host, "mouse") && operate}
               keepHeight={asking}
             />
             {load?.card ? <PaneCard card={load.card} onRetry={tryAgain} onDetails={details} onLeave={leave} /> : null}
           </View>
-          {bareScreen ? footer : null}
+          {bareScreen ? dockedFooter : null}
         </>
       ) : (
         <>
@@ -643,7 +684,7 @@ export default function PaneScreen() {
             <Text style={styles.empty}>No block holds “{searching.trim()}”.</Text>
           ) : null}
           <View style={[styles.fill, load?.held && styles.held]}>
-            <SelectionScope ref={selectionScope} hostKey={key} paneId={paneId} canPrompt={operate && !closed}>
+            <SelectionScope ref={selectionScope} hostKey={key} paneId={paneId} canPrompt={operate && !closed} onBar={setSelBar}>
               {!state && host && !closed ? <BlockSkeleton /> : null}
               {/* Not inverted: oldest first, so the reading order (and swiping through with a
                   screen reader) ends at the newest block, which the list starts scrolled to. */}
@@ -706,7 +747,7 @@ export default function PaneScreen() {
             </SelectionScope>
             {load?.card ? <PaneCard card={load.card} onRetry={tryAgain} onDetails={details} onLeave={leave} /> : null}
           </View>
-          {footer}
+          {dockedFooter}
         </>
       )}
       {menu ? (
@@ -736,9 +777,16 @@ export default function PaneScreen() {
               hint="Finished, failed and questions here"
               on={notifOn}
               disabled={alerts.saving}
-              last={!closeable}
+              last={!closeable && !canSplit && !canOpenTab}
               onPress={() => alerts.change(!notifOn)}
             />
+            {/* the New pane / New tab sheets (the program to run), as the Tabs page's header */}
+            {canSplit ? (
+              <MenuItem icon="newPane" title="Split pane" hint="Another program beside this one" last={!closeable && !canOpenTab} onPress={() => { setMenu(false); router.push({ pathname: "/new-pane", params: { key, pane: String(paneId) } }); }} />
+            ) : null}
+            {canOpenTab ? (
+              <MenuItem icon="add" title="New tab" hint={`On ${hostName}`} last={!closeable} onPress={() => { setMenu(false); router.push({ pathname: "/new-tab", params: { key } }); }} />
+            ) : null}
             {closeable ? (
               <>
                 <MenuAction title="Close pane" onPress={() => { setMenu(false); onClose(paneId, "pane"); }} />
@@ -746,6 +794,30 @@ export default function PaneScreen() {
               </>
             ) : null}
           </View>
+        </>
+      ) : null}
+      {computers && host ? (
+        <>
+          <Pressable accessibilityRole="button" accessibilityLabel="Close menu" onPress={() => setComputers(false)} style={StyleSheet.absoluteFill} />
+          <ComputerMenu
+            hosts={s.hosts}
+            current={key}
+            now={now}
+            top={headerPad + 50}
+            onOpen={(h, p) => {
+              setComputers(false);
+              router.replace({ pathname: "/host/[key]/pane/[id]", params: { key: h, id: String(p) } });
+            }}
+            onConnection={() => {
+              setComputers(false);
+              details();
+            }}
+            onDismiss={() => setComputers(false)}
+            onPortals={() => {
+              setComputers(false);
+              router.dismissTo("/");
+            }}
+          />
         </>
       ) : null}
       {toast ? (
@@ -769,6 +841,19 @@ function MenuAction({ title, last, onPress }: { title: string; last?: boolean; o
       style={({ pressed }) => [styles.menuAction, !last && styles.menuRule, pressed && styles.pressed]}
     >
       <Text style={styles.menuDestructive}>{title}</Text>
+    </Pressable>
+  );
+}
+
+/** One of the ⋯ menu's actions that opens a page: an icon, the label and what it does. */
+function MenuItem({ icon, title, hint, last, onPress }: { icon: "newPane" | "add"; title: string; hint: string; last?: boolean; onPress: () => void }) {
+  return (
+    <Pressable accessibilityRole="menuitem" accessibilityLabel={title} accessibilityHint={hint} onPress={onPress} style={({ pressed }) => [styles.menuRow, !last && styles.menuRule, pressed && styles.pressed]}>
+      <Icon name={icon} size={20} color={colors.text} />
+      <View style={styles.menuText}>
+        <Text style={styles.menuTitle}>{title}</Text>
+        <Text style={styles.menuHint}>{hint}</Text>
+      </View>
     </Pressable>
   );
 }
@@ -814,7 +899,6 @@ function MenuSwitch({
 }
 
 const styles = StyleSheet.create({
-  hidden: { display: "none" },
   fill: { flex: 1, backgroundColor: colors.bg },
   flex: { flex: 1 },
   pressed: { opacity: 0.7 },
@@ -845,9 +929,15 @@ const styles = StyleSheet.create({
   },
   badgeText: { fontFamily: ui(600), color: colors.bg, fontSize: 11 },
   titleButton: { flex: 1, minWidth: 0, minHeight: 44, justifyContent: "center", paddingHorizontal: 6 },
-  titleLine: { flexDirection: "row", alignItems: "center", gap: 4 },
+  titleLine: { flexDirection: "row", alignItems: "center", gap: 7 },
+  hostDot: { width: 8, height: 8, borderRadius: 4 },
+  // the pane picker under the tab row, for a tab of several panes
+  // the selection bar over the pane's controls (hidden in place under it)
+  underBar: { opacity: 0 },
+  dock: { position: "absolute", left: 0, right: 0, backgroundColor: colors.chrome },
+  overCard: { backgroundColor: colors.chrome },
+  paneRow: { backgroundColor: colors.chrome, paddingHorizontal: 12, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: colors.hairline },
   title: { flexShrink: 1, fontFamily: ui(600), color: colors.textBright, fontSize: 17 },
-  subtitle: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12 },
   actions: { height: 44, flexDirection: "row", borderRadius: 22, backgroundColor: colors.glass, borderWidth: 1, borderColor: colors.glassRim },
   action: { width: 44, height: 42, alignItems: "center", justifyContent: "center" },
   pickRow: { flexDirection: "row", alignItems: "center", gap: 6 },
@@ -892,7 +982,8 @@ const styles = StyleSheet.create({
   menuRow: { minHeight: 56, flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 14 },
   menuRule: { borderBottomWidth: 1, borderBottomColor: colors.hairline },
   menuNote: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12, lineHeight: 17, paddingHorizontal: 14, paddingVertical: 12 },
-  menuAction: { minHeight: 48, justifyContent: "center", paddingHorizontal: 14 },
+  // the text column of the rows with icons (14 + the 20 pt icon + 12)
+  menuAction: { minHeight: 48, justifyContent: "center", paddingLeft: 46, paddingRight: 14 },
   menuDestructive: { fontFamily: ui(400), color: colors.warning, fontSize: 15 },
   menuText: { flex: 1, gap: 2, paddingVertical: 8 },
   menuTitle: { fontFamily: ui(400), color: colors.textBright, fontSize: 15 },

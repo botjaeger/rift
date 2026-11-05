@@ -25,6 +25,8 @@ export function useReorder(): { drag: Dragging; setDrag: (d: Dragging) => void; 
 export interface RowHandle {
   accessibilityActions: { name: string; label: string }[];
   onAccessibilityAction: (e: AccessibilityActionEvent) => void;
+  /** With `grip`: wraps the row's grip, which drags the row at once (the rest of the row stays a button). */
+  grip: (node: ReactNode) => ReactNode;
 }
 
 /** The row's drag, made once: handlers read the latest props through `latest`, never while rendering. */
@@ -68,12 +70,17 @@ function makeRow(first: Props) {
   function onFinalize() {
     if (box.lifted) reset();
   }
-  const gesture = (enabled: boolean) =>
-    Gesture.Pan().runOnJS(true).enabled(enabled).activateAfterLongPress(LIFT_MS).onStart(onStart).onUpdate(onUpdate).onEnd(onEnd).onFinalize(onFinalize);
-  const handle = (p: Props): RowHandle => {
+  // a grip lifts the row on its first movement; a whole row lifts after a long press, so a swipe
+  // over it still scrolls the list
+  const gesture = (enabled: boolean, grip: boolean) => {
+    const pan = Gesture.Pan().runOnJS(true).enabled(enabled);
+    return (grip ? pan.minDistance(1) : pan.activateAfterLongPress(LIFT_MS)).onStart(onStart).onUpdate(onUpdate).onEnd(onEnd).onFinalize(onFinalize);
+  };
+  const handle = (p: Props, grip: (node: ReactNode) => ReactNode): RowHandle => {
     const up = stepTo(p.index, -1, p.count);
     const down = stepTo(p.index, 1, p.count);
     return {
+      grip,
       accessibilityActions: p.enabled
         ? [...(up === null ? [] : [{ name: "moveUp", label: "Move up" }]), ...(down === null ? [] : [{ name: "moveDown", label: "Move down" }])]
         : [],
@@ -100,6 +107,8 @@ interface Props {
   setDrag: (d: Dragging) => void;
   /** Row `from` was dropped on place `to`. */
   onMove: (from: number, to: number) => void;
+  /** The row drags by its grip (`handle.grip`), at once, rather than by a long press on all of it. */
+  grip?: boolean;
   /** Called with the pressable's props. */
   children: (handle: RowHandle) => ReactNode;
 }
@@ -119,18 +128,20 @@ export function ReorderRow(props: Props) {
     row.update(props);
   });
   const { index, rowH, drag, enabled } = props;
-  const pan = useMemo(() => row.gesture(enabled), [row, enabled]);
+  const grip = !!props.grip;
+  const pan = useMemo(() => row.gesture(enabled, grip), [row, enabled, grip]);
   const lifted = drag.active === index;
   const shift = drag.active === null ? 0 : shiftOf(index, drag.active, drag.slot, rowH);
-  return (
-    <GestureDetector gesture={pan}>
-      <Animated.View
-        style={[
-          lifted ? { zIndex: 2, elevation: 6, shadowColor: colors.bg, shadowOpacity: 0.5, shadowRadius: 8, transform: [{ translateY: row.dy }] } : { transform: [{ translateY: shift }] },
-        ]}
-      >
-        {props.children(row.handle(props))}
-      </Animated.View>
-    </GestureDetector>
+  const wrapGrip = (node: ReactNode) => (grip ? <GestureDetector gesture={pan}>{node}</GestureDetector> : node);
+  // zIndex on both sides: a row that got one only when lifted remounted under the finger (iOS ended the drag)
+  const body = (
+    <Animated.View
+      style={[
+        lifted ? { zIndex: 2, elevation: 6, shadowColor: colors.bg, shadowOpacity: 0.5, shadowRadius: 8, transform: [{ translateY: row.dy }] } : { zIndex: 0, transform: [{ translateY: shift }] },
+      ]}
+    >
+      {props.children(row.handle(props, wrapGrip))}
+    </Animated.View>
   );
+  return grip ? body : <GestureDetector gesture={pan}>{body}</GestureDetector>;
 }

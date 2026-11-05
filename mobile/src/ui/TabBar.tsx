@@ -1,34 +1,35 @@
 import { useMemo } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { Directions, Gesture, GestureDetector } from "react-native-gesture-handler";
+import type { TabKind } from "@/now";
 import { Icon } from "./Icon";
-import { colors, mono, ui } from "./theme";
+import { StatusMark } from "./StatusMark";
+import { colors, ui } from "./theme";
 
 interface Props {
   title: string;
+  /** The tab's status, as its mark on the desktop's tab bar. */
+  kind: TabKind;
   /** 1-based place of the tab among the window's tabs, and how many there are. */
   number: number;
   count: number;
   /** The neighbours' names (null: none on that side). */
   prev: string | null;
   next: string | null;
-  /** The tab's panes and which one this is (0-based). */
-  panes: number;
-  pane: number;
   onPrev: () => void;
   onNext: () => void;
-  /** Opens the Switcher. */
+  /** Opens the Tabs page. */
   onOpen: () => void;
 }
 
 /**
- * The tab bar over the command line (the Pane board): this tab's name with its place and a dot per
- * pane, the neighbours' names at the sides. A swipe left or right goes to the next or previous tab,
- * a tap on a side name goes there, a tap in the middle opens the Switcher. A screen reader gets
- * Next tab / Previous tab as actions.
+ * The tab row under the pane's header (the "Feedback fixes, playable" board): as wide at one tab
+ * as at a hundred. ‹ and › go to the neighbouring tabs (dimmed where there is none), the middle
+ * names this tab with its status and place and opens the Tabs page. A fling left or right does
+ * what › and ‹ do; a screen reader gets Next tab / Previous tab as actions.
  */
-export function TabBar({ title, number, count, prev, next, panes, pane, onPrev, onNext, onOpen }: Props) {
-  // flings only: a vertical drag still scrolls the output above, a tap still taps
+export function TabBar({ title, kind, number, count, prev, next, onPrev, onNext, onOpen }: Props) {
+  // flings only: a tap still taps
   const swipe = useMemo(
     () =>
       Gesture.Race(
@@ -46,25 +47,25 @@ export function TabBar({ title, number, count, prev, next, panes, pane, onPrev, 
     [next, prev, onNext, onPrev],
   );
   const actions = [...(next !== null ? [{ name: "next", label: "Next tab" }] : []), ...(prev !== null ? [{ name: "previous", label: "Previous tab" }] : [])];
+  const arrow = (to: string | null, label: string, icon: "chevronLeft" | "chevronRight", go: () => void) => (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={to ? `${label}: ${to}` : `No ${label.toLowerCase()}`}
+      accessibilityState={{ disabled: to === null }}
+      disabled={to === null}
+      onPress={go}
+      style={({ pressed }) => [styles.arrow, pressed && styles.pressed]}
+    >
+      <Icon name={icon} size={18} color={to === null ? colors.borderStrong : colors.text} />
+    </Pressable>
+  );
   return (
     <GestureDetector gesture={swipe}>
       <View style={styles.bar}>
+        {arrow(prev, "Previous tab", "chevronLeft", onPrev)}
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={prev ? `Previous tab: ${prev}` : undefined}
-          accessibilityElementsHidden={prev === null}
-          importantForAccessibility={prev === null ? "no-hide-descendants" : "auto"}
-          disabled={prev === null}
-          onPress={onPrev}
-          style={({ pressed }) => [styles.side, pressed && styles.pressed]}
-        >
-          <Text style={styles.sideText} numberOfLines={1}>
-            {prev ? `‹ ${prev}` : ""}
-          </Text>
-        </Pressable>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={`${title}, tab ${number} of ${count}${panes > 1 ? `, pane ${pane + 1} of ${panes}` : ""}. Open the switcher`}
+          accessibilityLabel={`${title}, tab ${number} of ${count}. Open the tabs`}
           accessibilityActions={actions}
           onAccessibilityAction={(e) => {
             if (e.nativeEvent.actionName === "next" && next !== null) onNext();
@@ -78,55 +79,25 @@ export function TabBar({ title, number, count, prev, next, panes, pane, onPrev, 
             <Text style={styles.title} numberOfLines={1}>
               {title}
             </Text>
+            <StatusMark kind={kind} />
             <Icon name="chevronDown" size={12} color={colors.textMuted} />
           </View>
-          <View style={styles.meta}>
-            <Text style={styles.metaText}>
-              tab {number} of {count}
-            </Text>
-            {panes > 1 ? (
-              <>
-                <View style={styles.dots}>
-                  {Array.from({ length: Math.min(panes, 6) }, (_, i) => (
-                    <View key={i} style={[styles.dot, i === pane && styles.dotOn]} />
-                  ))}
-                </View>
-                <Text style={styles.metaText}>{panes} panes</Text>
-              </>
-            ) : null}
-          </View>
-        </Pressable>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={next ? `Next tab: ${next}` : undefined}
-          accessibilityElementsHidden={next === null}
-          importantForAccessibility={next === null ? "no-hide-descendants" : "auto"}
-          disabled={next === null}
-          onPress={onNext}
-          style={({ pressed }) => [styles.side, styles.sideRight, pressed && styles.pressed]}
-        >
-          <Text style={[styles.sideText, styles.right]} numberOfLines={1}>
-            {next ? `${next} ›` : ""}
+          <Text style={styles.metaText}>
+            tab {number} of {count}
           </Text>
         </Pressable>
+        {arrow(next, "Next tab", "chevronRight", onNext)}
       </View>
     </GestureDetector>
   );
 }
 
 const styles = StyleSheet.create({
-  bar: { height: 48, flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 6 },
-  side: { width: 72, height: 44, justifyContent: "center" },
-  sideRight: { alignItems: "flex-end" },
-  sideText: { fontFamily: mono, color: colors.textMuted, fontSize: 12 },
-  right: { textAlign: "right" },
-  middle: { flex: 1, minWidth: 0, alignItems: "center", gap: 3 },
-  titleLine: { flexDirection: "row", alignItems: "center", gap: 6, maxWidth: "100%" },
-  title: { flexShrink: 1, fontFamily: ui(600), color: colors.textBright, fontSize: 16 },
-  meta: { flexDirection: "row", alignItems: "center", gap: 6 },
+  bar: { height: 52, flexDirection: "row", alignItems: "center", gap: 2, paddingHorizontal: 4, backgroundColor: colors.chrome, borderBottomWidth: 1, borderBottomColor: colors.hairline },
+  arrow: { width: 44, height: 44, alignItems: "center", justifyContent: "center" },
+  middle: { flex: 1, minWidth: 0, alignItems: "center", gap: 2 },
+  titleLine: { flexDirection: "row", alignItems: "center", gap: 7, maxWidth: "100%" },
+  title: { flexShrink: 1, fontFamily: ui(600), color: colors.textBright, fontSize: 15 },
   metaText: { fontFamily: ui(400), color: colors.textMuted, fontSize: 11 },
-  dots: { flexDirection: "row", gap: 3 },
-  dot: { width: 5, height: 5, borderRadius: 3, backgroundColor: colors.borderStrong },
-  dotOn: { width: 12, backgroundColor: colors.accent },
   pressed: { opacity: 0.7 },
 });

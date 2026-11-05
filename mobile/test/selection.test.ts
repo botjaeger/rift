@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { barStaysLow, barTop, tapEndsSelection, COPY_SETTLE_MS, countLabel, lineRange, promptText, selectedText, selectionCount, showsOwnCopied, textToCopy } from "../src/selection";
+import { tapEndsSelection, COPY_SETTLE_MS, countLabel, lineRange, promptText, selectedText, selectionCount, showsOwnCopied, textToCopy } from "../src/selection";
 
 describe("the bar's Line and To prompt", () => {
   const text = "first line\nsecond line\nthird";
@@ -25,35 +25,22 @@ describe("the bar's Line and To prompt", () => {
 });
 
 describe("where the selection bar goes", () => {
-  it("over block output: just above the field, else just under it, never off the output", () => {
-    // room above: bar of 100 ends 8 above the field
-    expect(barTop(500, 540, 700, 100)).toBe(392);
-    // a field at the top: under it
-    expect(barTop(40, 80, 700, 100)).toBe(88);
-    // a field filling the output: the bottom
-    expect(barTop(-300, 1200, 700, 100)).toBe(592);
-    // an output smaller than the bar still keeps the margin
-    expect(barTop(10, 20, 50, 100)).toBe(8);
-    // the field scrolled out below the output: the bar stays on it, at its bottom
-    expect(barTop(900, 940, 700, 100)).toBe(592);
-    // scrolled out above: at its top
-    expect(barTop(-200, -160, 700, 100)).toBe(8);
+  const src = (p: string) => readFileSync(new URL(`../${p}`, import.meta.url), "utf8");
+  it("is docked over the controls, for blocks and a program's screen alike: never over the text, nothing moves", () => {
+    const bar = src("src/ui/SelectionBar.tsx");
+    expect(bar).not.toContain('position: "absolute"');
+    // the program's screen: over its key row, hidden in place; the program keeps its size
+    const tv = src("src/ui/TerminalView.tsx");
+    expect(tv).toContain("style={[styles.bar, keysUnder && styles.underBar]}");
+    expect(tv).toContain("screen?.ageMs != null || selecting));");
+    // the pane draws the bar its output or its screen hands it over its message box, hidden in place
+    const pane = src("src/app/host/[key]/pane/[id].tsx");
+    expect(pane).toContain("<View style={docked ? styles.underBar : null}");
+    expect(pane.match(/onBar=\{setSelBar\}/g)).toHaveLength(2);
+    expect(src("src/ui/SelectionScope.tsx")).not.toContain("<SelectionBar\n            selected={active.selected}\n            copied={active.copied}\n            onFrame");
   });
-  it("on Android, where the system's own menu sits just above the selection: under it, else the top", () => {
-    // room under the field
-    expect(barTop(200, 240, 700, 100, true)).toBe(248);
-    // a field at the bottom of the output: the top, away from the system menu
-    expect(barTop(560, 600, 700, 100, true)).toBe(8);
-  });
-  it("over a program's screen: at the bottom unless the selection reaches the bar's room", () => {
-    // 40 rows in 800 pt: the bottom 120 pt are the last 6 rows
-    expect(barStaysLow(10, 40, 800)).toBe(true);
-    expect(barStaysLow(33, 40, 800)).toBe(true);
-    expect(barStaysLow(34, 40, 800)).toBe(false);
-    expect(barStaysLow(39, 40, 800)).toBe(false);
-    // not laid out yet, or no rows
-    expect(barStaysLow(5, 40, 0)).toBe(true);
-    expect(barStaysLow(0, 0, 800)).toBe(true);
+  it("a selection in another block ends the one before (else a later hold on the same word there shows no bar)", () => {
+    expect(src("src/ui/SelectionScope.tsx")).toContain("if (prev && prev.owner !== s.owner) prev.end();");
   });
 });
 

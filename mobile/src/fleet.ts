@@ -25,7 +25,7 @@ import { BatchedStore, FRAME_MS } from "./protocol/batch";
 import { MAX_OUTPUT_LINES, MAX_TEXT_BYTES, MAX_UPLOAD_BYTES, textProblem } from "./protocol/types";
 import { UPLOAD_TIMEOUT_MS, uploadChunks, uploadRefusal } from "./upload";
 import { RiftClient, type ConnState, type Failure, type SocketFactory } from "./protocol/client";
-import { canLoadOlder, reducePane, reduceScreen, staleScreen, type PaneState, type ScreenState } from "./protocol/store";
+import { canLoadOlder, reducePane, reduceScreen, screenShapeSame, staleScreen, type PaneState, type ScreenState } from "./protocol/store";
 import { findPane, tabTitle } from "./topology";
 import {
   isPushToken,
@@ -374,6 +374,12 @@ interface Pending {
 
 export class Fleet {
   readonly store: BatchedStore<AppState>;
+  /**
+   * A frame of the followed pane's screen that changed only its rows: `store` takes it quietly
+   * (every screen renders on its publish, Portals underneath too: 35 ms a frame, measured) and
+   * this tells the pane's own screen (`useScreen`).
+   */
+  readonly screenTick = new BatchedStore<number>(0, FRAME_MS);
   private readonly deps: FleetDeps;
   private readonly hostsStore: HostsStore;
   private readonly now: () => number;
@@ -568,14 +574,19 @@ export class Fleet {
           }),
         // a screen shows within a frame: the gateway already paces it (a scrolled program's
         // redraws every 16 ms, else every 100 ms)
-        onScreen: (msg, synthetic) =>
-          this.store.update(
-            (s) =>
-              s.pane?.host === key && s.pane.paneId === msg.pane
-                ? { ...s, pane: { ...s.pane, screen: reduceScreen(s.pane.screen, msg), screenExpired: !!synthetic } }
-                : s,
-            FRAME_MS,
-          ),
+        onScreen: (msg, synthetic) => {
+          const s0 = this.store.peek();
+          if (!(s0.pane?.host === key && s0.pane.paneId === msg.pane)) return;
+          const prev = s0.pane.screen;
+          const next = reduceScreen(prev, msg);
+          const apply = (s: AppState): AppState =>
+            s.pane?.host === key && s.pane.paneId === msg.pane ? { ...s, pane: { ...s.pane, screen: next, screenExpired: !!synthetic } } : s;
+          // what the rest of the app reads of a screen (there or not, alternate, its size, stale,
+          // expired) goes to everyone; new rows only to the screen's own view
+          if (screenShapeSame(prev, next) && s0.pane.screenExpired === !!synthetic) this.store.quiet(apply);
+          else this.store.update(apply, FRAME_MS);
+          this.screenTick.update((n) => n + 1, FRAME_MS);
+        },
         onScreenStale: (pane) =>
           this.store.update((s) =>
             s.pane?.host === key && s.pane.paneId === pane

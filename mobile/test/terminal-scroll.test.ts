@@ -24,6 +24,7 @@ function harness(typing = false) {
     useRef: (initial: unknown) => ({ current: initial }),
     useState: (initial: unknown) => [typeof initial === "function" ? initial() : initial, () => {}],
     useCallback: (fn: unknown) => fn,
+    useMemo: (fn: () => unknown) => fn(),
     useEffect: (effect: () => void | (() => void)) => effects.push(effect),
   };
   const dependencies: Record<string, unknown> = {

@@ -110,10 +110,12 @@ card cannot answer (a password, other input, a view-only device), and from an al
   may operate and that offers `open`, or `start` while Rift is closed), **Try again** while it
   cannot be reached (it connects at once, backoff reset), **Pair again** when it refused this
   phone's key (other failures say why under the name, in full). A connected card lists its tabs, what needs an answer on top and the rest in tab order: a tile (✳ in orange for a coding agent, `>_` for a
-  shell), the title, the state at the right ("Needs you · 2m", "Working 3:56", "2 failed",
-  "Idle 12m"; the idle time only for an agent the app saw working) and a line (program, folder,
-  branch, or the last command; with several computers paired a question shows its first line). A
-  tap opens the tab's pane. With one computer paired, a needs-you tab whose agent asks a menu of up to
+  shell), the tab's name, and under it what its lead pane does: its program or command and
+  running, idle or waiting for you (with several computers paired a question shows its first
+  line). On the right the tab's mark as the desktop's tab bar draws it (a spinner while it works,
+  a dot in its state's colour, ringed while it needs you) and a short time beside it ("2m",
+  "3:56", "✕ 1", "12m"; the idle time only for an agent the app saw working); the state in words
+  ("Needs you · 2m", "Working 3:56") is the row's screen-reader label. A tap opens the tab's pane. With one computer paired, a needs-you tab whose agent asks a menu of up to
   three distinct entries answers in place: the question and pills (**Yes**, **Always**, **No**; the
   first entry is filled), and **Open**. A pill sends that entry (Face ID first when Settings asks);
   **No** opens the Answer page with its field. With none paired it is the first-run page (**Scan
@@ -128,17 +130,22 @@ card cannot answer (a password, other input, a view-only device), and from an al
   then "End-to-end encrypted. The relay passes bytes it cannot read." and, when the computer cannot
   be reached, **Try again now**. The client records each path's state in `ConnState.paths`
   (`src/protocol/client.ts`); the wording is `src/ui/connStatus.ts` (tested in node).
-- **Tabs** (a sheet, from the pane's header title): every tab of that computer, in the computer's
-  tab order. Chips filter: All, Needs you, Working, Failed, each with its count.
-  A row: tile, title (**Here** on the open tab), the last line, a state pill ("Needs you", "✕ 2
-  failed", "Working 3:56", "Idle 12m") and the pane count. A tap goes to that tab's pane in place of
-  this one (Back still leads where it led). **New tab** at the foot opens the **New tab** sheet.
-- **Panes** (a sheet, from the pane picker): the tab's panes, each with its mark (✳ or `>_`),
-  name, last line (the question, the latest output line, the folder or the last command) and state
-  (Running, Needs you, ✕ exit, Idle); the open one is tinted. A tap opens that pane in place of this
-  one. **New pane** at the foot opens the **New pane** sheet.
-- **New tab** and **New pane** (sheets: `new-tab`, `new-pane`; opened from the Switcher, the
-  Panes page, and a computer's card on Portals for the tab): **Start with** Shell, Claude Code,
+- **Tabs** (a full page, from the middle of the pane's tab row; `src/app/tabs.tsx`): every tab of
+  that computer, pinned ones first under **Pinned** as on its tab bar, then the rest in the
+  computer's tab order. The header: "Tabs", the computer and its tab count, and **Split pane**,
+  **New tab** (operating devices only) and Close. A search field matches a tab's name, what its
+  lead pane does and any pane's folder; chips filter All, Needs you, Working, Failed, each with its
+  count. A row (`src/ui/ListRow.tsx`): the grip, the tab's name (a pin on a pinned tab, "N panes"
+  on a split one, which opens its Panes page), what its lead pane does, and on the right its mark
+  and short time as on Portals; the open tab is tinted. A tap goes to that tab's pane in place of
+  this one (Back still leads where it led); ✕ closes the tab. The list is virtualized, so a
+  computer of a hundred tabs draws the rows in view only.
+- **Panes** (a full page, from the pane row or a tab's "N panes"): the tab's panes as the same
+  rows, each with its program's tile (✳ or `>_`), name, what it does, its mark and short time; the
+  open one is tinted. A tap opens that pane in place of this one. **New pane** at the foot opens
+  the **New pane** sheet.
+- **New tab** and **New pane** (sheets: `new-tab`, `new-pane`; opened from the pane's ⋯, the
+  Tabs page, the Panes page, and a computer's card on Portals for the tab): **Start with** Shell, Claude Code,
   Codex or OpenCode. A shell is one `open` (kind `tab` or `pane`; the pane opens in the folder of
   the one the phone is on, with no direction to choose). A program is `open`, then `run` of its
   name in the new pane, tried again for up to 4 s while the new shell has no prompt yet (the
@@ -154,28 +161,34 @@ card cannot answer (a password, other input, a view-only device), and from an al
   `ui/useLaunch.ts`.
 - **Open a tab while Rift is closed** (gateways with `start`, which the computer offers only when
   its user turned on *Phones can open tabs while Rift is closed*): with no Rift window open,
-  **New tab** (a computer's card, or the Switcher) asks Face ID (or the passcode) first, then
+  **New tab** (a computer's card, the pane's ⋯, or the Tabs page) asks Face ID (or the passcode) first, then
   opens a shell the computer keeps and lists under "Rift is closed · Tabs" until Rift opens and
   shows it as a tab. View-only devices do not get the button.
 - **Reopening**: a cold start goes back to the pane that was open last (`rift.last` in the
   keychain); otherwise Portals.
 - **Pane** (the P3 board): commands run from its command line; there is no separate Run page.
-  The header: Back (its badge counts the computer's other panes that need you); the tab's name
-  with "studio-mac · tab 2 of 5" and a chevron, which opens the Switcher (over the command line, the
-  tab bar takes the tab's name and place instead: `src/ui/TabBar.tsx`); **Search output**
-  (filters the blocks by command or output, "N of M"; not under a full-screen view); and **⋯**.
-  Under it the pane picker: the pane's mark, name and "· 1/2", a dot and count for the tab's
-  other panes that need you, which opens the tab's Panes page (shown for a tab of several panes
-  when the tab bar is up). In the Switcher's Arrange list and the
-  Panes page (both full pages, so no sheet gesture takes the drag), a long press lifts a row and dragging reorders it on the desktop (`move`, offered
-  when the computer serves the `move` feature and the device may operate; the Switcher takes the
-  place of the tab dropped on; screen readers get Move up / Move down actions; `src/ui/ReorderRow.tsx`,
-  maths in `src/reorder.ts`). There is no view switch: the pane shows
-  a TUI (its screen) or blocks by one rule, see Full-screen programs. A sideways swipe across the blocks (or the picker's Next pane /
-  Previous pane screen-reader actions) also moves to the tab's next or previous pane. **⋯** holds
-  two switches: **Wrap long lines** for this pane (Settings › Panes › Wrap long lines sets the
+  The header: Back (its badge counts the computer's other panes that need you); the computer's
+  dot and name with a chevron, which opens the **computer menu** (`src/ui/ComputerMenu.tsx`: every
+  paired computer with its state, the current one ticked; a tap on another goes to its last pane,
+  one that cannot be reached goes to Portals; then **Connection** and **All portals**);
+  **Search output** (filters the blocks by command or output, "N of M"; not under a full-screen
+  view); and **⋯**. Under the header the **tab row** (`src/ui/TabBar.tsx`): ‹ and › go to the
+  previous and next tab, the new pane sliding in from the side it comes from (a fling across the
+  row does the same); the middle, the tab's name, its mark and "tab 2 of 30", opens the Tabs page.
+  For a tab of several panes the pane row follows: the pane's mark, name and "· 1/2", a dot and
+  count for the tab's other panes that need you, which opens the tab's Panes page. On the Tabs and
+  Panes pages a row's grip drags it at once (a long press is not needed; the rest of the row stays
+  a button, and the list still scrolls) and dropping it reorders it on the desktop (`move`,
+  offered when the computer serves the `move` feature and the device may operate, on the whole
+  list only, not a filtered or searched one; a tab takes the place of the tab dropped on; screen
+  readers get Move up / Move down actions; `src/ui/ReorderRow.tsx`, maths in `src/reorder.ts`).
+  There is no view switch: the pane shows a TUI (its screen) or blocks by one rule, see
+  Full-screen programs. A sideways swipe across the blocks (or the picker's Next pane / Previous
+  pane screen-reader actions) also moves to the tab's next or previous pane. **⋯** holds two
+  switches: **Wrap long lines** for this pane (Settings › Panes › Wrap long lines sets the
   default; off, each block's output scrolls sideways with a position bar) and **Notifications**
-  for this computer.
+  for this computer, then **Split pane** and **New tab** (their sheets; operating devices on a
+  computer that offers them) and Close pane / Close tab.
   **While a pane opens** (the PaneLoading board; `src/ui/paneLoad.ts`, `src/ui/PaneLoading.tsx`):
   the header keeps the tab's last known title (`rift.paneTitles`, written from every topology;
   the computer's name when the pane was never seen). Under it a full-width status strip, its text
@@ -578,7 +591,7 @@ pnpm typecheck   # tsc --noEmit (strict)
 pnpm test        # vitest: Noise vectors + snow interop, framing, client, relay, adverse network,
                  # connectivity, lock, fleet, stores, pairing, notifications, text contrast,
                  # key mapping, terminal layout, earlier output, control keys, prompt chips,
-                 # Portals / Switcher / pane / answer / Live Activity models (phone.test.ts,
+                 # Portals / Tabs page / pane / answer / Live Activity models (phone.test.ts,
                  # computers.test.ts, topology.test.ts, paneView.test.ts), settings text, embedded fonts
 pnpm lint        # eslint
 npx expo install --check && npx -y expo-doctor
@@ -615,7 +628,7 @@ one-day minimum release age by exact version only.
   expo-screen-capture and AppState.
 - `src/chips.ts` — the folder, branch and changes chips and their menus; `src/promptChips.ts` — the
   desktop's prompt chips, the row's fit and the new menus' rows; `src/now.ts` — the tab rows and their
-  states (Portals, Switcher), the pane's folds and swipe target; `src/paneView.ts` — the Panes
+  states (Portals, Tabs page), the pane's folds and swipe target; `src/paneView.ts` — the Panes
   page's rows, block-card text, tables, log lines, the question card's context, the terminal
   zoom; `src/ui/settingsText.ts` — Settings' texts; `src/answer.ts` — what an answer sends;
   `src/live.ts` — the Live Activity plan.
@@ -624,7 +637,7 @@ one-day minimum release age by exact version only.
   (`settings-ntfy`), Paste a pairing link (`add`), Pair a computer (`scan`), pairing confirmation
   (`pair`, also the target of `rift-remote://pair` links), Host (`host/[key]`, a computer's tabs
   and bell; opened after pairing, not from Portals), Pane with its command line and full-screen view
-  (`host/[key]/pane/[id]`), Answer (`answer`), the Switcher and Panes pages (`tabs`, `panes`: full-screen modals),
+  (`host/[key]/pane/[id]`), Answer (`answer`), the Tabs and Panes pages (`tabs`, `panes`: full-screen modals),
   Confirm sheet, block sheet (`block`), chip menus (`chips`, `diff`), Keys (`control-keys`);
   `src/ui/LockGate.tsx` — the lock screen and privacy cover. On the web a sheet is a plain page: it gets a Close button and
   Escape (`src/ui/SheetClose.tsx`), and the folder button's choice of menus is a strip above

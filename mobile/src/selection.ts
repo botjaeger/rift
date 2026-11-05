@@ -58,34 +58,6 @@ export function countLabel({ lines, chars }: { lines: number; chars: number }): 
  */
 export const showsOwnCopied = (os: string, version: string | number): boolean => !(os === "android" && Number(version) >= 33);
 
-/** The height a selection bar takes over a program's screen, its 8 pt margin included. */
-export const SELECTION_BAR_ROOM = 120;
-
-/**
- * Whether the bar over a program's screen stays at the bottom (in thumb reach): yes unless the
- * selection's last row (0-based, of `rows`) falls in the bottom `SELECTION_BAR_ROOM` of a
- * `height`-point view, which the bar would cover. A view not laid out yet keeps it low.
- */
-export function barStaysLow(lastRow: number, rows: number, height: number): boolean {
-  if (rows <= 0 || height <= SELECTION_BAR_ROOM) return true;
-  return (lastRow + 1) / rows <= 1 - SELECTION_BAR_ROOM / height;
-}
-
-/**
- * Where the bar over block output goes (points from the output's top): just above the selected
- * field (`top`..`bottom`, in the same coordinates), else just under it, kept on the output's
- * `height`; a field running past both edges puts it at the bottom. `under` (Android, whose own
- * text menu takes the place just above a selection): just under the field, else the output's top.
- */
-export function barTop(top: number, bottom: number, height: number, barH: number, under = false, gap = 8): number {
-  const most = Math.max(gap, height - barH - gap);
-  if (under) return bottom + gap + barH + gap <= height ? Math.max(gap, bottom + gap) : gap;
-  const above = top - barH - gap;
-  // never off the output: a field scrolled out of sight keeps its bar at the nearer edge
-  if (above >= gap) return Math.min(above, most);
-  return Math.max(gap, Math.min(bottom + gap, most));
-}
-
 /** How far (points) outside the selected field a touch still counts as on it: its handles stand out of it. */
 export const HANDLE_SLOP = 28;
 
