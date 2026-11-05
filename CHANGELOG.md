@@ -8,6 +8,13 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.26.0 — 2026-11-05
+
+### New
+
+- **Pinned tabs on your phone** — The phone app shows which tabs you pinned, first and apart
+  from the others, as your tab bar does (Rift for iPhone and Android 0.7.0).
+
 ## 0.25.1 — 2026-11-05
 
 ### Fixed

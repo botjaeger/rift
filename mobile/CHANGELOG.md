@@ -6,6 +6,33 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.7.0 — 2026-11-05
+
+Selecting text gets a bar of its own, tabs get a Switcher and a swipeable tab bar, and the phone now taps back. Pinned tabs need Rift 0.26.0 on your computer.
+
+### New
+
+- **Selection bar** — Hold on output to select it: a bar shows how many lines and characters you
+  have, with Line and All for command output, and Word, Line, Screen and To prompt on a program's
+  screen. Other blocks dim while you select; a tap elsewhere ends it. On a program's screen the
+  handles are easier to grab and a magnifier shows what is under your finger.
+- **A little vibration** — Your phone taps when a selection starts, grows a word, is copied, and
+  when you lift a row to drag it.
+- **Switcher** — Every tab as a card with a preview of its panes; pinned tabs show their pin. Arrange
+  drags tabs into another order, pinned ones among themselves. Panes opens as a full page.
+- **Tab bar** — Above the message box: swipe it left or right to change tabs, tap it to open the
+  Switcher.
+
+### Improved
+
+- **One shape for every key** — The keys above the keyboard share one size and look; Control, Option
+  and Shift have icons, and Paste looks like the keys beside it.
+
+### Fixed
+
+- **Dragging tabs and panes** — A long press and drag now moves the row; the sheet's own swipe used
+  to take the drag instead.
+
 ## 0.6.0 — 2026-11-05
 
 Reorder tabs and panes from your phone, and Live Activities that keep up. Needs Rift 0.25.0 on your computer for reordering.
