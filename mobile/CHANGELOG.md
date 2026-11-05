@@ -6,6 +6,39 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.7.0 · update 1 — 2026-11-06
+
+Tabs move to the top, lists show what each tab is doing, and selecting text no longer covers your work.
+
+### New
+
+- **Tab row at the top** — Under the pane's header: ‹ and › go to the previous and next tab, which
+  slides in from the side it comes from; tap the tab's name to see all tabs.
+- **Tabs page** — Every tab of the computer as a row: its name, what it is running or that it is
+  idle, and the same status mark and time as on the computer. Search by name, command or folder,
+  filter by state, and drag a row by its grip to reorder the tabs on the computer. Pinned tabs
+  come first. Opens quickly even with a hundred tabs.
+- **Switch computers from the pane** — Tap the computer's name at the top to jump to another
+  computer, check the connection, or go back to all portals.
+- **Split pane and New tab in ⋯** — No longer only behind the function keys.
+
+### Improved
+
+- **Portals rows** — Each tab shows its name, what its pane is doing, and its status mark with a
+  short time, like the tab bar on your computer.
+- **Panes page** — The same rows as the Tabs page, with a grip to reorder the panes.
+- **Selection bar** — It now sits where the command line and keys are, so the output never jumps
+  and the bar never covers the cursor; it stays above a question card when one is showing.
+- **Scrolling programs** — Scrolling vim, less or htop is much smoother (best with Rift 0.26.1 on
+  your computer).
+
+### Fixed
+
+- **Holding on another block** — Starting a selection on a second block sometimes showed the
+  highlight without the bar; it now always starts a fresh selection.
+- **A failed tab's time** — A tab with a failed pane shows that pane's exit code beside its red
+  mark, even when another pane is the active one.
+
 ## 0.7.0 — 2026-11-05
 
 Selecting text gets a bar of its own, tabs get a Switcher and a swipeable tab bar, and the phone now taps back. Pinned tabs need Rift 0.26.0 on your computer.

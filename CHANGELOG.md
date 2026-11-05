@@ -8,6 +8,14 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.26.1 — 2026-11-06
+
+### Improved
+
+- **Scrolling a program from your phone** — When you scroll vim, less or htop on your phone, the
+  redrawn screen now reaches the phone right away instead of after a short wait, so scrolling
+  feels as quick as on the computer.
+
 ## 0.26.0 — 2026-11-05
 
 ### New
