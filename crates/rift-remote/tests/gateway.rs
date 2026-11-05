@@ -4613,3 +4613,39 @@ fn a_scroll_brings_the_redrawn_screen_before_the_next_poll() {
     );
     assert_eq!(second["lines"][0][1][0][0], "5", "{second}");
 }
+
+#[test]
+fn a_redraw_after_a_scroll_goes_out_within_a_screen_poll() {
+    // a frame ready while the client loop waits on its socket goes out at once (HOT_READ_SLICE),
+    // not after the rest of its read. The read is widened to 500 ms so a loaded machine (the
+    // gates run beside a docker build) cannot close the gap between the two
+    let env = start(|c| {
+        c.pane_poll = Duration::from_secs(2);
+        c.devices_poll = Duration::from_secs(2);
+        c.read_slice = Duration::from_millis(500);
+    });
+    env.fake.set_screen(12, screen(&["less", "1"], true, None));
+    let (_k, mut ch, _) = env.pair(Permission::Operate);
+    put(&mut ch, json!({"t":"subscribe","pane":12,"after":null}));
+    recv_t(&mut ch, "snapshot");
+    put(&mut ch, json!({"t":"screen","pane":12,"mode":"auto"}));
+    recv_screen(&mut ch);
+    let mut best = Duration::MAX;
+    for round in 0..5 {
+        // the scroll moved the program: its frame comes at once
+        env.fake
+            .edit_screen(12, |s| s.lines[1] = vec![Run::plain(format!("s{round}"))]);
+        put(
+            &mut ch,
+            json!({"t":"scroll","id":format!("s{round}"),"pane":12,"lines":-1}),
+        );
+        recv_screen(&mut ch);
+        // the program redraws once the scroll's frame went: nothing else wakes the loop
+        let at = Instant::now();
+        env.fake
+            .edit_screen(12, |s| s.lines[1] = vec![Run::plain(format!("r{round}"))]);
+        recv_screen(&mut ch);
+        best = best.min(at.elapsed());
+    }
+    assert!(best < Duration::from_millis(250), "{best:?}");
+}

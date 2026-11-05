@@ -62,6 +62,10 @@ use tungstenite::{HandshakeError, Message, WebSocket};
 pub(crate) const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long one socket read waits before the client loop checks its queue.
 pub(crate) const READ_SLICE: Duration = Duration::from_millis(25);
+/// The read's wait while the client's pane was just scrolled or typed into:
+/// its next screen is ready within a few ms, and waited out the rest of a
+/// [`READ_SLICE`] before it went (measured: ready 3 ms after a scroll, sent 27 ms after).
+const HOT_READ_SLICE: Duration = Duration::from_millis(3);
 /// Frames queued per client before it counts as too slow and is dropped
 /// (it resumes with `subscribe{after}`): a full replay plus headroom.
 const CLIENT_QUEUE: usize = REPLAY_RING + 64;
@@ -124,6 +128,10 @@ pub struct Config {
     pub ping_interval: Duration,
     pub idle_timeout: Duration,
     pub pane_poll: Duration,
+    /// How long a client loop waits on its socket before it flushes what is
+    /// pending (25 ms; a test widens it to tell the shortened wait of
+    /// a kicked pane from it under load).
+    pub read_slice: Duration,
     pub topology_poll: Duration,
     pub devices_poll: Duration,
     pub failure_window: Duration,
@@ -167,6 +175,7 @@ impl Config {
             ping_interval: PING_INTERVAL,
             idle_timeout: IDLE_TIMEOUT,
             pane_poll: PANE_POLL,
+            read_slice: READ_SLICE,
             topology_poll: TOPOLOGY_POLL,
             devices_poll: crate::DEVICES_POLL,
             failure_window: FAILURE_WINDOW,
@@ -1077,6 +1086,33 @@ impl Drop for ConnGuard<'_> {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::AcqRel);
     }
+}
+
+/// Whether client `id`'s pane was scrolled or typed into a moment ago (its
+/// screen is read every [`crate::KICK_POLL`]): then its loop waits on the
+/// socket [`HOT_READ_SLICE`] at most, so a frame ready meanwhile goes out at
+/// once rather than after the rest of a [`READ_SLICE`]. A client showing
+/// blocks (no screen subscribed) has no screen frame to hurry and keeps the
+/// full slice.
+fn pane_kicked<S>(shared: &Shared<S>, id: u64) -> bool {
+    let Some(pane) = shared
+        .hub
+        .lock()
+        .unwrap()
+        .clients
+        .get(&id)
+        .filter(|c| c.screen != ScreenMode::Off)
+        .and_then(|c| c.pane)
+    else {
+        return false;
+    };
+    shared
+        .kicks
+        .0
+        .lock()
+        .unwrap()
+        .get(&pane)
+        .is_some_and(|until| *until > Instant::now())
 }
 
 /// A device scrolled or typed into `pane`: read its screen every
@@ -1997,6 +2033,8 @@ fn session<S: Source, T: Socket>(
     let mut scrolls = Rate::new(crate::SCROLL_RATE);
     let mut uploads = Rate::new(UPLOAD_RATE);
     let mut upload = Uploads::default();
+    // the read's wait, shortened while this client's pane is kicked (see `HOT_READ_SLICE`)
+    let mut slice = READ_SLICE;
     loop {
         match end.load(Ordering::Acquire) {
             LIVE => {}
@@ -2060,6 +2098,14 @@ fn session<S: Source, T: Socket>(
             if ch.ws.send(Message::Ping(Vec::new().into())).is_err() {
                 return "error";
             }
+        }
+        let want = if pane_kicked(shared, id) {
+            HOT_READ_SLICE
+        } else {
+            cfg.read_slice
+        };
+        if want != slice && ch.ws.get_ref().set_read_timeout(Some(want)).is_ok() {
+            slice = want;
         }
         let text = match ch.recv() {
             Recv::Idle => continue,
