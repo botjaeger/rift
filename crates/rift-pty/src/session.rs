@@ -5024,10 +5024,10 @@ mod tests {
             assert!(frame_text(&s).is_none());
             // told its own size back: it repaints; the marker reached the store
             until("repainted", 3, || real_text(&s).contains("SIZE 43 136"));
-            assert!(
-                s.blocks.lock().unwrap().last().is_some(),
-                "the marker's block"
-            );
+            // the reader thread applies the marker after feeding the bytes before it
+            until("the marker's block", 3, || {
+                s.blocks.lock().unwrap().last().is_some()
+            });
             s.terminate();
         }
 

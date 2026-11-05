@@ -51,20 +51,33 @@ pub(crate) fn exit_code_of(pid: u32) -> Option<i32> {
 
 #[cfg(test)]
 mod tests {
+    /// `exit_code_of` waits half a second for the child to end; a loaded
+    /// machine (the Linux gate beside the UI run) can take longer to start
+    /// `/bin/sh` at all, so ask again for up to 10 s.
+    fn code_of(pid: u32) -> Option<i32> {
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let code = super::exit_code_of(pid);
+            if code.is_some() || std::time::Instant::now() > end {
+                return code;
+            }
+        }
+    }
+
     #[test]
     fn exit_code_of_reads_the_code_and_the_signal_and_leaves_the_child() {
         let mut child = std::process::Command::new("/bin/sh")
             .args(["-c", "exit 3"])
             .spawn()
             .unwrap();
-        assert_eq!(super::exit_code_of(child.id()), Some(3));
+        assert_eq!(code_of(child.id()), Some(3));
         // not reaped: its owner still gets it (and its pid is not free yet)
         assert_eq!(child.wait().unwrap().code(), Some(3));
         let mut child = std::process::Command::new("/bin/sh")
             .args(["-c", "kill -9 $$"])
             .spawn()
             .unwrap();
-        assert_eq!(super::exit_code_of(child.id()), Some(137));
+        assert_eq!(code_of(child.id()), Some(137));
         assert!(child.wait().is_ok());
     }
 }

@@ -140,9 +140,9 @@ impl Drop for Fixture {
 }
 
 /// The first answer may arrive while the shell still reads its rc files:
-/// ask until it is ready (at most 10 s).
+/// ask until it is ready (at most 30 s: a loaded machine runs the gates beside a docker build).
 fn ask(c: &mut Completer, q: &Query) -> Vec<(String, String)> {
-    let until = Instant::now() + Duration::from_secs(10);
+    let until = Instant::now() + Duration::from_secs(30);
     loop {
         let items = c.complete(q, BUDGET);
         if !items.is_empty() || Instant::now() > until {
