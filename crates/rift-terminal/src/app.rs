@@ -19809,6 +19809,7 @@ impl App {
                 window,
                 title: t.display_title(),
                 active,
+                pinned: t.pinned,
                 panes: t
                     .panes_in_order()
                     .into_iter()

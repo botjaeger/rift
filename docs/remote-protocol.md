@@ -394,7 +394,9 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
   times 2^24 plus the window's own pane id (every window numbers its panes
   from 1), so it names one pane among all windows. Tabs come in the
   window's tab-strip order, a tab's panes in its layout order (left to
-  right, top to bottom), not the order they were opened in. `features` lists what this gateway serves beyond
+  right, top to bottom), not the order they were opened in. A tab pinned on
+  the desktop's tab bar carries `"pinned":true` (absent when not); pinned
+  tabs come first, as on the desktop. `features` lists what this gateway serves beyond
   Phase 2: `screen`, `text`, `output` (§ Phase 3), `push_failures`
   (`push.failures_only`, § Push), `push_ntfy` (`push.ntfy` and `visible`, § Push), `git`
   (a pane's `git` in `topology`, below), `notify_off` (`notify` with

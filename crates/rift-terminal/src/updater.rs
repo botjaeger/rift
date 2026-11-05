@@ -288,6 +288,7 @@ mod tests {
             window: 0,
             title: String::new(),
             active: false,
+            pinned: false,
             panes,
         };
         let s = Survey {

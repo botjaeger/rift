@@ -569,6 +569,7 @@ mod chip_bounds {
                 index: 0,
                 title: "t".into(),
                 active: true,
+                pinned: false,
                 panes: vec![pane("é".repeat(500)), pane("short".into())],
             }],
         }];
@@ -604,6 +605,7 @@ mod chip_bounds {
                 index: 0,
                 title: big,
                 active: true,
+                pinned: false,
                 panes: vec![pane],
             }],
         }];

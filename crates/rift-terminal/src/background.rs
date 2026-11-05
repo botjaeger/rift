@@ -221,6 +221,7 @@ impl Background {
                     index: i,
                     title: job.clone().unwrap_or_else(|| "zsh".into()),
                     active: i == last,
+                    pinned: false,
                     panes: vec![Pane {
                         id: s.id,
                         active: true,

@@ -703,6 +703,9 @@ pub struct Tab {
     pub index: usize,
     pub title: String,
     pub active: bool,
+    /// Pinned on the computer's tab bar; absent when not.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
     pub panes: Vec<Pane>,
 }
 
@@ -996,7 +999,7 @@ mod tests {
     #[test]
     fn every_server_fixture_round_trips() {
         let all = fixtures("server");
-        assert_eq!(all.len(), 32, "server fixtures");
+        assert_eq!(all.len(), 33, "server fixtures");
         for (name, value) in all {
             let msg: ServerMsg =
                 serde_json::from_value(value.clone()).unwrap_or_else(|e| panic!("{name}: {e}"));

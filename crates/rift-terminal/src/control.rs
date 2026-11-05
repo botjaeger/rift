@@ -412,6 +412,10 @@ pub struct TabInfo {
     pub window: usize,
     pub title: String,
     pub active: bool,
+    /// Pinned on the tab bar (absent: not pinned, and in answers from
+    /// versions before pinning was reported).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
     pub panes: Vec<PaneInfo>,
 }
 

@@ -253,6 +253,7 @@ impl Source for ControlSource {
                     index: t.index,
                     title: t.title,
                     active: t.active,
+                    pinned: t.pinned,
                     panes: t
                         .panes
                         .into_iter()

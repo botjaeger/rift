@@ -112,6 +112,7 @@ impl Source for Fake {
                 index: 0,
                 title: "fake".into(),
                 active: true,
+                pinned: false,
                 panes: st
                     .panes
                     .keys()

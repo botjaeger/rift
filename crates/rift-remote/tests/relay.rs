@@ -706,6 +706,7 @@ impl Source for Fake {
                 index: 0,
                 title: "needle-tab".into(),
                 active: true,
+                pinned: false,
                 panes: vec![Pane {
                     id: 7,
                     active: true,
