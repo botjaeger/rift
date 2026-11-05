@@ -597,7 +597,7 @@ export function Composer({
           onPress={() => setKeys((k) => !k)}
           style={({ pressed }) => [styles.round, keys && styles.roundOn, pressed && styles.pressed]}
         >
-          <Text style={[styles.keysLabel, keys && { color: colors.accent }]}>⌃</Text>
+          <Icon name="control" size={18} weight="medium" color={keys ? colors.accent : colors.text} />
         </Pressable>
         <View style={styles.field}>
           <TextInput
@@ -719,7 +719,6 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   roundOn: { borderColor: colors.accent },
-  keysLabel: { fontFamily: ui(500), color: colors.text, fontSize: 15 },
   field: {
     flex: 1,
     minWidth: 0,

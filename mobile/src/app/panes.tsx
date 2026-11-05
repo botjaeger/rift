@@ -27,11 +27,12 @@ const TONE: Record<StateTone, string> = {
 };
 
 /**
- * The Panes sheet (the Pane board's picker): the tab's panes, each with its mark, name, last line
- * and state; the open one on the accent tint. A tap opens that pane in place of this one.
+ * The Panes page (the TabPanes board; a full page, opened from the pane picker or a Switcher card):
+ * the tab's panes, each with its mark, name, last line and state; the open one on the accent tint.
+ * A tap opens that pane in place of this one; a long press drags it to another place.
  */
 export default function PanesScreen() {
-  const { key, pane: paneParam } = useLocalSearchParams<{ key: string; pane: string }>();
+  const { key, pane: paneParam, from } = useLocalSearchParams<{ key: string; pane: string; from?: string }>();
   const paneId = Number(paneParam);
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -59,11 +60,11 @@ export default function PanesScreen() {
     const r = rows[from];
     if (r) move(r.id, "pane", to, r.name, to, rows.length);
   };
-  const noMove = () => {};
 
-  // another pane takes this one's place: Back still leads where it led
+  // another pane takes this one's place: Back still leads where it led. Opened from the
+  // Switcher, both pages close.
   const pick = (id: number) => {
-    router.dismiss();
+    router.dismiss(from === "switcher" ? 2 : 1);
     if (id !== paneId) router.replace({ pathname: "/host/[key]/pane/[id]", params: { key, id: String(id) } });
   };
 
@@ -72,20 +73,25 @@ export default function PanesScreen() {
   const canOpen = !!host && canNewPane(host, paneId);
 
   return (
-    // The sheet's own ScrollView, as its root: iOS lays out a form sheet's first scroll view as the sheet's
-    // content, so one nested under the title was drawn over it.
+    // the page's ScrollView as its root (it was a form sheet's, where iOS takes the first scroll view
+    // as the sheet's content)
     <ScrollView
       style={[styles.fill, hidden && styles.hidden]}
       scrollEnabled={reorder.scrollEnabled}
-      contentContainerStyle={[styles.content, { paddingBottom: Math.max(30, insets.bottom + 2) }]}
+      contentContainerStyle={[styles.content, { paddingTop: insets.top + 8, paddingBottom: Math.max(30, insets.bottom + 2) }]}
       accessibilityElementsHidden={hidden}
       importantForAccessibility={hidden ? "no-hide-descendants" : "auto"}
     >
       <View style={styles.head}>
-        <Text style={styles.title} accessibilityRole="header">
-          Panes
-        </Text>
-        {loc ? <Text style={styles.count}>{`${tabTitle(loc.tab)} · ${panesText(rows.length)}`}</Text> : null}
+        <Pressable accessibilityRole="button" accessibilityLabel="Back" hitSlop={4} onPress={() => router.back()} style={({ pressed }) => [styles.back, pressed && styles.pressed]}>
+          <Icon name={from === "switcher" ? "back" : "chevronDown"} size={16} color={colors.text} />
+        </Pressable>
+        <View style={styles.titles}>
+          <Text style={styles.title} accessibilityRole="header" numberOfLines={1}>
+            {loc ? tabTitle(loc.tab) : "Panes"}
+          </Text>
+          {loc ? <Text style={styles.count}>{`${panesText(rows.length)}${movable ? " · hold a row, then drag it" : ""}`}</Text> : null}
+        </View>
       </View>
       {toast}
       {error ? <ErrorText>{error}</ErrorText> : null}
@@ -94,7 +100,7 @@ export default function PanesScreen() {
           {rows.map((r, i) => {
             const on = r.id === paneId;
             return (
-              <ReorderRow key={r.id} index={i} count={rows.length} rowH={ROW_H} drag={reorder.drag} setDrag={reorder.setDrag} onMove={movable ? onMove : noMove}>
+              <ReorderRow key={r.id} index={i} count={rows.length} rowH={ROW_H} enabled={movable} drag={reorder.drag} setDrag={reorder.setDrag} onMove={onMove}>
               {(handle) => (
               <View style={[styles.row, i < rows.length - 1 && styles.rule, on && styles.rowOn]}>
               <Pressable
@@ -102,7 +108,7 @@ export default function PanesScreen() {
                 accessibilityState={{ selected: on }}
                 accessibilityLabel={`Pane ${r.number} of ${rows.length}: ${r.name}, ${r.state}${r.line ? `. ${r.line}` : ""}`}
                 onPress={() => pick(r.id)}
-                {...(movable ? handle : null)}
+                {...handle}
                 style={({ pressed }) => [styles.rowPress, pressed && styles.pressed]}
               >
                 <View style={[styles.tile, { backgroundColor: r.claude ? `${CLAUDE_COLOR}1f` : tints.accentBadge }]}>
@@ -157,14 +163,16 @@ export default function PanesScreen() {
 }
 
 const styles = StyleSheet.create({
-  fill: { flex: 1, backgroundColor: colors.surface },
-  content: { paddingTop: 20, paddingHorizontal: 16, gap: 12 },
+  fill: { flex: 1, backgroundColor: colors.bg },
+  content: { paddingHorizontal: 16, gap: 14 },
   hidden: { opacity: 0 },
   pressed: { opacity: 0.7 },
-  head: { flexDirection: "row", alignItems: "baseline", gap: 8 },
-  title: { flex: 1, fontFamily: ui(600), color: colors.textBright, fontSize: 20 },
+  head: { flexDirection: "row", alignItems: "center", gap: 10, paddingBottom: 4 },
+  back: { width: 44, height: 44, borderRadius: 22, borderWidth: 1, borderColor: colors.glassRim, backgroundColor: colors.glass, alignItems: "center", justifyContent: "center" },
+  titles: { flex: 1, minWidth: 0, gap: 3 },
+  title: { fontFamily: ui(600), color: colors.textBright, fontSize: 22 },
   count: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13 },
-  list: { borderRadius: 12, backgroundColor: colors.bg, overflow: "hidden" },
+  list: { borderRadius: 16, borderWidth: 1, borderColor: colors.hairline, backgroundColor: colors.surface, overflow: "hidden" },
   row: { height: 56, flexDirection: "row", alignItems: "center" },
   rowPress: { flex: 1, minWidth: 0, height: 56, flexDirection: "row", alignItems: "center", gap: 12, paddingLeft: 14, paddingRight: 6 },
   // the row's ✕: a 44 pt target

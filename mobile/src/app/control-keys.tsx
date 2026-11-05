@@ -8,12 +8,12 @@ import { Key, KeyCap, KeyTip, tipOf, type Tip } from "@/ui/ControlRow";
 import { Icon } from "@/ui/Icon";
 import { SaveError } from "@/ui/SaveError";
 import { PageHeader, SectionTitle } from "@/ui/Screen";
-import { colors, radius, TOUCH, ui } from "@/ui/theme";
+import { colors, monoMedium, radius, TOUCH, ui } from "@/ui/theme";
 
 const ROW = 52;
 
 /**
- * One key of the row: the ≡ handle drags it to a new place (one row per 48 pt); screen readers
+ * One key of the row: the grip handle drags it to a new place (one row per 48 pt); screen readers
  * get Move up / Move down actions instead.
  */
 function KeyRow({
@@ -89,7 +89,7 @@ function KeyRow({
       }}
     >
       <View style={styles.handle} {...pan.panHandlers}>
-        <Text style={styles.handleText}>≡</Text>
+        <Icon name="grip" size={16} weight="medium" color={colors.textMuted} />
       </View>
       <KeyCap def={k} color={k.danger ? colors.warning : colors.text} ground={colors.bg} />
       <Text style={styles.what} numberOfLines={1}>
@@ -102,7 +102,7 @@ function KeyRow({
         onPress={onRemove}
         style={({ pressed }) => [styles.remove, pressed && styles.pressed]}
       >
-        <Text style={styles.removeText}>−</Text>
+        <Icon name="remove" size={20} weight="medium" color={colors.warning} />
       </Pressable>
     </Animated.View>
   );
@@ -220,10 +220,14 @@ export default function ControlKeysScreen() {
                   hitSlop={4}
                   style={({ pressed }) => [styles.addChip, full && styles.disabled, pressed && styles.pressed]}
                 >
+                  {/* the key as the row draws it: its icon, or its label in mono (⇧Tab leads with the shift icon) */}
                   {k?.icon ? (
-                    <Icon name={k.icon} size={14} color={colors.text} />
+                    <Icon name={k.icon} size={14} weight="medium" color={colors.text} />
                   ) : k && k.label !== word ? (
-                    <Text style={styles.addKey}>{k.label}</Text>
+                    <>
+                      {k.lead ? <Icon name={k.lead} size={12} weight="medium" color={colors.text} /> : null}
+                      <Text style={styles.addKey}>{k.lead ? [...k.label].slice(1).join("") : k.label}</Text>
+                    </>
                   ) : null}
                   <Text style={styles.addText}>{word}</Text>
                 </Pressable>
@@ -280,11 +284,9 @@ const styles = StyleSheet.create({
   divider: { borderTopWidth: 1, borderTopColor: colors.hairline },
   dragging: { zIndex: 1, elevation: 4, shadowColor: "#000", shadowOpacity: 0.4, shadowRadius: 8, shadowOffset: { width: 0, height: 4 } },
   handle: { width: 24, height: ROW, justifyContent: "center", marginLeft: -6, paddingLeft: 6 },
-  handleText: { fontFamily: ui(400), color: colors.textMuted, fontSize: 16 },
   what: { fontFamily: ui(400), flex: 1, color: colors.textBright, fontSize: 14 },
-  chord: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13 },
+  chord: { fontFamily: monoMedium, color: colors.textMuted, fontSize: 13 },
   remove: { width: TOUCH, height: TOUCH, alignItems: "center", justifyContent: "center" },
-  removeText: { fontFamily: ui(400), color: colors.warning, fontSize: 20 },
   add: { flexDirection: "row", flexWrap: "wrap", gap: 6, paddingHorizontal: 4 },
   // the board's Add chips: dashed 36 pt pills, the key then its word
   addChip: {
@@ -300,6 +302,6 @@ const styles = StyleSheet.create({
     borderStyle: "dashed",
     borderColor: colors.borderStrong,
   },
-  addKey: { color: colors.text, fontFamily: ui(400), fontSize: 13 },
+  addKey: { color: colors.text, fontFamily: monoMedium, fontSize: 13 },
   addText: { color: colors.text, fontFamily: ui(400), fontSize: 13 },
 });

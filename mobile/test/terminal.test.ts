@@ -347,6 +347,40 @@ describe("selection", () => {
     expect(word(1, 14)).toBe("");
     expect(word(2, 3)).toBe("");
   });
+  it("Line takes the row's text, Screen every cell", async () => {
+    const { lineAt, screenSpan, selectionText } = await import("../src/terminal");
+    const line = (row: number, col: number) => {
+      const [a, b] = lineAt(lines, { row, col });
+      return selectionText(lines, a, b);
+    };
+    expect(line(0, 2)).toBe("hello world");
+    expect(line(1, 30)).toBe("/usr/local/bin  x");
+    // a wide character's second cell ends the row
+    expect(lineAt(lines, { row: 3, col: 0 })).toEqual([{ row: 3, col: 0 }, { row: 3, col: 6 }]);
+    expect(lineAt(lines, { row: 2, col: 4 })).toEqual([{ row: 2, col: 4 }, { row: 2, col: 4 }]);
+    expect(screenSpan(4, 80)).toEqual([{ row: 0, col: 0 }, { row: 3, col: 79 }]);
+    expect(screenSpan(0, 0)).toEqual([{ row: 0, col: 0 }, { row: 0, col: 0 }]);
+  });
+  it("a handle steps (and the phone ticks) only when it leaves a word or a run of blanks", async () => {
+    const { wordStep } = await import("../src/terminal");
+    const at = (row: number, col: number) => ({ row, col });
+    // within "world", within "/usr/local/bin": no step
+    expect(wordStep(lines, at(0, 6), at(0, 10))).toBe(false);
+    expect(wordStep(lines, at(1, 0), at(1, 13))).toBe(false);
+    // onto the blank between, then from the blanks into "x"
+    expect(wordStep(lines, at(0, 4), at(0, 5))).toBe(true);
+    expect(wordStep(lines, at(1, 14), at(1, 15))).toBe(false);
+    expect(wordStep(lines, at(1, 15), at(1, 16))).toBe(true);
+    // past a row's text is one run of blanks
+    expect(wordStep(lines, at(1, 20), at(1, 70))).toBe(false);
+    expect(wordStep(lines, at(2, 0), at(2, 50))).toBe(false);
+    // another row, or the same cell
+    expect(wordStep(lines, at(0, 6), at(1, 6))).toBe(true);
+    expect(wordStep(lines, at(0, 6), at(0, 6))).toBe(false);
+    // a wide word: both cells of 日本 are one
+    expect(wordStep(lines, at(3, 0), at(3, 3))).toBe(false);
+    expect(wordStep(lines, at(3, 3), at(3, 5))).toBe(true);
+  });
   it("a touch maps to a cell on the screen, never off it", async () => {
     const { cellAt } = await import("../src/terminal");
     expect(cellAt(13, 31, 6, 15, 80, 24)).toEqual({ row: 2, col: 2 });

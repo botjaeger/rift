@@ -4,8 +4,11 @@ import { hasSystemPasteButton, SystemPasteButton, type PastedFile } from "../../
 import { controlKey, keyTipTitle, PressGate, type ControlKey } from "@/controlKeys";
 import type { OpenKind } from "@/protocol/types";
 import { Icon, type IconName } from "./Icon";
-import { colors, TOUCH, ui } from "./theme";
+import { colors, monoMedium, tints, TOUCH, ui } from "./theme";
 import { toggleA11y } from "./toggle";
+
+/** A key's width (the Keys board: 52 x 44 pt). */
+export const KEY_W = 52;
 
 /** Sticky modifiers from the row, applied to the next key or letter. */
 export interface Sticky {
@@ -20,9 +23,10 @@ export const NO_STICKY: Sticky = { ctrl: false, alt: false, shift: false };
 const modOf = (id: string): keyof Sticky => (id === "alt" ? "alt" : id === "shift" ? "shift" : "ctrl");
 
 /**
- * The boards' key: 44 pt wide, 36 high with a 10 pt radius (its touch target is 44 high, see `Key`),
- * its icon, or its label in Inter; a word ("Esc", "Paste") is as wide as it needs. The accent
- * ground marks a sticky key that is on.
+ * The Keys board's key (KeysNormalized): 52 x 44 pt with 12 pt corners, the surface ground and a
+ * glass rim; an 18 pt icon from the one set (arrows, ⌃ ⌥ ⇧, Paste, New pane), or its label in
+ * JetBrains Mono 13 ("Esc", "⌃D", "F5"), a word as wide as it needs. A modifier before a word
+ * (⇧Tab) is its icon at 13 pt. Colour means a state only: the accent tint marks a held modifier.
  */
 export function KeyCap({
   def,
@@ -30,22 +34,25 @@ export function KeyCap({
   active,
   ground = colors.surface,
 }: {
-  def: Pick<ControlKey, "label" | "icon">;
+  def: Pick<ControlKey, "label" | "icon" | "lead">;
   color?: string;
   active?: boolean;
   /** The key's ground (Settings › Keys draws its rows' keys on the page). */
   ground?: string;
 }) {
-  const fg = active ? colors.bg : color;
+  const fg = active ? colors.accent : color;
+  // the lead icon stands for the label's first character (the ⇧ of ⇧Tab)
+  const text = def.lead ? [...def.label].slice(1).join("") : def.label;
   const word = !def.icon && [...def.label].length > 2;
   return (
-    <View
-      style={[styles.key, { backgroundColor: ground }, word && styles.keyWord, active && styles.keyActive]}
-    >
+    <View style={[styles.key, { backgroundColor: ground }, word && styles.keyWord, active && styles.keyActive]}>
       {def.icon ? (
-        <Icon name={def.icon} size={17} color={fg} />
+        <Icon name={def.icon} size={18} weight="medium" color={fg} />
       ) : (
-        <Text style={[word ? styles.wordLabel : styles.glyphLabel, { color: fg }]}>{def.label}</Text>
+        <>
+          {def.lead ? <Icon name={def.lead} size={13} weight="medium" color={fg} /> : null}
+          <Text style={[styles.label, { color: fg }]}>{text}</Text>
+        </>
       )}
     </View>
   );
@@ -89,7 +96,7 @@ export function Key({
   tip,
   onTip,
 }: {
-  def: Pick<ControlKey, "label" | "icon">;
+  def: Pick<ControlKey, "label" | "icon" | "lead">;
   spoken: string;
   onPress: () => void;
   active?: boolean;
@@ -136,7 +143,7 @@ const icon = (name: IconName, label: string) => ({ icon: name, label });
  * computer's Rift cannot open them), Paste `onPaste` (disabled without it: the computer's Rift
  * takes no text). Above the command line it is one line that scrolls, led by Hide keyboard
  * (`onHideKeyboard`, while the keyboard is up) and ending in Edit keys (`onEdit`, Settings ›
- * Keys); under a full-screen program it wraps (`wrap`). Its keys are 44 pt wide in 44 pt
+ * Keys); under a full-screen program it wraps (`wrap`). Its keys are 52 pt wide in 44 pt
  * touch targets, so the row scrolls sideways; that scroll never moves the screen (one
  * direction only, no bounce). Nothing when the row is empty and there is no edit key.
  */
@@ -290,9 +297,9 @@ export function ControlRow({
   );
 }
 
-// The Keys and Pane boards' keys: 44 x 36 with a 10 pt radius in a 44 pt slot (the row takes
+// The Keys board's keys (KeysNormalized): 52 x 44 with a 12 pt radius, the key itself the 44 pt slot (the row takes
 // 4 pt back above and below, as the boards do), a word key as wide as its word, on the surface
-// with a hairline; the accent ground for a modifier that is on.
+// with a glass rim; the accent tint and rim for a modifier that is on.
 const styles = StyleSheet.create({
   host: { zIndex: 2 },
   line: { flexDirection: "row", alignItems: "center", gap: 6, marginVertical: -4 },
@@ -323,18 +330,20 @@ const styles = StyleSheet.create({
   // the 44 x 44 touch target around a key
   slot: { minWidth: TOUCH, minHeight: TOUCH, alignItems: "center", justifyContent: "center" },
   key: {
-    width: TOUCH,
-    height: 36,
-    borderRadius: 10,
+    width: KEY_W,
+    height: TOUCH,
+    borderRadius: 12,
+    flexDirection: "row",
+    gap: 3,
     alignItems: "center",
     justifyContent: "center",
     borderWidth: 1,
-    borderColor: colors.hairline,
+    borderColor: colors.glassRim,
   },
-  keyWord: { width: undefined, minWidth: TOUCH, paddingHorizontal: 14 },
-  keyActive: { backgroundColor: colors.accent, borderColor: colors.accent },
-  glyphLabel: { fontFamily: ui(400), fontSize: 16 },
-  wordLabel: { fontFamily: ui(500), fontSize: 14 },
+  keyWord: { width: undefined, minWidth: KEY_W, paddingHorizontal: 12 },
+  // a held modifier: the accent tint and rim, its icon in the accent
+  keyActive: { backgroundColor: tints.accentBadge, borderColor: colors.accent },
+  label: { fontFamily: monoMedium, fontSize: 13, letterSpacing: 0.2 },
   disabled: { opacity: 0.45 },
   pressed: { opacity: 0.7 },
 });

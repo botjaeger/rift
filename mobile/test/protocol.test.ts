@@ -53,7 +53,7 @@ describe("server fixtures", () => {
       "update",
       "welcome",
     ]);
-    expect(server).toHaveLength(32);
+    expect(server).toHaveLength(33);
   });
 
   it.each(server.map((f) => [f.name, f.json] as const))("decodes %s", (_name, json) => {
@@ -424,6 +424,10 @@ describe("decodeServer rejects", () => {
           },
         ],
       },
+    ],
+    [
+      "topology tab with a non-boolean pinned",
+      { t: "topology", windows: [{ pid: 1, tabs: [{ index: 0, title: "", active: true, pinned: "yes", panes: [] }] }] },
     ],
     ["error without message", { t: "error", code: "auth" }],
     ["welcome without permission", { t: "welcome", v: 2, host: "h", os: "macos", version: "0", device: "d" }],

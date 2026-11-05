@@ -20,7 +20,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { askingTitle, questionKey } from "@/answer";
 import { chipItems } from "@/promptChips";
 import { canClose, canOperate, draftKey, hasFeature, isAsked, wrapsLines } from "@/fleet";
-import { foldBlocks, paneName, programName, swipeTarget, type PaneItem } from "@/now";
+import { foldBlocks, paneName, programName, swipeTarget, tabPane, type PaneItem } from "@/now";
 import { bareScreen as screenIsBare, CLAUDE_COLOR, paneMark, runsAgent, screenView, waitingOthers } from "@/paneView";
 import { canLoadOlder, MAX_BLOCKS } from "@/protocol/store";
 import type { Block } from "@/protocol/types";
@@ -31,6 +31,7 @@ import { findPane, paneTitle, runningCommand, tabTitle } from "@/topology";
 import { AskCard } from "@/ui/AskCard";
 import { FailedCard, FoldRow, RunningCard } from "@/ui/BlockCards";
 import { BlockView } from "@/ui/BlockView";
+import { SelectionItem, SelectionScope, type SelectionScopeHandle } from "@/ui/SelectionScope";
 import { Composer } from "@/ui/Composer";
 import { usePending } from "@/ui/usePending";
 import { Button } from "@/ui/Button";
@@ -40,6 +41,7 @@ import { useHostNotifications } from "@/ui/useHostNotifications";
 import { BlockSkeleton, PaneCard, PaneStrip } from "@/ui/PaneLoading";
 import { openingTitle, paneLoad } from "@/ui/paneLoad";
 import { headerTop } from "@/ui/Screen";
+import { TabBar } from "@/ui/TabBar";
 import { TerminalView } from "@/ui/TerminalView";
 import { toggleA11y } from "@/ui/toggle";
 import { useClose } from "@/ui/useClose";
@@ -294,11 +296,15 @@ export default function PaneScreen() {
       setTimeout(() => list.current?.scrollToIndex({ index, viewPosition: 0.2, animated: false }), ms);
   }, [target, items, state]);
 
+  // the output's selection scope: its bar is placed again after a scroll
+  const selectionScope = useRef<SelectionScopeHandle>(null);
   // Judged when a drag or fling ends, not on every scroll event: the list shrinking under the
   // keyboard also reports a scroll, with the end now out of reach, and that read as "scrolled up".
   const onScrollEnd = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
     atBottom.current = atEnd(contentOffset.y, contentSize.height, layoutMeasurement.height, BOTTOM_SLOP);
+    // a selection's bar goes back next to the selected text, wherever the scroll left it
+    selectionScope.current?.refresh();
   }, []);
 
   const onContentSizeChange = useCallback(() => {
@@ -389,11 +395,46 @@ export default function PaneScreen() {
   const held = usePending(box);
   const bareScreen = screenIsBare({ fullScreen, asking, agent, pinned, alt: !!screen?.alt }) || (fullScreen && (pastedPane === paneId || held.items.length > 0));
   const bottomInset = keyboard ? 0 : Math.max(0, insets.bottom - 12);
+  // the tab bar over the command line: the window's tabs either side, a swipe goes to them
+  const siblings = loc?.window.tabs ?? [];
+  const prevTab = loc ? (siblings[siblings.indexOf(loc.tab) - 1] ?? null) : null;
+  const nextTab = loc ? (siblings[siblings.indexOf(loc.tab) + 1] ?? null) : null;
+  // stable across renders: the bar's swipe gesture is rebuilt when these change, and a pane
+  // streaming output re-renders many times a second (a rebuilt gesture drops a swipe in progress)
+  const prevPane = prevTab ? tabPane(prevTab) : null;
+  const nextPane = nextTab ? tabPane(nextTab) : null;
+  const goPaneOf = useCallback(
+    (to: number | null) => {
+      if (to !== null) router.replace({ pathname: "/host/[key]/pane/[id]", params: { key, id: String(to) } });
+    },
+    [router, key],
+  );
+  const onPrevTab = useCallback(() => goPaneOf(prevPane), [goPaneOf, prevPane]);
+  const onNextTab = useCallback(() => goPaneOf(nextPane), [goPaneOf, nextPane]);
+  const openSwitcher = useCallback(() => router.push({ pathname: "/tabs", params: { key, pane: String(paneId) } }), [router, key, paneId]);
+  const tabBar =
+    loc && tab && !compact ? (
+      <TabBar
+        title={tabTitle(loc.tab)}
+        number={tabNumber}
+        count={tabCount}
+        prev={prevTab ? tabTitle(prevTab) : null}
+        next={nextTab ? tabTitle(nextTab) : null}
+        panes={tab.panes.length}
+        pane={Math.max(0, tab.panes.findIndex((p) => p.id === paneId))}
+        onPrev={onPrevTab}
+        onNext={onNextTab}
+        onOpen={openSwitcher}
+      />
+    ) : null;
+  // where the bar is drawn: with the command line (not under a question, not over a program's own keys)
+  const barShown = !!tabBar && !!host && !closed && operate && !(asking && waiting) && (!fullScreen || bareScreen);
   const composer =
     closed || !host ? null : operate ? (
       // the board's 30 pt under the command line: the home indicator's inset, less the
       // command line's own 8 pt
       <View style={{ paddingBottom: bottomInset, backgroundColor: colors.chrome }}>
+        {tabBar}
         <Composer
           hostKey={key}
           paneId={paneId}
@@ -453,12 +494,13 @@ export default function PaneScreen() {
             style={({ pressed }) => [styles.titleButton, pressed && styles.pressed]}
           >
             <View style={styles.titleLine}>
+              {/* the tab's own name and place are on the tab bar over the command line */}
               <Text style={styles.title} numberOfLines={1}>
-                {loc ? tabTitle(loc.tab) : (cachedTitle ?? hostName)}
+                {loc && barShown ? hostName : loc ? tabTitle(loc.tab) : (cachedTitle ?? hostName)}
               </Text>
               {loc && !closed ? <Icon name="chevronDown" size={16} color={colors.textMuted} /> : null}
             </View>
-            {host && (loc || cachedTitle) ? (
+            {host && (loc || cachedTitle) && !(loc && barShown) ? (
               <Text style={[styles.subtitle, compact && styles.hidden]} numberOfLines={1}>
                 {loc ? hostName + " · tab " + tabNumber + " of " + tabCount : hostName}
               </Text>
@@ -488,7 +530,7 @@ export default function PaneScreen() {
             </View>
           )}
         </View>
-        {loc && tab && !closed && !compact ? (
+        {loc && tab && !closed && !compact && (tab.panes.length > 1 || !barShown) ? (
           <View style={styles.pickRow}>
             <Pressable
               accessibilityRole="button"
@@ -601,59 +643,67 @@ export default function PaneScreen() {
             <Text style={styles.empty}>No block holds “{searching.trim()}”.</Text>
           ) : null}
           <View style={[styles.fill, load?.held && styles.held]}>
-            {!state && host && !closed ? <BlockSkeleton /> : null}
-            {/* Not inverted: oldest first, so the reading order (and swiping through with a
-                screen reader) ends at the newest block, which the list starts scrolled to. */}
-            <FlashList
-              ref={list}
-              data={closed ? [] : items}
-              keyExtractor={itemKey}
-              getItemType={(it) => (it.kind === "fold" ? "fold" : it.block.state === "running" ? "running" : it.block.exit ? "failed" : "block")}
-              extraData={extraData}
-              renderItem={({ item }) =>
-                item.kind === "fold" ? (
-                  <View style={styles.cardGap}>
-                    <FoldRow count={item.count} onShow={() => setUnfolded(true)} />
-                  </View>
-                ) : item.block.state === "running" && item.block === lastBlock ? (
-                  <View style={styles.cardGap}>
-                    <RunningCard
-                      block={item.block}
-                      onActions={onActions}
-                      notify={isAsked(s, key, paneId, item.block.command)}
-                      onBell={onBell}
-                      onStop={operate ? onStop : undefined}
-                    />
-                  </View>
-                ) : item.block.state === "done" && item.block.exit !== null && item.block.exit !== 0 ? (
-                  <View style={styles.cardGap}>
-                    {/* keyed: a recycled card must not keep another block's state */}
-                    <FailedCard key={item.block.id} block={item.block} onActions={onActions} onRunAgain={operate ? onRunAgain : undefined} />
-                  </View>
-                ) : (
-                  <View style={styles.cardGap}>
-                    <BlockView key={item.block.id} block={item.block} onActions={onActions} wrap={wrap} />
-                  </View>
-                )
-              }
-              ListHeaderComponent={closed ? null : header}
-              // opened at a block: no sticking to the bottom, which would scroll past it
-              maintainVisibleContentPosition={
-                target === null
-                  ? { startRenderingFromBottom: true, autoscrollToBottomThreshold: 0.1, animateAutoScrollToBottom: false }
-                  : {}
-              }
-              onScrollBeginDrag={() => {
-                atBottom.current = false;
-              }}
-              onScrollEndDrag={onScrollEnd}
-              // the keyboard follows a drag down the list (the only way to put it away at a prompt)
-              keyboardDismissMode="interactive"
-              onMomentumScrollEnd={onScrollEnd}
-              onContentSizeChange={onContentSizeChange}
-              contentContainerStyle={styles.listContent}
-              accessibilityLabel="Command blocks, newest at the bottom"
-            />
+            <SelectionScope ref={selectionScope} hostKey={key} paneId={paneId} canPrompt={operate && !closed}>
+              {!state && host && !closed ? <BlockSkeleton /> : null}
+              {/* Not inverted: oldest first, so the reading order (and swiping through with a
+                  screen reader) ends at the newest block, which the list starts scrolled to. */}
+              <FlashList
+                ref={list}
+                data={closed ? [] : items}
+                keyExtractor={itemKey}
+                getItemType={(it) => (it.kind === "fold" ? "fold" : it.block.state === "running" ? "running" : it.block.exit ? "failed" : "block")}
+                extraData={extraData}
+                renderItem={({ item }) =>
+                  item.kind === "fold" ? (
+                    <View style={styles.cardGap}>
+                      <FoldRow count={item.count} onShow={() => setUnfolded(true)} />
+                    </View>
+                  ) : item.block.state === "running" && item.block === lastBlock ? (
+                    <SelectionItem owner={`block:${item.block.id}`}>
+                      <View style={styles.cardGap}>
+                        <RunningCard
+                          block={item.block}
+                          onActions={onActions}
+                          notify={isAsked(s, key, paneId, item.block.command)}
+                          onBell={onBell}
+                          onStop={operate ? onStop : undefined}
+                        />
+                      </View>
+                    </SelectionItem>
+                  ) : item.block.state === "done" && item.block.exit !== null && item.block.exit !== 0 ? (
+                    <SelectionItem owner={`block:${item.block.id}`}>
+                      <View style={styles.cardGap}>
+                        {/* keyed: a recycled card must not keep another block's state */}
+                        <FailedCard key={item.block.id} block={item.block} onActions={onActions} onRunAgain={operate ? onRunAgain : undefined} />
+                      </View>
+                    </SelectionItem>
+                  ) : (
+                    <SelectionItem owner={`block:${item.block.id}`}>
+                      <View style={styles.cardGap}>
+                        <BlockView key={item.block.id} block={item.block} onActions={onActions} wrap={wrap} />
+                      </View>
+                    </SelectionItem>
+                  )
+                }
+                ListHeaderComponent={closed ? null : header}
+                // opened at a block: no sticking to the bottom, which would scroll past it
+                maintainVisibleContentPosition={
+                  target === null
+                    ? { startRenderingFromBottom: true, autoscrollToBottomThreshold: 0.1, animateAutoScrollToBottom: false }
+                    : {}
+                }
+                onScrollBeginDrag={() => {
+                  atBottom.current = false;
+                }}
+                onScrollEndDrag={onScrollEnd}
+                // the keyboard follows a drag down the list (the only way to put it away at a prompt)
+                keyboardDismissMode="interactive"
+                onMomentumScrollEnd={onScrollEnd}
+                onContentSizeChange={onContentSizeChange}
+                contentContainerStyle={styles.listContent}
+                accessibilityLabel="Command blocks, newest at the bottom"
+              />
+            </SelectionScope>
             {load?.card ? <PaneCard card={load.card} onRetry={tryAgain} onDetails={details} onLeave={leave} /> : null}
           </View>
           {footer}

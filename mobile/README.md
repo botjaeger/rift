@@ -137,8 +137,8 @@ card cannot answer (a password, other input, a view-only device), and from an al
   name, last line (the question, the latest output line, the folder or the last command) and state
   (Running, Needs you, ✕ exit, Idle); the open one is tinted. A tap opens that pane in place of this
   one. **New pane** at the foot opens the **New pane** sheet.
-- **New tab** and **New pane** (sheets: `new-tab`, `new-pane`; opened from the Tabs sheet, the
-  Panes sheet, and a computer's card on Portals for the tab): **Start with** Shell, Claude Code,
+- **New tab** and **New pane** (sheets: `new-tab`, `new-pane`; opened from the Switcher, the
+  Panes page, and a computer's card on Portals for the tab): **Start with** Shell, Claude Code,
   Codex or OpenCode. A shell is one `open` (kind `tab` or `pane`; the pane opens in the folder of
   the one the phone is on, with no direction to choose). A program is `open`, then `run` of its
   name in the new pane, tried again for up to 4 s while the new shell has no prompt yet (the
@@ -154,19 +154,21 @@ card cannot answer (a password, other input, a view-only device), and from an al
   `ui/useLaunch.ts`.
 - **Open a tab while Rift is closed** (gateways with `start`, which the computer offers only when
   its user turned on *Phones can open tabs while Rift is closed*): with no Rift window open,
-  **New tab** (a computer's card, or the Tabs sheet) asks Face ID (or the passcode) first, then
+  **New tab** (a computer's card, or the Switcher) asks Face ID (or the passcode) first, then
   opens a shell the computer keeps and lists under "Rift is closed · Tabs" until Rift opens and
   shows it as a tab. View-only devices do not get the button.
 - **Reopening**: a cold start goes back to the pane that was open last (`rift.last` in the
   keychain); otherwise Portals.
 - **Pane** (the P3 board): commands run from its command line; there is no separate Run page.
   The header: Back (its badge counts the computer's other panes that need you); the tab's name
-  with "studio-mac · tab 2 of 5" and a chevron, which opens the Tabs sheet; **Search output**
+  with "studio-mac · tab 2 of 5" and a chevron, which opens the Switcher (over the command line, the
+  tab bar takes the tab's name and place instead: `src/ui/TabBar.tsx`); **Search output**
   (filters the blocks by command or output, "N of M"; not under a full-screen view); and **⋯**.
   Under it the pane picker: the pane's mark, name and "· 1/2", a dot and count for the tab's
-  other panes that need you, which opens the Panes sheet. In the Tabs sheet (all tabs shown) and the
-  Panes sheet, a long press lifts a row and dragging reorders it on the desktop (`move`, offered
-  when the computer serves the `move` feature and the device may operate; the Tabs sheet takes the
+  other panes that need you, which opens the tab's Panes page (shown for a tab of several panes
+  when the tab bar is up). In the Switcher's Arrange list and the
+  Panes page (both full pages, so no sheet gesture takes the drag), a long press lifts a row and dragging reorders it on the desktop (`move`, offered
+  when the computer serves the `move` feature and the device may operate; the Switcher takes the
   place of the tab dropped on; screen readers get Move up / Move down actions; `src/ui/ReorderRow.tsx`,
   maths in `src/reorder.ts`). There is no view switch: the pane shows
   a TUI (its screen) or blocks by one rule, see Full-screen programs. A sideways swipe across the blocks (or the picker's Next pane /
@@ -216,7 +218,7 @@ card cannot answer (a password, other input, a view-only device), and from an al
   but not a program. **Paste** puts the clipboard in the message box and sends nothing (below); on **Send** an image
   goes to the computer (feature `upload`, operate only, at most 10 MB, `src/upload.ts`), which saves it and
   pastes its path into the running program, as dropping the file on the window does: Claude
-  Code and Codex attach it. A file on the clipboard goes the same way (feature `upload_files`): a Files copy through iOS's paste button, the clip's content URI on Android, which shows its own "pasted from" notice. It keeps only its extension (1 to 8 letters or digits; a file without one is refused, and so is anything over 10 MB, at a shell prompt, or to an older computer's Rift, each with a message). On iOS the row's Paste is the system's own button, so no prompt. `src/pickFile.ts` wraps `expo-document-picker` for picking a file. Selecting copies, with no Copy button: hold a finger still (450 ms) on the screen and the word under it is selected and copied, with a handle at each end; lifting a handle copies the new range (nothing is copied while it moves); **All** selects and copies the screen; a tap copies nothing and leaves the clipboard as it was. The bar over the screen shows **Copied** (not on Android 13 and later, whose system says it), **All** and cancel; the screen stands still until then (a screen reader's **Copy the screen** action takes it all). A tap is a click for a program that tracks the mouse (feature `mouse`). The message box grows to five lines: **+** beside it opens Attach (what it brings goes in the message, as for Paste below), the phone keyboard's Return is a new line and only the round **Send** or **Run** button sends (an empty box sends nothing; the key row's **Return** key is a new line with text in the box, and with an empty box confirms what the program shows). With a hardware keyboard Shift+Return is a new line and Return sends. **New line** is not in the default key row; it stays in Choose keys. Both screens have pinch to zoom, double-tap to reset, with the controls floating over the screen while it changes
+  Code and Codex attach it. A file on the clipboard goes the same way (feature `upload_files`): a Files copy through iOS's paste button, the clip's content URI on Android, which shows its own "pasted from" notice. It keeps only its extension (1 to 8 letters or digits; a file without one is refused, and so is anything over 10 MB, at a shell prompt, or to an older computer's Rift, each with a message). On iOS the row's Paste is the system's own button, so no prompt. `src/pickFile.ts` wraps `expo-document-picker` for picking a file. Selecting copies, with no Copy button: hold a finger still (450 ms) on the screen and the word under it is selected and copied (a light vibration), with a handle at each end (a stem the row's height, the start's knob above, the end's below, taken within 44 pt); a dragged handle shows a loupe over the finger and ticks at each word it steps onto, and lifting it copies the new range (nothing is copied while it moves). The bar over the screen (at the bottom, at the top when the selection reaches the bottom rows) shows the lines and characters selected, **Copied** (not on Android 13 and later, whose system says it), **Word**, **Line** and **Screen** (widen to whole words, whole rows or every cell), **To prompt** while the command line shows under the screen, and cancel; a tap copies nothing and leaves the clipboard as it was; the screen stands still until then (a screen reader's **Copy the screen** action takes it all). A tap is a click for a program that tracks the mouse (feature `mouse`). The message box grows to five lines: **+** beside it opens Attach (what it brings goes in the message, as for Paste below), the phone keyboard's Return is a new line and only the round **Send** or **Run** button sends (an empty box sends nothing; the key row's **Return** key is a new line with text in the box, and with an empty box confirms what the program shows). With a hardware keyboard Shift+Return is a new line and Return sends. **New line** is not in the default key row; it stays in Choose keys. Both screens have pinch to zoom, double-tap to reset, with the controls floating over the screen while it changes
   with **−** and **+** and the percentage (60 to 200 %, kept until the app closes). With a
   computer whose Rift has `fit` and a device that may operate, the zoom also reflows the
   program: the view tells the computer how many columns and rows fit at 11 pt times the zoom
@@ -393,8 +395,13 @@ against an older Rift the app hides what needs them.
   program otherwise (feature `text`); in the message box an image or file on the clipboard waits
   above the field like Attach's (below). Two more catalogue keys are actions, not keys: **+tab** opens a new tab in the pane's window and
   **+pane** opens a pane beside this one (feature `open`; disabled on an older Rift), both starting in the
-  pane's folder; the app then shows the new pane in place of this one. The keys are 44 pt wide in
-  44 pt touch targets (36 pt high, 10 pt radius, as the boards), so the row above the field
+  pane's folder; the app then shows the new pane in place of this one. The keys follow the Keys
+  board (KeysNormalized): 52 x 44 pt with 12 pt corners, each its own touch target, an 18 pt icon
+  from the one set for every symbol (arrows, ⌃ ⌥ ⇧, Paste, New pane; ⇧Tab leads with the shift icon)
+  and JetBrains Mono for words and chords (Esc, ⌃D); colour marks a state only (Interrupt's
+  warning, a held modifier's accent tint). On iOS Paste stays the system's paste control, given the
+  key's ground, text colour and corners (its glyph is the system's; it dims while the clipboard holds
+  nothing it takes). The row above the field
   scrolls sideways (one direction, no bounce: a swipe on the keys never drags the page or the
   keyboard), with Hide keyboard fixed at its right end; under a full-screen program it wraps.
 - **Attach** (a sheet, from **+** in the message box; `attach`, logic in `src/pending.ts`): **Paste
@@ -571,7 +578,7 @@ pnpm typecheck   # tsc --noEmit (strict)
 pnpm test        # vitest: Noise vectors + snow interop, framing, client, relay, adverse network,
                  # connectivity, lock, fleet, stores, pairing, notifications, text contrast,
                  # key mapping, terminal layout, earlier output, control keys, prompt chips,
-                 # Portals / Tabs sheet / pane / answer / Live Activity models (phone.test.ts,
+                 # Portals / Switcher / pane / answer / Live Activity models (phone.test.ts,
                  # computers.test.ts, topology.test.ts, paneView.test.ts), settings text, embedded fonts
 pnpm lint        # eslint
 npx expo install --check && npx -y expo-doctor
@@ -608,8 +615,8 @@ one-day minimum release age by exact version only.
   expo-screen-capture and AppState.
 - `src/chips.ts` — the folder, branch and changes chips and their menus; `src/promptChips.ts` — the
   desktop's prompt chips, the row's fit and the new menus' rows; `src/now.ts` — the tab rows and their
-  states (Portals, Tabs sheet), the pane's folds and swipe target; `src/paneView.ts` — the Panes
-  sheet's rows, block-card text, tables, log lines, the question card's context, the terminal
+  states (Portals, Switcher), the pane's folds and swipe target; `src/paneView.ts` — the Panes
+  page's rows, block-card text, tables, log lines, the question card's context, the terminal
   zoom; `src/ui/settingsText.ts` — Settings' texts; `src/answer.ts` — what an answer sends;
   `src/live.ts` — the Live Activity plan.
 - `src/app/` — expo-router screens, in one stack (no tab bar): Portals (`index`, the home page),
@@ -617,7 +624,7 @@ one-day minimum release age by exact version only.
   (`settings-ntfy`), Paste a pairing link (`add`), Pair a computer (`scan`), pairing confirmation
   (`pair`, also the target of `rift-remote://pair` links), Host (`host/[key]`, a computer's tabs
   and bell; opened after pairing, not from Portals), Pane with its command line and full-screen view
-  (`host/[key]/pane/[id]`), Answer (`answer`), the Tabs and Panes sheets (`tabs`, `panes`),
+  (`host/[key]/pane/[id]`), Answer (`answer`), the Switcher and Panes pages (`tabs`, `panes`: full-screen modals),
   Confirm sheet, block sheet (`block`), chip menus (`chips`, `diff`), Keys (`control-keys`);
   `src/ui/LockGate.tsx` — the lock screen and privacy cover. On the web a sheet is a plain page: it gets a Close button and
   Escape (`src/ui/SheetClose.tsx`), and the folder button's choice of menus is a strip above

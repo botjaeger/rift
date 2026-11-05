@@ -37,3 +37,16 @@ describe("reorder maths", () => {
     expect(movedText("build", 1, 5)).toBe("Moved build to position 2 of 5");
   });
 });
+
+describe("the row's drag state", () => {
+  // The worklets Babel plugin gives every gesture callback its own copy of each `let` it captures
+  // (even with runOnJS), so a flag set in onStart was false in onEnd and a drop moved nothing. The
+  // state lives in one mutated object instead; a reassigned `let` in makeRow brings the bug back.
+  it("is one mutated object, never a reassigned variable the callbacks capture", async () => {
+    const { readFileSync } = await import("node:fs");
+    const source = readFileSync(new URL("../src/ui/ReorderRow.tsx", import.meta.url), "utf8");
+    const body = source.slice(source.indexOf("function makeRow("), source.indexOf("interface Props"));
+    expect(body).toContain("box.lifted = true");
+    expect(body).not.toMatch(/\blet\s+\w+/);
+  });
+});

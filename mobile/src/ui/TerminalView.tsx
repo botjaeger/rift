@@ -49,13 +49,14 @@ import { DRAG_SLOP, DragVelocity, dragLines, dragScrollsPane, Fling, ScrollCoale
 import { draftKey } from "@/fleet";
 import { nativeAttached, pending, PENDING_FULL, readClipboard, type AttachRules, type Attached } from "@/pending";
 import { programSend } from "@/paneView";
-import { showsOwnCopied, textToCopy } from "@/selection";
+import { barStaysLow, promptText, textToCopy } from "@/selection";
+import { SelectionBar } from "./SelectionBar";
+import * as haptics from "@/haptics";
 import { fullScreenRow, rowWithPaste } from "@/controlKeys";
-import { CELL_RATIO, textRoom, cellAt, cursorScrollY, drawnText, fitArea, fitFont, lastTextRow, ordered, selectionText, wordAt, type Cell, LINE_RATIO, rowPieces, rowSegments, screenDefaults, segmentColors, showsKeyRow, type Piece } from "@/terminal";
+import { CELL_RATIO, textRoom, cellAt, cursorScrollY, drawnText, fitArea, fitFont, lastTextRow, lineAt, ordered, screenSpan, selectionText, wordAt, wordStep, type Cell, LINE_RATIO, rowPieces, rowSegments, screenDefaults, segmentColors, showsKeyRow, type Piece } from "@/terminal";
 import { ControlRow, NO_STICKY, type Sticky } from "./ControlRow";
 import { ScreenSkeleton } from "./PaneLoading";
 import { useOpenShell } from "./useOpenShell";
-import { Icon } from "./Icon";
 import { ErrorText, WarningText } from "./Notice";
 import { colors, mono, monoBold, ui } from "./theme";
 
@@ -70,9 +71,14 @@ function decoration(flags: number): TextStyle["textDecorationLine"] {
   return u && s ? "underline line-through" : u ? "underline" : s ? "line-through" : undefined;
 }
 
-/** A selection handle's diameter, and how close a finger must come to take it. */
-const HANDLE = 14;
-const HANDLE_REACH = 32;
+/** A selection handle: a 2 pt stem the row's height with a 12 pt knob (above the start, below the end), and how close a finger must come to take it. */
+const STEM = 2;
+const KNOB = 12;
+const HANDLE_REACH = 44;
+/** The loupe over a dragged handle: its size, how much larger it draws the row, and its gap above the finger's row. */
+const LOUPE_W = 150;
+const LOUPE_SCALE = 1.6;
+const LOUPE_GAP = 28;
 /** Hold this long, still, and a touch starts a selection. */
 const SELECT_HOLD_MS = 450;
 /** How long the zoom controls stay after a pinch. */
@@ -170,9 +176,23 @@ const Row = memo(function Row({
   );
 });
 
-/** The selected cells' ground and a handle at each end: drawn only, the view's touches move them. */
-function SelectionMarks({ a, b, cols, cell, rowHeight }: { a: Cell; b: Cell; cols: number; cell: number; rowHeight: number }) {
+/** Where a selection's handles take a finger, in the rows' coordinates: the centre of each knob. */
+export function handleSpots(a: Cell, b: Cell, cell: number, rowHeight: number) {
   const [from, to] = ordered(a, b);
+  return {
+    from,
+    to,
+    start: { x: from.col * cell, y: from.row * rowHeight - KNOB / 2 },
+    end: { x: (to.col + 1) * cell, y: (to.row + 1) * rowHeight + KNOB / 2 },
+  };
+}
+
+/**
+ * The selected cells' ground and a handle at each end (a stem the row's height, the start's knob
+ * above it, the end's below): drawn only, the view's touches move them.
+ */
+function SelectionMarks({ a, b, cols, cell, rowHeight }: { a: Cell; b: Cell; cols: number; cell: number; rowHeight: number }) {
+  const { from, to, start, end } = handleSpots(a, b, cell, rowHeight);
   const bands = [];
   for (let r = from.row; r <= to.row; r++) {
     const left = r === from.row ? from.col : 0;
@@ -182,8 +202,35 @@ function SelectionMarks({ a, b, cols, cell, rowHeight }: { a: Cell; b: Cell; col
   return (
     <View pointerEvents="none" style={StyleSheet.absoluteFill} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
       {bands}
-      <View style={[styles.handle, { left: from.col * cell - HANDLE / 2, top: from.row * rowHeight - HANDLE / 2 }]} />
-      <View style={[styles.handle, { left: (to.col + 1) * cell - HANDLE / 2, top: (to.row + 1) * rowHeight - HANDLE / 2 }]} />
+      <View style={[styles.stem, { left: start.x - STEM / 2, top: from.row * rowHeight, height: rowHeight }]} />
+      <View style={[styles.knob, { left: start.x - KNOB / 2, top: start.y - KNOB / 2 }]} />
+      <View style={[styles.stem, { left: end.x - STEM / 2, top: to.row * rowHeight, height: rowHeight }]} />
+      <View style={[styles.knob, { left: end.x - KNOB / 2, top: end.y - KNOB / 2 }]} />
+    </View>
+  );
+}
+
+/**
+ * The loupe over a dragged handle: the finger's row drawn larger, centred on the handle's cell with
+ * a caret there, above the row (below it on the first rows) so the finger never hides what it picks.
+ */
+function Loupe({ row, edge, screen, fontSize, rowHeight, cell, fg, bg }: { row: number; edge: number; screen: ScreenState; fontSize: number; rowHeight: number; cell: number; fg: string; bg: string }) {
+  const big = fontSize * LOUPE_SCALE;
+  const bigRow = Math.round(big * LINE_RATIO);
+  const height = bigRow + 12;
+  // `edge`: the column boundary the handle stands on
+  const x = edge * cell;
+  const left = Math.max(0, Math.min(x - LOUPE_W / 2, screen.cols * cell - LOUPE_W));
+  const centre = x - left;
+  const above = row * rowHeight - LOUPE_GAP - height;
+  const top = above >= 0 ? above : (row + 1) * rowHeight + LOUPE_GAP;
+  const width = Math.ceil(screen.cols * big * CELL_RATIO) + 2;
+  return (
+    <View pointerEvents="none" accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={[styles.loupe, { left, top, height, backgroundColor: bg }]}>
+      <View style={{ position: "absolute", top: 6, left: centre - edge * big * CELL_RATIO, width }}>
+        <Row runs={screen.lines[row] ?? []} cursorCol={null} fontSize={big} width={width} rule={null} fg={fg} bg={bg} />
+      </View>
+      <View style={[styles.loupeCaret, { left: centre - 1, top: 6, height: bigRow }]} />
     </View>
   );
 }
@@ -200,6 +247,7 @@ function Grid({
   onRowHeight,
   rowsRef,
   selection,
+  loupe,
 }: {
   screen: ScreenState;
   zoom: number;
@@ -210,6 +258,8 @@ function Grid({
   rowsRef?: RefObject<View | null>;
   /** The cells selected, in any order; drawn over the rows with a handle at each end. */
   selection?: { a: Cell; b: Cell } | null;
+  /** A dragged handle's row and the column boundary it stands on: the loupe shows them. */
+  loupe?: { row: number; edge: number } | null;
 }) {
   const [width, setWidth] = useState(0);
   const onLayout = (e: LayoutChangeEvent) => setWidth(e.nativeEvent.layout.width);
@@ -238,6 +288,7 @@ function Grid({
         />
       ))}
       {selection ? <SelectionMarks a={selection.a} b={selection.b} cols={screen.cols} cell={fontSize * CELL_RATIO} rowHeight={rowHeight} /> : null}
+      {selection && loupe ? <Loupe row={loupe.row} edge={loupe.edge} screen={screen} fontSize={fontSize} rowHeight={rowHeight} cell={fontSize * CELL_RATIO} fg={defaults.fg} bg={defaults.bg} /> : null}
     </View>
   );
   return (
@@ -547,6 +598,8 @@ export function TerminalView({
   // what the selection last put on the clipboard (null: nothing since it began)
   const [copiedText, setCopiedText] = useState<string | null>(null);
   const selecting = selection !== null;
+  // the dragged handle, for the loupe (null: no handle is moving)
+  const [loupe, setLoupe] = useState<{ row: number; edge: number } | null>(null);
   // a program on the computer copied to this phone: the same word for it
   const programCopy = s.hosts.find((h) => h.record.key === hostKey)?.copiedAt;
   const seenCopy = useRef(programCopy);
@@ -562,6 +615,8 @@ export function TerminalView({
   const metrics = useRef({ x: 0, y: 0 });
   const holdTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const movingHandle = useRef<"a" | "b" | null>(null);
+  // where the moving end last was: touches come faster than renders, and each word step ticks once
+  const lastEnd = useRef<Cell | null>(null);
   const shown = frozen ?? screen;
   const cancelHold = () => {
     clearTimeout(holdTimer.current);
@@ -571,6 +626,7 @@ export function TerminalView({
     setSelection(null);
     setFrozen(null);
     setCopiedText(null);
+    setLoupe(null);
     movingHandle.current = null;
   }, []);
   useEffect(() => () => clearTimeout(holdTimer.current), []);
@@ -599,8 +655,10 @@ export function TerminalView({
       setFrozen(s);
       setSelection({ a, b });
       movingHandle.current = "b";
+      lastEnd.current = b;
       holdAt.current = { x: pageX, y: pageY };
       setCopied(false);
+      haptics.selectStart();
       // the hold copies the word
       copyRange(s, a, b, null);
     });
@@ -612,17 +670,35 @@ export function TerminalView({
     void Clipboard.setStringAsync(text).then(
       () => {
         setCopiedText(text);
+        haptics.copied();
         AccessibilityInfo.announceForAccessibility("Selected and copied");
       },
       () => AccessibilityInfo.announceForAccessibility("Could not copy"),
     );
   };
-  const selectAll = () => {
-    if (!shown) return;
-    const a = { row: 0, col: 0 };
-    const b = { row: shown.lines.length - 1, col: shown.cols - 1 };
+  // the bar's Word, Line and Screen widen the selection to whole words, whole rows or every cell
+  const widen = (to: "word" | "line" | "screen") => {
+    if (!shown || !selection) return;
+    const [from, end] = ordered(selection.a, selection.b);
+    const [a, b] =
+      to === "screen"
+        ? screenSpan(shown.lines.length, shown.cols)
+        : to === "line"
+          ? [{ row: from.row, col: 0 }, lineAt(shown.lines, end)[1]]
+          : [wordAt(shown.lines, from)[0], wordAt(shown.lines, end)[1]];
     setSelection({ a, b });
     copyRange(shown, a, b, copiedText);
+  };
+  // To prompt: the selection goes into this pane's command line (promptText: nothing in it runs by itself);
+  // offered only while that line is drawn under the screen (`bare`), where the text shows
+  const toPrompt = () => {
+    if (!shown || !selection) return;
+    const text = promptText(selectionText(shown.lines, selection.a, selection.b));
+    if (text === "") return;
+    const draft = fleet.store.peek().drafts[draftKey(hostKey, paneId)] ?? "";
+    fleet.setDraft(hostKey, paneId, draft === "" || /\s$/.test(draft) ? draft + text : `${draft} ${text}`);
+    AccessibilityInfo.announceForAccessibility("Added to the command line");
+    endSelection();
   };
   // a screen reader has no hold: it copies the whole screen
   const copyScreen = () => {
@@ -692,18 +768,14 @@ export function TerminalView({
       focusOnTap.current = false;
       if (t.length !== 1 || !shown) return endSelection();
       const { pageX, pageY } = t[0]!;
-      const cell = cellSize();
-      const place = (c: Cell, end: boolean) => ({
-        x: metrics.current.x + (c.col + (end ? 1 : 0)) * cell,
-        y: metrics.current.y + (c.row + (end ? 1 : 0)) * rowHeight.current,
-      });
-      const [from, to] = ordered(selection.a, selection.b);
-      const dist = (p: { x: number; y: number }) => Math.hypot(pageX - p.x, pageY - p.y);
-      const toFirst = dist(place(from, false));
-      const toLast = dist(place(to, true));
+      const { from, to, start, end } = handleSpots(selection.a, selection.b, cellSize(), rowHeight.current);
+      const dist = (p: { x: number; y: number }) => Math.hypot(pageX - metrics.current.x - p.x, pageY - metrics.current.y - p.y);
+      const toFirst = dist(start);
+      const toLast = dist(end);
       if (Math.min(toFirst, toLast) > HANDLE_REACH) return endSelection();
       // the end the finger took keeps moving, the other stays
       setSelection({ a: toFirst <= toLast ? to : from, b: toFirst <= toLast ? from : to });
+      lastEnd.current = toFirst <= toLast ? from : to;
       movingHandle.current = "b";
       return;
     }
@@ -741,6 +813,10 @@ export function TerminalView({
         if (at && Math.hypot(t[0]!.pageX - at.x, t[0]!.pageY - at.y) <= DRAG_SLOP) return;
         holdAt.current = null;
         const b = cellOf(t[0]!.pageX, t[0]!.pageY, shown);
+        if (wordStep(shown.lines, lastEnd.current ?? selection.b, b)) haptics.selectStep();
+        lastEnd.current = b;
+        // the moving end is the selection's start when it lies before the other end
+        setLoupe({ row: b.row, edge: ordered(selection.a, b)[0] === b ? b.col : b.col + 1 });
         setSelection((sel) => (sel ? { a: sel.a, b } : sel));
       }
       return;
@@ -760,6 +836,8 @@ export function TerminalView({
     if (selecting) {
       // lifting a handle copies the range it left (a drag copies nothing on the way)
       if (left === 0 && movingHandle.current && shown) copyRange(shown, selection.a, selection.b, copiedText);
+      setLoupe(null);
+      lastEnd.current = null;
       movingHandle.current = null;
       holdAt.current = null;
       return;
@@ -895,10 +973,11 @@ export function TerminalView({
     ? `Terminal screen, ${screen.cols} columns by ${screen.rows} rows${screen.alt ? ", full-screen program" : ""}${screen.stale ? ", not up to date" : ""}`
     : "Terminal screen";
 
+  const selectedNow = selection && shown ? selectionText(shown.lines, selection.a, selection.b) : "";
   // a desktop in use keeps its size: then the phone fits what comes to its width
   const fittedHere = held && (shown?.cols ?? 0) <= (cols ?? 0);
   const grid = shown ? (
-    <Grid screen={shown} zoom={zoom} fitted={fittedHere} onRowHeight={onRowHeight} rowsRef={rowsView} selection={selection} />
+    <Grid screen={shown} zoom={zoom} fitted={fittedHere} onRowHeight={onRowHeight} rowsRef={rowsView} selection={selection} loupe={loupe} />
   ) : (
     // the pane's steps card (PaneLoading) says what is awaited; these are the rows to come
     <ScreenSkeleton />
@@ -942,19 +1021,22 @@ export function TerminalView({
       </View>
       {screen && (zoomShown || readerOn) && !selecting ? zoomRow : null}
       {selecting ? (
-        <View style={[styles.selectBar, selection.a.row < shown!.lines.length / 2 && selection.b.row < shown!.lines.length / 2 && styles.selectBarLow]} accessibilityRole="toolbar" accessibilityLabel="Selection">
-          {copiedText !== null && copiedText === selectionText(shown!.lines, selection.a, selection.b) && showsOwnCopied(Platform.OS, Platform.Version) ? (
-            <Text style={styles.selectKeyText} accessibilityLiveRegion="polite">Copied</Text>
-          ) : null}
-          <Pressable accessibilityRole="button" accessibilityLabel="Select the whole screen" onPress={selectAll} hitSlop={6} style={({ pressed }) => [styles.selectKey, pressed && styles.pressed]}>
-            <Text style={styles.selectKeyText}>All</Text>
-          </Pressable>
-          <Pressable accessibilityRole="button" accessibilityLabel="Cancel the selection" onPress={endSelection} hitSlop={6} style={({ pressed }) => [styles.selectKey, pressed && styles.pressed]}>
-            <Icon name="close" size={16} color={colors.text} />
-          </Pressable>
-        </View>
+        <SelectionBar
+          selected={selectedNow}
+          copied={copiedText !== null && copiedText === selectedNow}
+          note={loupe ? "lift to copy" : "screen held"}
+          // at the bottom, in thumb reach, unless the selection's last row is where the bar would be
+          low={barStaysLow(Math.max(selection.a.row, selection.b.row), shown!.lines.length, area.height)}
+          keys={[
+            { label: "Word", hint: "Select whole words", onPress: () => widen("word") },
+            { label: "Line", hint: "Select whole lines", onPress: () => widen("line") },
+            { label: "Screen", hint: "Select the whole screen", onPress: () => widen("screen") },
+            ...(operate && bare ? [{ label: "To prompt", hint: "Put the selection in the command line", onPress: toPrompt, sep: true }] : []),
+          ]}
+          onCancel={endSelection}
+        />
       ) : copied ? (
-        <View style={styles.selectBar} pointerEvents="none">
+        <View style={styles.copiedBar} pointerEvents="none">
           <Text style={styles.selectKeyText}>Copied</Text>
         </View>
       ) : null}
@@ -1032,12 +1114,12 @@ const styles = StyleSheet.create({
   age: { paddingHorizontal: 12, paddingVertical: 4, backgroundColor: colors.chrome },
   ageText: { fontFamily: ui(500), color: colors.textMuted, fontSize: 12 },
   band: { position: "absolute", backgroundColor: `${colors.accent}55` },
-  handle: { position: "absolute", width: HANDLE, height: HANDLE, borderRadius: HANDLE / 2, backgroundColor: colors.accent, borderWidth: 2, borderColor: colors.bg },
-  selectBar: { position: "absolute", top: 8, alignSelf: "center", flexDirection: "row", alignItems: "center", gap: 8, padding: 6, borderRadius: 22, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.glassRim, elevation: 8 },
-  // a selection in the top half keeps its text in sight: the bar goes to the bottom
-  selectBarLow: { top: undefined, bottom: 8 },
-  selectKey: { minWidth: 36, height: 36, paddingHorizontal: 10, borderRadius: 18, alignItems: "center", justifyContent: "center" },
+  stem: { position: "absolute", width: STEM, borderRadius: STEM / 2, backgroundColor: colors.accent },
+  knob: { position: "absolute", width: KNOB, height: KNOB, borderRadius: KNOB / 2, backgroundColor: colors.accent, borderWidth: 2, borderColor: colors.bg },
+  loupe: { position: "absolute", width: LOUPE_W, overflow: "hidden", borderRadius: 22, borderWidth: 1, borderColor: colors.borderStrong, elevation: 10, shadowColor: "#000", shadowOpacity: 0.8, shadowRadius: 14, shadowOffset: { width: 0, height: 8 } },
+  loupeCaret: { position: "absolute", width: 2, borderRadius: 1, backgroundColor: colors.accent },
   selectKeyText: { fontFamily: ui(500), color: colors.text, fontSize: 14 },
+  copiedBar: { position: "absolute", top: 8, alignSelf: "center", paddingHorizontal: 14, height: 36, justifyContent: "center", borderRadius: 18, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.glassRim, elevation: 8 },
   bareError: { paddingHorizontal: 12, paddingVertical: 6, backgroundColor: colors.chrome },
   // a block's rule: 2 px in the 6 pt gutter left of the row
   rule: { position: "absolute", left: -4, top: 0, width: 2 },

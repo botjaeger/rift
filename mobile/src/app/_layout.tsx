@@ -5,6 +5,7 @@ import { StatusBar } from "expo-status-bar";
 import * as Updates from "expo-updates";
 import { useCallback, useEffect, useState } from "react";
 import { Alert, LogBox, Platform } from "react-native";
+import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { alertAuth } from "@/lock";
 import { tapTarget } from "@/notify";
@@ -155,6 +156,9 @@ export default function RootLayout() {
   }, []);
 
   return (
+    // the gesture handler's root: the Switcher's Arrange list and the Panes page drag their rows with
+    // its pan (ui/ReorderRow.tsx), the tab bar swipes with its fling (ui/TabBar.tsx)
+    <GestureHandlerRootView style={{ flex: 1 }}>
     <SafeAreaProvider>
       <StatusBar style="light" />
       <ThemeProvider value={navTheme}>
@@ -175,27 +179,12 @@ export default function RootLayout() {
             <Stack.Screen name="computer" options={{ headerShown: false, title: "Computer" }} />
             <Stack.Screen
               name="tabs"
-              options={{
-                title: "Tabs",
-                presentation: "formSheet",
-                sheetAllowedDetents: [0.85],
-                sheetGrabberVisible: true,
-                sheetCornerRadius: 20,
-                headerShown: false,
-                contentStyle: { backgroundColor: colors.surface },
-              }}
+              // the Switcher: a full page, so no sheet gesture takes a row's drag
+              options={{ title: "Switcher", presentation: "fullScreenModal", headerShown: false, contentStyle: { backgroundColor: colors.bg } }}
             />
             <Stack.Screen
               name="panes"
-              options={{
-                title: "Panes",
-                presentation: "formSheet",
-                sheetAllowedDetents: [0.75],
-                sheetGrabberVisible: true,
-                sheetCornerRadius: 20,
-                headerShown: false,
-                contentStyle: { backgroundColor: colors.surface },
-              }}
+              options={{ title: "Panes", presentation: "fullScreenModal", headerShown: false, contentStyle: { backgroundColor: colors.bg } }}
             />
             <Stack.Screen
               name="new-tab"
@@ -337,5 +326,6 @@ export default function RootLayout() {
       </ThemeProvider>
       {splash ? <Splash onDone={splashDone} /> : null}
     </SafeAreaProvider>
+    </GestureHandlerRootView>
   );
 }

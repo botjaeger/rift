@@ -66,16 +66,25 @@ const ICONS = {
   file: { ios: "doc", android: "description", web: "description" },
   check: { ios: "checkmark", android: "check", web: "check" },
   lock: { ios: "lock", android: "lock", web: "lock" },
+  // the Switcher's Arrange rows and a pinned tab
+  grip: { ios: "line.3.horizontal", android: "drag_indicator", web: "drag_indicator" },
+  pin: { ios: "pin.fill", android: "push_pin", web: "push_pin" },
+  // the key row's modifiers, from the one icon set like every other symbol on a key
+  control: { ios: "control", android: "keyboard_control_key", web: "keyboard_control_key" },
+  option: { ios: "option", android: "keyboard_option_key", web: "keyboard_option_key" },
+  shift: { ios: "shift", android: "shift", web: "shift" },
+  remove: { ios: "minus.circle", android: "do_not_disturb_on", web: "do_not_disturb_on" },
 } as const satisfies Record<string, SymbolViewProps["name"]>;
 
 export type IconName = keyof typeof ICONS;
 
-export function Icon({ name, size = 18, color }: { name: IconName; size?: number; color: ColorValue }) {
+export function Icon({ name, size = 18, color, weight }: { name: IconName; size?: number; color: ColorValue; weight?: SymbolViewProps["weight"] }) {
   return (
     <SymbolView
       name={ICONS[name]}
       size={size}
       tintColor={color}
+      weight={weight}
       accessibilityElementsHidden
       importantForAccessibility="no-hide-descendants"
     />

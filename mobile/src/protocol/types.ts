@@ -125,6 +125,8 @@ export interface Tab {
   index: number;
   title: string;
   active: boolean;
+  /** Pinned on the computer's tab bar; absent when not (and from desktops before 0.26). */
+  pinned?: boolean;
   panes: Pane[];
 }
 
@@ -841,7 +843,7 @@ const isHistoryEntry = (v: unknown): v is HistoryEntry =>
   isObj(v) && isStr(v.text) && utf8Length(v.text) <= MAX_COMPLETE_TEXT && !/[\n\r]/.test(v.text) && (v.at === null || isUint(v.at));
 
 function isTab(v: unknown): v is Tab {
-  return isObj(v) && isUint(v.index) && isStr(v.title) && isBool(v.active) && arrayOf(isPane)(v.panes);
+  return isObj(v) && isUint(v.index) && isStr(v.title) && isBool(v.active) && (v.pinned === undefined || isBool(v.pinned)) && arrayOf(isPane)(v.panes);
 }
 
 function isWindow(v: unknown): v is Window {

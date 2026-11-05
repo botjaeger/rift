@@ -28,12 +28,31 @@ class RiftPasteButton: ExpoView {
 
   private lazy var control: UIPasteControl = Self.makeControl(labelled: false, target: self)
 
+  /// The key row's look (the Keys board, KeysNormalized): the key's surface ground and text colour
+  /// with its corners less the 1 pt rim the view around it draws. A clear ground drew as a black
+  /// circle among the row's keys. The glyph stays the system's own.
+  private static let keyGround = UIColor(red: 0x1e / 255, green: 0x1e / 255, blue: 0x1e / 255, alpha: 1)
+  private static let keyText = UIColor(red: 0xe6 / 255, green: 0xe6 / 255, blue: 0xe6 / 255, alpha: 1)
+  private static let keyRadius: CGFloat = 11
+  /// palette.ts `bg` and `accent`, for the Attach sheet's Paste row.
+  private static let rowGround = UIColor(red: 0x05 / 255, green: 0x05 / 255, blue: 0x05 / 255, alpha: 1)
+  private static let accent = UIColor(red: 0x19 / 255, green: 0xaa / 255, blue: 0xd8 / 255, alpha: 1)
+
   private static func makeControl(labelled: Bool, target: UIView) -> UIPasteControl {
     let config = UIPasteControl.Configuration()
     config.displayMode = labelled ? .iconAndLabel : .iconOnly
-    config.cornerStyle = labelled ? .large : .capsule
-    config.baseBackgroundColor = .clear
-    config.baseForegroundColor = .label
+    if labelled {
+      // the Attach sheet's row: its list's ground and the accent its sibling rows' icons take
+      // (a clear ground drew as a black pill there too)
+      config.cornerStyle = .large
+      config.baseBackgroundColor = rowGround
+      config.baseForegroundColor = accent
+    } else {
+      config.cornerStyle = .fixed
+      config.cornerRadius = keyRadius
+      config.baseBackgroundColor = keyGround
+      config.baseForegroundColor = keyText
+    }
     let control = UIPasteControl(configuration: config)
     control.target = target
     return control
@@ -48,7 +67,8 @@ class RiftPasteButton: ExpoView {
 
   override func layoutSubviews() {
     super.layoutSubviews()
-    control.frame = bounds
+    // a key: inside the 1 pt rim the view around it draws, so the rim shows like every key's
+    control.frame = labelled ? bounds : bounds.insetBy(dx: 1, dy: 1)
   }
 
   override func canPaste(_ itemProviders: [NSItemProvider]) -> Bool {

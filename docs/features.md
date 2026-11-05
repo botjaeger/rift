@@ -1938,17 +1938,18 @@ on the desktop (also for shells a phone started while no window is open).
   Panes › Choose keys; its *+tab* and *+pane* keys open a new tab in the pane's
   window or split the pane on the desktop (starting in the pane's folder,
   with a toast naming the phone), and the phone goes to the new pane.
-  *New tab* (the Tabs sheet, a computer's card on Portals) and *New pane* (the
-  Panes sheet) open sheets that choose what the new tab or pane starts with: a
+  *New tab* (the Switcher, a computer's card on Portals) and *New pane* (the
+  Switcher's *Split pane*, a tab's Panes page) open sheets that choose what the new tab or pane starts with: a
   shell, or Claude Code, Codex or OpenCode. A program is an `open`, then a
   `run` of its name in the new pane, once its shell shows a prompt (the
   computer answers `busy` until then; the phone tries again for a few seconds);
   *Ask before running* and Face ID apply as to any run. View-only phones get
-  neither button. In the Tabs sheet (whole list, no filter) a long press lifts
-  a tab and dragging it over the others reorders the desktop window's tabs
-  (the tab bar follows, ⌃⇧← / ⌃⇧→ order; a pinned tab stays among the pinned
-  and a grouped one in its group, other windows' places are refused); the
-  Panes sheet does the same for a tab's panes, each pane exchanging its place
+  neither button. The Switcher's *Arrange* (or a long press on a card) lists the
+  tabs, pinned ones apart (the topology's `pinned`); a long press lifts a tab
+  and dragging it over the others reorders the desktop window's tabs (the tab
+  bar follows, ⌃⇧← / ⌃⇧→ order; a pinned tab stays among the pinned and a
+  grouped one in its group, other windows' places are refused), with a small
+  vibration when it lifts; a tab's Panes page does the same for its panes, each pane exchanging its place
   in the split layout with the ones it passes. Screen readers get *Move up* /
   *Move down* on each row. A desktop without the `move` feature, and
   view-only phones, show no drag.
@@ -1958,15 +1959,19 @@ on the desktop (also for shells a phone started while no window is open).
   swipe the card left for *Unpair*, which asks first) with its tabs, each with its state and time (*Needs you · 2m*, *Working
   3:56*, *Idle 12m*); chips (*needs you*, *working*, *idle*) filter the tabs. With
   one computer paired, an agent's question answers in place on its tab. A cold
-  start reopens the pane shown last. A pane's header title opens the *Tabs*
-  sheet (every tab of the computer, filtered by state) and its pane picker
-  the *Panes* sheet, the one way to move between the tab's panes (a swipe
-  would fight with output that scrolls sideways; a screen reader has *Next
-  pane* and *Previous pane* on the picker).
+  start reopens the pane shown last. Over the command line a tab bar names
+  the tab with "tab 2 of 3" and a dot per pane, the neighbouring tabs at its
+  sides: a swipe left or right (or a tap on a side name) goes to the next or
+  previous tab, a tap in the middle (or the header's computer name) opens the
+  *Switcher*, a full page of the computer's tabs as cards with their panes'
+  last lines, filtered by state, with *New tab* and *Split pane*. A tab of
+  several panes keeps the pane picker under the header, which opens the tab's
+  *Panes* page (a screen reader has *Next pane* / *Previous pane* on the
+  picker and *Next tab* / *Previous tab* on the tab bar).
   Successes before the newest failure fold away; blocks are cards with a thin
   border in their state's colour (a table as a list, with *Raw*), failed ones
   with *Run again* and *Copy error*, running ones with *Stop* and *Notify when
-  done*; a tap on a card's header opens the block sheet, and selecting its output copies the selection (a read-only field; the system menu still shows). There is no view switch: the pane
+  done*; a tap on a card's header opens the block sheet, and selecting its output copies the selection (a read-only field with accent handles) with a small vibration; while text is selected the other blocks dim and a bar just above the selection (under it when there is no room; on Android, whose own text menu takes that place, under it or at the top of the output) shows how much is selected (lines and characters), *Copied*, *Line*, *All*, *To prompt* (the selection into the command line, its lines joined by spaces) and ✕; on iOS it replaces the system's edit menu (the block sheet keeps that menu). It follows the selection after a scroll, stays on the output, and a tap elsewhere in the output ends the selection. There is no view switch: the pane
   shows its screen (the TUI, with pinch-to-zoom) for the alternate screen, a coding agent or a program no
   block holds, and blocks for everything else. Above the command line: the
   folder and branch chips opening the chip menus, suggestions, the key row (⌃;

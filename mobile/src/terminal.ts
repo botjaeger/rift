@@ -287,6 +287,52 @@ export function wordAt(lines: readonly (readonly ScreenRun[])[], at: Cell): [Cel
   ];
 }
 
+/** The whole row under a cell, from its first column to its last character (the cell alone on a blank row). */
+export function lineAt(lines: readonly (readonly ScreenRun[])[], at: Cell): [Cell, Cell] {
+  const cells = rowCells(lines[at.row] ?? []).filter((c) => c.text.trim() !== "");
+  const last = cells.at(-1);
+  if (!last) return [at, at];
+  return [
+    { row: at.row, col: 0 },
+    { row: at.row, col: last.col + last.cells - 1 },
+  ];
+}
+
+/** The whole screen: its first cell to the last cell of its last row. */
+export const screenSpan = (rows: number, cols: number): [Cell, Cell] => [
+  { row: 0, col: 0 },
+  { row: Math.max(0, rows - 1), col: Math.max(0, cols - 1) },
+];
+
+/**
+ * Whether a dragged handle moved from `prev` into another word (or onto another blank): the moment
+ * the phone ticks. Moving within one word, or within one run of blanks, is no step.
+ */
+export function wordStep(lines: readonly (readonly ScreenRun[])[], prev: Cell, next: Cell): boolean {
+  if (prev.row !== next.row) return true;
+  if (prev.col === next.col) return false;
+  const [first, last] = unitAt(lines, prev);
+  return next.col < first || next.col > last;
+}
+
+/** The columns of the word under a cell, or of the run of blanks it sits in (past the row's text included). */
+function unitAt(lines: readonly (readonly ScreenRun[])[], at: Cell): [number, number] {
+  const [a, b] = wordAt(lines, at);
+  if (a.col !== b.col) return [a.col, b.col];
+  const cells = rowCells(lines[at.row] ?? []);
+  const blank = (col: number) => {
+    const c = cells.find((x) => col >= x.col && col < x.col + x.cells);
+    return !c || /^[\s|│┃]$/.test(c.text);
+  };
+  if (!blank(at.col)) return [a.col, b.col];
+  let first = at.col;
+  while (first > 0 && blank(first - 1)) first--;
+  let last = at.col;
+  const end = Math.max(at.col, ...cells.map((c) => c.col + c.cells));
+  while (last < end && blank(last + 1)) last++;
+  return [first, last >= end ? Number.POSITIVE_INFINITY : last];
+}
+
 /**
  * The media-control symbols agents draw (⏵⏵ auto mode, ⏺ a reply): the app's fonts lack them, and
  * a phone may draw them as wide emoji that clip the text after them. These have their shape in one cell.

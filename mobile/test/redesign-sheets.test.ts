@@ -79,10 +79,29 @@ describe("the message box and the Attach sheet", () => {
 
 describe("the key row", () => {
   const row = src("src/ui/ControlRow.tsx");
-  it("draws 44 pt keys in 44 pt targets", () => {
-    expect(row).toMatch(/key: \{\s*width: TOUCH,/);
+  const keys = src("src/controlKeys.ts");
+  const paste = src("modules/rift-keys/ios/RiftPasteButton.swift");
+  it("draws the Keys board's 52 x 44 pt keys, each its own 44 pt target", () => {
+    expect(row).toContain("export const KEY_W = 52;");
+    expect(row).toMatch(/key: \{\s*width: KEY_W,\s*height: TOUCH,\s*borderRadius: 12,/);
     expect(row).toContain("slot: { minWidth: TOUCH, minHeight: TOUCH,");
-    expect(row).toContain("keyWord: { width: undefined, minWidth: TOUCH,");
+    expect(row).toContain("keyWord: { width: undefined, minWidth: KEY_W,");
+  });
+  it("draws every symbol from the one icon set, words in mono, colour only for a state", () => {
+    // ⌃ ⌥ ⇧ are icons now, not font glyphs; ⇧Tab leads with the shift icon
+    expect(keys).toMatch(/id: "ctrl",[^\n]*icon: "control"/);
+    expect(keys).toMatch(/id: "alt",[^\n]*icon: "option"/);
+    expect(keys).toMatch(/id: "shift",[^\n]*icon: "shift"/);
+    expect(keys).toMatch(/id: "shift\+tab",[^\n]*lead: "shift"/);
+    expect(row).toContain('<Icon name={def.icon} size={18} weight="medium" color={fg} />');
+    expect(row).toContain("label: { fontFamily: monoMedium, fontSize: 13,");
+    expect(row).toContain("keyActive: { backgroundColor: tints.accentBadge, borderColor: colors.accent }");
+    // the system Paste takes the key's ground instead of drawing a black circle
+    expect(paste).toContain("config.cornerStyle = .fixed");
+    expect(paste).toContain("config.baseBackgroundColor = keyGround");
+    // the Attach sheet's Paste row: the list's ground and the accent of its sibling rows' icons
+    expect(paste).toContain("config.baseBackgroundColor = rowGround");
+    expect(paste).toContain("config.baseForegroundColor = accent");
   });
   it("scrolls sideways only, without moving the screen", () => {
     expect(row).toContain("directionalLockEnabled");

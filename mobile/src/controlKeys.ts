@@ -15,6 +15,8 @@ export interface ControlKey {
   label: string;
   /** The key's icon (the Keys board's arrows, interrupt, paste); drawn instead of the label. */
   icon?: IconName;
+  /** A modifier's icon drawn before the label ("⇧" before "Tab"): no font glyph for a symbol. */
+  lead?: IconName;
   /** What screen readers say. */
   spoken: string;
   /** What Settings › Keys calls it, when shorter than `spoken` ("Interrupt"). */
@@ -45,12 +47,12 @@ export const CONTROL_KEYS: readonly ControlKey[] = [
   { id: "ctrl+c", tip: "Sends Ctrl+C: stops the running command", label: "⌃C", icon: "interrupt", spoken: "Control C, interrupt", name: "Interrupt", danger: true },
   { id: "esc", tip: "Sends Escape: leaves a mode, cancels a prompt, closes a menu", label: "Esc", spoken: "Escape" },
   { id: "tab", tip: "Sends Tab: completes what you typed, or moves to the next field", label: "Tab", spoken: "Tab" },
-  { id: "shift+tab", tip: "Sends Shift+Tab: moves back, or to the previous option", label: "⇧Tab", spoken: "Shift Tab", short: "Shift Tab" },
+  { id: "shift+tab", tip: "Sends Shift+Tab: moves back, or to the previous option", label: "⇧Tab", lead: "shift", spoken: "Shift Tab", short: "Shift Tab" },
   { id: "enter", tip: "Sends Return: confirms a menu or a picker in the program. With text in the message box, a new line there", label: "↵", icon: "enter", spoken: "Return", name: "Return", short: "Return" },
   { id: "ctrl+j", tip: "Starts a new line in the message, without sending it", label: "New line", icon: "newLine", spoken: "New line", name: "New line", short: "New line" },
-  { id: "ctrl", tip: "Holds Control for the next key you type or press: Ctrl, then R is Ctrl+R", label: "⌃", spoken: "Control, applies to the next key", name: "Control the next key", short: "Control", sticky: true },
-  { id: "alt", tip: "Holds Alt for the next key you type or press: Alt, then B moves back a word", label: "⌥", spoken: "Alt, applies to the next key", name: "Alt the next key", short: "Alt", sticky: true },
-  { id: "shift", tip: "Holds Shift for the next key you type or press", label: "⇧", spoken: "Shift, applies to the next key", name: "Shift the next key", short: "Shift", sticky: true },
+  { id: "ctrl", tip: "Holds Control for the next key you type or press: Ctrl, then R is Ctrl+R", label: "⌃", icon: "control", spoken: "Control, applies to the next key", name: "Control the next key", short: "Control", sticky: true },
+  { id: "alt", tip: "Holds Alt for the next key you type or press: Alt, then B moves back a word", label: "⌥", icon: "option", spoken: "Alt, applies to the next key", name: "Alt the next key", short: "Alt", sticky: true },
+  { id: "shift", tip: "Holds Shift for the next key you type or press", label: "⇧", icon: "shift", spoken: "Shift, applies to the next key", name: "Shift the next key", short: "Shift", sticky: true },
   { id: "up", tip: "Sends the up arrow: the previous command, or up in a menu", label: "↑", icon: "up", spoken: "Up arrow", short: "Up" },
   { id: "down", tip: "Sends the down arrow: the next command, or down in a menu", label: "↓", icon: "down", spoken: "Down arrow", short: "Down" },
   { id: "left", tip: "Sends the left arrow: moves the cursor one character left", label: "←", icon: "left", spoken: "Left arrow", short: "Left" },
