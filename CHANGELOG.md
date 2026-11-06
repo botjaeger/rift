@@ -8,6 +8,14 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.27.0 — 2026-11-07
+
+### New
+
+- **Your phone follows Rift's theme** — The phone app now takes the theme you use in Rift, and
+  changes with it within a couple of seconds. On the phone you can keep it, follow the phone's
+  own light or dark appearance, or pick another theme (Rift for iPhone and Android 0.8.0).
+
 ## 0.26.1 — 2026-11-06
 
 ### Improved

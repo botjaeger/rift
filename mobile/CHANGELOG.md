@@ -6,6 +6,42 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.8.0 — 2026-11-07
+
+Themes, the same look on every page, and easier keys and selection.
+
+### New
+
+- **Themes** — The app follows the theme you use in Rift on the computer. In Settings ›
+  Appearance you can instead follow this phone's light or dark appearance, or choose any of the
+  13 themes.
+- **Arrow pad** — The keys show ↑ ← ↓ → as a pad; hold an arrow and it repeats.
+- **Text size** — In ⋯ over a full-screen program: make the text smaller or larger, or reset it.
+- **Links in programs** — Links shown by programs such as less are underlined and open when you
+  tap them, even when they wrap onto the next line.
+- **Search marks** — Searching a pane marks every match in the command output.
+
+### Improved
+
+- **The same look everywhere** — Buttons, fields, filters, headers and lists look and behave
+  the same on every page, and anything that removes or closes something is red.
+- **Command line** — Return takes the first suggestion, holding ⌨ opens the keys settings, and
+  while a program runs the first key is Stop ⌃C and the field says what you are typing to.
+- **Selection** — One bar under the output: Word, Line, All, To prompt and ✕, with a ✓ Copied
+  mark. On Android, Back ends the selection.
+- **Pages** — Portals shows a summary line and who needs you first; rows say in words what each
+  tab is doing; the computer menu, pane menu, question card, Tabs, Settings, pairing, first run,
+  lock screen and Diagnostics are redone.
+- **Paste key** — Follows the theme instead of always being dark.
+
+### Fixed
+
+- **Dragging a selection handle went back a page** on iOS.
+- **The ⋯ menu opened under the keyboard**, hiding Close pane and Close tab.
+- **A failed tab said "Idle"** next to its red mark.
+- **After pairing** the app now opens Portals with the new computer.
+- **A keychain error left Portals blank** — It shows the error and Try again again.
+
 ## 0.7.0 · update 1 — 2026-11-06
 
 Tabs move to the top, lists show what each tab is doing, and selecting text no longer covers your work.
