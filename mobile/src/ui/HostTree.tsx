@@ -1,4 +1,4 @@
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Pressable, Text, View } from "react-native";
 import { avatarFor } from "@/avatar";
 import { tildePath } from "@/chips";
 import type { HostView } from "@/fleet";
@@ -9,14 +9,14 @@ import { Avatar } from "./Avatar";
 import { Icon } from "./Icon";
 import { canStartTab } from "./StartTab";
 import { SectionTitle } from "./Screen";
-import { colors, mono, radius, tints, ui } from "./theme";
+import { mono, radius, ui, makeStyles, useColors, type Palette } from "./theme";
 
 /** A pane row's badge (the Host board). */
-function paneBadge(pane: Pane): { text: string | null; color: string; bg: string } {
-  if (pane.job) return { text: "running", color: colors.accent, bg: tints.accentBadge };
+function paneBadge(pane: Pane, colors: Palette): { text: string | null; color: string; bg: string } {
+  if (pane.job) return { text: "running", color: colors.accent, bg: colors.tints.accentBadge };
   if (pane.last_exit === null) return { text: null, color: colors.textMuted, bg: "transparent" };
-  if (pane.last_exit === 0) return { text: "✓ 0", color: colors.success, bg: tints.successBadge };
-  return { text: `✕ ${pane.last_exit}`, color: colors.textBright, bg: tints.errorBadge };
+  if (pane.last_exit === 0) return { text: "✓ 0", color: colors.success, bg: colors.tints.successBadge };
+  return { text: `✕ ${pane.last_exit}`, color: colors.textBright, bg: colors.tints.errorBadge };
 }
 
 function paneSpoken(pane: Pane, title: string): string {
@@ -31,8 +31,10 @@ function paneSpoken(pane: Pane, title: string): string {
 }
 
 function PaneRow({ pane, tab, onOpen }: { pane: Pane; tab: string; onOpen: (id: number) => void }) {
+  const colors = useColors();
+  const styles = useStyles();
   const title = pane.last_command ?? pane.job ?? "(no command yet)";
-  const b = paneBadge(pane);
+  const b = paneBadge(pane, colors);
   return (
     <Pressable
       accessibilityRole="button"
@@ -43,7 +45,7 @@ function PaneRow({ pane, tab, onOpen }: { pane: Pane; tab: string; onOpen: (id: 
     >
       <Avatar avatar={avatarFor(pane.cwd, tab, programName(pane))} />
       <View style={styles.paneText}>
-        <Text style={styles.command} numberOfLines={1}>
+        <Text style={[styles.command, !(pane.last_command ?? pane.job) && styles.noCommand]} numberOfLines={1}>
           {title}
         </Text>
         {pane.cwd || pane.git ? (
@@ -70,6 +72,7 @@ function PaneRow({ pane, tab, onOpen }: { pane: Pane; tab: string; onOpen: (id: 
 
 /** A host's tabs as cards of pane rows (the Host board), one group per window. */
 export function HostTree({ host, onOpenPane }: { host: HostView; onOpenPane: (id: number) => void }) {
+  const styles = useStyles();
   if (host.conn.status === "open" && host.topology && host.windows.length === 0) {
     // a computer that takes a shell anyway says so above (StartTab)
     if (canStartTab(host)) return null;
@@ -107,7 +110,7 @@ export function HostTree({ host, onOpenPane }: { host: HostView; onOpenPane: (id
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = makeStyles((colors) => ({
   tree: { gap: 18 },
   window: {},
   title: { marginTop: 10, marginBottom: 8, paddingHorizontal: 12 },
@@ -125,7 +128,7 @@ const styles = StyleSheet.create({
   onScreen: {
     fontFamily: ui(400),
     color: colors.accent,
-    backgroundColor: tints.accentBadge,
+    backgroundColor: colors.tints.accentBadge,
     fontSize: 11,
     paddingHorizontal: 8,
     paddingVertical: 2,
@@ -146,17 +149,20 @@ const styles = StyleSheet.create({
   pressed: { opacity: 0.7 },
   paneText: { flex: 1, minWidth: 0, gap: 3 },
   command: { color: colors.textBright, fontFamily: mono, fontSize: 13 },
+  // "(no command yet)" is words: Inter
+  noCommand: { fontFamily: ui(400), color: colors.textMuted, fontSize: 14 },
   where: { flexDirection: "row", gap: 8, overflow: "hidden" },
-  cwd: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12, flexShrink: 1 },
+  cwd: { fontFamily: mono, color: colors.textMuted, fontSize: 12, flexShrink: 1 },
   // the path gives way first: a long path cut the branch down to its first letter
   branch: { fontFamily: ui(400), color: colors.success, fontSize: 12, flexShrink: 0, maxWidth: "45%" },
   badge: {
     flexShrink: 0,
-    fontFamily: mono,
+    fontFamily: ui(500),
     fontSize: 11,
+    fontVariant: ["tabular-nums"],
     paddingHorizontal: 8,
     paddingVertical: 2,
     borderRadius: 10,
     overflow: "hidden",
   },
-});
+}));

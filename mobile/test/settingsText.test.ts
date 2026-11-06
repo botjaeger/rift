@@ -1,8 +1,11 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { colors, contrast, over } from "../src/ui/palette";
-import { connWord, hostMeta, notifyExample, ntfySummary, shortAfter, unpairFooter, updateLine } from "../src/ui/settingsText";
+import { BUILTIN_THEMES } from "../src/themes.data";
+import { DARK_DEFAULT, contrast, over, paletteFrom } from "../src/ui/palette";
+
+const colors = paletteFrom(DARK_DEFAULT);
+import { hostMeta, placeWord, notifyExample, ntfySummary, shortAfter, unpairFooter, updateLine } from "../src/ui/settingsText";
 
 const lan = { status: "open", path: { kind: "lan", address: "10.0.0.2:7000" } } as const;
 const relay = { status: "open", path: { kind: "relay", url: "wss://r.example" } } as const;
@@ -16,14 +19,17 @@ describe("Settings words (the Settings board)", () => {
     expect(shortAfter(300_000)).toBe("5 min");
   });
 
-  it("connWord and hostMeta name the path and the permission", () => {
-    expect(connWord(lan)).toBe("LAN");
-    expect(connWord(relay)).toBe("Relay");
-    expect(connWord(away)).toBe("Offline");
-    expect(connWord({ status: "connecting", path: null })).toBe("Connecting");
-    expect(hostMeta({ os: "macos", conn: lan, viewOnly: false })).toBe("macOS · LAN · can run commands");
-    expect(hostMeta({ os: "linux", conn: relay, viewOnly: true })).toBe("Linux · Relay · view only");
-    expect(hostMeta({ os: null, conn: away, viewOnly: false })).toBe("Offline · can run commands");
+  it("placeWord and hostMeta say where a computer is and what this phone may do there", () => {
+    expect(placeWord(lan)).toBe("This network");
+    expect(placeWord(relay)).toBe("Over the relay");
+    expect(placeWord(away)).toBe("Can’t reach it");
+    expect(placeWord({ status: "offline", path: null })).toBe("Offline");
+    expect(placeWord({ status: "connecting", path: null })).toBe("Connecting…");
+    expect(placeWord({ status: "failed", path: null })).toBe("Can’t reach it");
+    expect(hostMeta({ conn: lan, viewOnly: false })).toBe("This network · can run commands");
+    expect(hostMeta({ conn: relay, viewOnly: true })).toBe("Over the relay · view only");
+    // one it cannot reach says only that
+    expect(hostMeta({ conn: { status: "closed", path: null }, viewOnly: false })).toBe("Can’t reach it");
   });
 
   it("notifyExample shows the alert for the current value, with the computer's name", () => {
@@ -60,17 +66,23 @@ describe("Settings words (the Settings board)", () => {
 
 describe("Settings board colours", () => {
   const rows = readFileSync(fileURLToPath(new URL("../src/ui/Rows.tsx", import.meta.url)), "utf8");
-  const segmentOn = /SEGMENT_ON = "(#[0-9a-f]{6})"/.exec(rows)?.[1];
 
-  it("the chosen segment's ground keeps textBright above 4.5:1", () => {
-    expect(segmentOn).toBe("#373737");
-    expect(contrast(colors.textBright, segmentOn!)).toBeGreaterThanOrEqual(4.5);
+  it("the chosen segment's ground keeps textBright above 4.5:1, in every builtin theme", () => {
+    expect(colors.segmentOn).toBe("#373737");
+    expect(rows).toContain("segmentOn: { backgroundColor: colors.segmentOn }");
+    for (const t of BUILTIN_THEMES) {
+      const c = paletteFrom(t);
+      expect(contrast(c.textBright, c.segmentOn), t.name).toBeGreaterThanOrEqual(4.5);
+    }
   });
 
   it("the off track keeps the switch visible on a surface, the on track is the accent (Warp)", () => {
-    const off = /SWITCH_OFF = "(#[0-9a-f]{8})"/.exec(rows)?.[1];
-    expect(off).toBe("#ffffff29");
-    expect(contrast(over(off!, colors.surface), colors.surface)).toBeGreaterThan(1.2);
+    expect(colors.switchOff).toBe("#ffffff29");
+    expect(rows).toContain("false: colors.switchOff");
+    for (const t of BUILTIN_THEMES) {
+      const c = paletteFrom(t);
+      expect(contrast(over(c.switchOff, c.surface), c.surface), t.name).toBeGreaterThan(1.2);
+    }
     expect(rows).toContain("true: colors.accent");
   });
 });

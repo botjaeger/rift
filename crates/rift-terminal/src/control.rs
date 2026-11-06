@@ -435,6 +435,9 @@ pub struct Response {
     /// window is ordinary.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub windows: Vec<WindowInfo>,
+    /// `status`: the app's resolved theme, as phones get it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<rift_remote::protocol::Theme>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane: Option<u64>,
     /// `blocks`: the pane's blocks, newest last.

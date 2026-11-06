@@ -18,40 +18,76 @@ class RiftPasteButton: ExpoView {
   var labelled = false {
     didSet {
       if labelled != oldValue {
-        control.removeFromSuperview()
-        control = Self.makeControl(labelled: labelled, target: self)
-        addSubview(control)
-        setNeedsLayout()
+        rebuild()
       }
     }
   }
 
-  private lazy var control: UIPasteControl = Self.makeControl(labelled: false, target: self)
+  /// The theme's ground and ink for the control (palette.ts: the key's surface and text, or the
+  /// Attach row's ground and accent), so it matches every theme, not only Dark Default.
+  var ground: UIColor? {
+    didSet {
+      if ground != oldValue {
+        rebuild()
+      }
+    }
+  }
+  var ink: UIColor? {
+    didSet {
+      if ink != oldValue {
+        rebuild()
+      }
+    }
+  }
+
+  private lazy var control: UIPasteControl = Self.makeControl(labelled: false, ground: nil, ink: nil, target: self)
+
+  private func rebuild() {
+    control.removeFromSuperview()
+    control = Self.makeControl(labelled: labelled, ground: ground, ink: ink, target: self)
+    addSubview(control)
+    setNeedsLayout()
+  }
+
+  /// `#rrggbb` or `#rrggbbaa` (palette.ts colours); nil for anything else.
+  static func color(hex: String?) -> UIColor? {
+    guard let hex, hex.hasPrefix("#"), hex.count == 7 || hex.count == 9, let v = UInt64(hex.dropFirst(), radix: 16) else {
+      return nil
+    }
+    let rgba = hex.count == 7 ? (v << 8) | 0xff : v
+    return UIColor(
+      red: CGFloat((rgba >> 24) & 0xff) / 255,
+      green: CGFloat((rgba >> 16) & 0xff) / 255,
+      blue: CGFloat((rgba >> 8) & 0xff) / 255,
+      alpha: CGFloat(rgba & 0xff) / 255
+    )
+  }
 
   /// The key row's look (the Keys board, KeysNormalized): the key's surface ground and text colour
   /// with its corners less the 1 pt rim the view around it draws. A clear ground drew as a black
   /// circle among the row's keys. The glyph stays the system's own.
   private static let keyGround = UIColor(red: 0x1e / 255, green: 0x1e / 255, blue: 0x1e / 255, alpha: 1)
   private static let keyText = UIColor(red: 0xe6 / 255, green: 0xe6 / 255, blue: 0xe6 / 255, alpha: 1)
-  private static let keyRadius: CGFloat = 11
+  /// The key's 8 pt corners less the 1 pt rim (ControlRow `key`).
+  private static let keyRadius: CGFloat = 7
   /// palette.ts `bg` and `accent`, for the Attach sheet's Paste row.
   private static let rowGround = UIColor(red: 0x05 / 255, green: 0x05 / 255, blue: 0x05 / 255, alpha: 1)
   private static let accent = UIColor(red: 0x19 / 255, green: 0xaa / 255, blue: 0xd8 / 255, alpha: 1)
 
-  private static func makeControl(labelled: Bool, target: UIView) -> UIPasteControl {
+  private static func makeControl(labelled: Bool, ground: UIColor?, ink: UIColor?, target: UIView) -> UIPasteControl {
     let config = UIPasteControl.Configuration()
     config.displayMode = labelled ? .iconAndLabel : .iconOnly
     if labelled {
       // the Attach sheet's row: its list's ground and the accent its sibling rows' icons take
       // (a clear ground drew as a black pill there too)
       config.cornerStyle = .large
-      config.baseBackgroundColor = rowGround
-      config.baseForegroundColor = accent
+      config.baseBackgroundColor = ground ?? rowGround
+      config.baseForegroundColor = ink ?? accent
     } else {
       config.cornerStyle = .fixed
       config.cornerRadius = keyRadius
-      config.baseBackgroundColor = keyGround
-      config.baseForegroundColor = keyText
+      config.baseBackgroundColor = ground ?? keyGround
+      config.baseForegroundColor = ink ?? keyText
     }
     let control = UIPasteControl(configuration: config)
     control.target = target

@@ -380,6 +380,7 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 {"t":"ack","id":"n1","ok":true,"pane":14}
 {"t":"done","pane":12,"block":87,"command":"cargo test","exit":0,"duration_ms":260500}
 {"t":"pong","n":3}
+{"t":"theme","theme":Theme}
 {"t":"closing","reason":"update","back_in_s":60}
 {"t":"closing","reason":"quit"}
 {"t":"error","code":"auth","message":"this device is not paired"}
@@ -406,7 +407,7 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
   `topology`, below), `fit` (§ Phase 3), `prompt_chips` (a pane's `chips`
   in `topology`, below, and the `chip` and `reset_elapsed` requests, §
   Prompt chip menus), `open` and `close`, `move` (tab and pane reorder), `closing` (below), `scroll` and
-  `upload`, `upload_files`, `paste` and `mouse` (above), `clipboard` (below), and `start` (listed only while
+  `upload`, `upload_files`, `paste` and `mouse` (above), `clipboard` and `theme` (below), and `start` (listed only while
   the computer allows it: macOS, `remote_access`, durable sessions). A
   gateway that leaves
   the field out serves none of them; the app then hides what needs them.
@@ -859,6 +860,34 @@ The phone puts it on its clipboard and says so. Off by default because a
 program, or a host reached over ssh from it, could otherwise write to the
 phone's clipboard without anyone asking.
 
+### The desktop's theme (feature `theme`)
+
+The welcome carries the theme the desktop draws with (`theme`, absent from
+an older gateway), resolved as its windows show it (`theme`, or
+`theme_light` while the system is light with `sync_os_theme` on; with no
+window open, the configured `theme`). When it changes (Settings, a
+`config.toml` edit, the system switching light or dark), every connection
+gets a `theme` message within two seconds (the gateway reads the windows'
+theme with the topology, then checks it every `THEME_POLL`, 1 s); one may repeat the theme its
+welcome had.
+
+```json
+{"t":"welcome","v":2,"host":"studio-mac","os":"macos","version":"0.27.0","device":"d3f1","permission":"operate","features":["screen","text","output","clipboard","theme"],"theme":{"name":"Dark Default","dark":true,"bg":"050505","bg_chrome":"000000","surface":"1e1e1e","border":"ffffff1a","fg":"ffffff","text_bright":"ffffff","text_ui":"e6e6e6","text_dim":"9b9b9b","text_muted":"828282","accent":"19aad8","success":"1ca05a","error":"ff8272","warning":"e5a01a","selection":"76a7fa66","ansi":["616161","ff8272","b4fa72","fefdc2","a5d5fe","ff8ffd","d0d1fe","f1f1f1","8e8e8e","ffc4bd","d6fcb9","fefdd5","c1e3fe","ffb1fe","e5e6fe","feffff"]}}
+{"t":"theme","theme":{"name":"Dracula","dark":true,"bg":"282a36",…,"ansi":[…16 colours]}}
+```
+
+A `Theme` is the theme's `name` (1 to 64 UTF-16 code units; the desktop
+cuts a longer theme-file name to fit, ending it in "…", and sends "Custom" for an empty one), `dark` (its `bg`
+is dark), the tokens `bg`, `bg_chrome`, `surface`, `border`, `fg`,
+`text_bright`, `text_ui`, `text_dim`, `text_muted`, `accent`, `success`,
+`error`, `warning`, `selection` as `rrggbb` or `rrggbbaa` (no `#`), and the
+16 `ansi` colours, named as in the desktop's theme files
+(docs/configuration.md, Themes). The app drops a malformed theme from a
+welcome (the welcome still counts) and ignores a malformed `theme`
+message. It makes its colours from the tokens (Settings › Appearance, Same
+as the computer), holds each text colour to 4.5:1 on the grounds it draws it
+on, and keeps the last theme a computer sent for one that sends none.
+
 ### Output paging
 
 `Block.output` is the tail of a block's output. Earlier lines are fetched
@@ -1057,7 +1086,8 @@ before, for the phone's Run sheet and the pane's suggestions:
   Otherwise it exits 30 seconds after the last Rift window is gone.
 - A gateway counts as running only while `gateway.lock` is held; a stale
   `status.json` is ignored. A window starts one at most every 5 seconds.
-- The gateway reads windows through their control sockets: `status`,
+- The gateway reads windows through their control sockets: `status`
+  (with the window's resolved `theme`, as the welcome carries it),
   `blocks` (read-only; `"meta": true` leaves the output out, which the
   `done` probe uses), `screen` (`{"cmd":"screen","pane":12,"force":false}`:
   the pane's screen, or none when it is not on the alternate screen and

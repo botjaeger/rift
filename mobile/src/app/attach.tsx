@@ -2,17 +2,19 @@ import { useActionScope } from "@/ui/useActionScope";
 import * as Clipboard from "expo-clipboard";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useEffect, useRef, useState } from "react";
-import { AccessibilityInfo, Pressable, StyleSheet, Text, View } from "react-native";
+import { AccessibilityInfo, Text, View } from "react-native";
 import { clipboardFiles, hasSystemPasteButton, SystemPasteButton } from "../../modules/rift-keys";
 import { draftKey, hasFeature } from "@/fleet";
 import { attachedItem, nativeAttached, pending, PENDING_FULL, readClipboard, routeRefusal, type AttachRules, type Attached } from "@/pending";
 import { pickFile } from "@/pickFile";
 import { pickLibraryPhoto, takePhoto } from "@/pickPhoto";
 import { useApp, useLock } from "@/runtime";
-import { Group, SheetFrame } from "@/ui/NewSheet";
+import { findPane, tabTitle } from "@/topology";
+import { SheetFrame } from "@/ui/NewSheet";
 import { ErrorText } from "@/ui/Notice";
 import { Icon, type IconName } from "@/ui/Icon";
-import { colors, TOUCH, ui } from "@/ui/theme";
+import { CardBox, NavRow } from "@/ui/Rows";
+import { radius, TOUCH, ui, makeStyles, useColors } from "@/ui/theme";
 
 /**
  * The Attach sheet (the Attach board), opened by the message box's +: Paste from clipboard,
@@ -22,6 +24,8 @@ import { colors, TOUCH, ui } from "@/ui/theme";
  * as a Paste is: there is no program to take it.
  */
 export default function AttachSheet() {
+  const styles = useStyles();
+  const colors = useColors();
   const { key, pane: paneParam, program, running } = useLocalSearchParams<{ key: string; pane: string; program?: string; running?: string }>();
   const paneId = Number(paneParam);
   const router = useRouter();
@@ -35,6 +39,8 @@ export default function AttachSheet() {
   const [busy, setBusy] = useState(false);
   const box = draftKey(key, paneId);
   const inProgram = running === "1";
+  // the tab it goes to ("To project1 on studio-mac"), else the program in it
+  const loc = host ? findPane(host.windows, paneId) : null;
   const rules: AttachRules = { atPrompt: !inProgram, image: hasFeature(host, "upload"), file: hasFeature(host, "upload_files") };
 
   const close = () => {
@@ -96,15 +102,16 @@ export default function AttachSheet() {
   };
 
   const name = host?.record.name ?? "";
-  const online = host?.conn.status === "open";
   return (
-    <SheetFrame title="Attach" subtitle={`To ${inProgram && program ? program : "this pane"} · ${name || "computer not found"}`} online={!!online} onClose={close}>
-      <Group>
+    <SheetFrame title="Attach" subtitle={`To ${inProgram && program ? program : loc ? tabTitle(loc.tab) : "this pane"} on ${name || "a computer not found"}`} onClose={close}>
+      <CardBox>
         {hasSystemPasteButton ? (
           // iOS's own paste control IS this row: tapping it is the consent, so no "Allow Paste" prompt
           <View style={styles.pasteRow}>
             <SystemPasteButton
               labelled
+              ground={colors.bg}
+              ink={colors.accent}
               onText={(text) => deliver(nativeAttached({ text }, rules))}
               onImage={(image) => deliver(nativeAttached({ image }, rules))}
               onFile={(file) => deliver(nativeAttached({ file }, rules))}
@@ -137,41 +144,37 @@ export default function AttachSheet() {
             })
           }
         />
-      </Group>
+      </CardBox>
       {error ? <ErrorText>{error}</ErrorText> : null}
     </SheetFrame>
   );
 }
 
+/** One way in: the list row with the route's icon in its tile. */
 function Row({ icon, title, line, rule, disabled, onPress }: { icon: IconName; title: string; line: string; rule?: boolean; disabled: boolean; onPress: () => void }) {
+  const colors = useColors();
+  const styles = useStyles();
   return (
-    <Pressable
-      accessibilityRole="button"
+    <NavRow
+      first={!rule}
+      label={title}
+      detail={line}
       accessibilityLabel={`${title}. ${line}`}
-      accessibilityState={{ disabled }}
       disabled={disabled}
+      leading={
+        <View style={styles.tile}>
+          <Icon name={icon} size={16} color={colors.accent} />
+        </View>
+      }
       onPress={onPress}
-      style={({ pressed }) => [styles.row, rule && styles.rule, disabled && styles.disabled, pressed && styles.pressed]}
-    >
-      <Icon name={icon} size={20} color={colors.accent} />
-      <View style={styles.text}>
-        <Text style={styles.title}>{title}</Text>
-        <Text style={styles.line}>{line}</Text>
-      </View>
-    </Pressable>
+    />
   );
 }
 
-const styles = StyleSheet.create({
-  pressed: { opacity: 0.75 },
-  disabled: { opacity: 0.45 },
-  row: { flexDirection: "row", alignItems: "center", gap: 14, minHeight: 60, paddingVertical: 8, paddingHorizontal: 16 },
-  rule: { borderTopWidth: 1, borderTopColor: colors.hairline },
-  text: { flex: 1, minWidth: 0, gap: 2 },
-  title: { fontFamily: ui(600), color: colors.textBright, fontSize: 15 },
-  line: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12, lineHeight: 16 },
+const useStyles = makeStyles((colors) => ({
+  tile: { width: 28, height: 28, borderRadius: radius.small + 2, backgroundColor: colors.faint, alignItems: "center", justifyContent: "center" },
   // the system control draws its own icon and word; the line under it says what it takes
   pasteRow: { gap: 4, paddingTop: 8, paddingBottom: 10, paddingHorizontal: 8 },
   control: { height: TOUCH, alignSelf: "stretch" },
   pasteLine: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12, lineHeight: 16, textAlign: "center" },
-});
+}));

@@ -2,10 +2,10 @@ import { describe, expect, it } from "vitest";
 import type { HostView } from "../src/fleet";
 import {
   agoCompact,
-  EMPTY_WHAT,
-  filterHome,
+  EMPTY_FILTER,
   homeChoiceLabel,
-  homeCounts,
+  homeRows,
+  homeSummary,
   quickChoices,
   sameTabRow,
   sheetCounts,
@@ -99,13 +99,13 @@ describe("tabRow", () => {
 
   it("titles a row by its tab; its line is the lead pane's program and what it does; the short time goes beside the mark", () => {
     const [a, w, i, f] = rows(ctx({ waitingSince: () => NOW - 120_000 }), new Map([[tabKey("A", idleAgent), NOW - 12 * 60_000]]));
-    expect(a).toMatchObject({ title: "RIFT", state: "Needs you · 2m", line: "claude · waiting for you · Edit mobile/src/app/index.tsx?", when: "2m", agent: true, panes: 1 });
+    expect(a).toMatchObject({ title: "RIFT", state: "Needs you · 2m", line: "claude · Waiting for you · Edit mobile/src/app/index.tsx?", when: "2m", agent: true, panes: 1 });
     expect(a!.ask).toMatchObject({ pane: 1, program: "claude" });
     // an agent's session title is its line now, never the row's title
     expect(w).toMatchObject({ title: "q", state: "Working 3:56", line: "claude · running · pnpm test — 14 passed", when: "3:56" });
-    expect(i).toMatchObject({ title: "c", state: "Idle 12m", line: "claude · idle · Code changes overview", when: "12m" });
+    expect(i).toMatchObject({ title: "c", state: "Idle 12m", line: "claude · Idle · Code changes overview", when: "12m" });
     // several panes: their count leads the line; the tab's words count its failures
-    expect(f).toMatchObject({ title: "flow", state: "2 failed", line: "3 panes · psa · exited 1", when: "✕ 1", agent: false, panes: 3 });
+    expect(f).toMatchObject({ title: "flow", state: "2 failed", line: "3 panes · psa · failed with 1", when: "✕ 1", agent: false, panes: 3 });
   });
 
   it("tells a row built again with what it draws from one that changed", () => {
@@ -129,18 +129,20 @@ describe("tabRow", () => {
   it("puts the failed pane's time beside a failed tab's mark, whichever pane speaks for it", () => {
     const split = tab([pane(20, { last_command: "make", last_exit: 2 }), pane(21, { active: true, cwd: "/Users/me/code", last_command: "ls", last_exit: 0 })], "build");
     const r = tabRow(host([split]), split, ctx(), new Map());
-    expect(r).toMatchObject({ kind: "failed", when: "✕ 2" });
+    expect(r).toMatchObject({ kind: "failed", when: "✕ 2", line: "2 panes · make · failed with 2", paneLine: "make · failed with 2" });
   });
   it("words a shell's command, an idle shell and an unknown time", () => {
     const shell = tab([pane(9, { job: "cargo", last_command: "cargo test", running: { started: null, line: "" } })], "api");
     expect(tabRow(host([shell]), shell, ctx(), new Map())).toMatchObject({ line: "cargo test · running", when: "" });
     const idleShell = tab([pane(10, { cwd: "/Users/me/code", last_command: "ls", last_exit: 0 })], "work");
-    expect(tabRow(host([idleShell]), idleShell, ctx(), new Map())).toMatchObject({ kind: "idle", line: "~/code · idle · ls ✓", when: "" });
-    // a tab named after its folder: the line leaves the folder out
-    const home = tab([pane(12, { cwd: "/Users/me/code", last_command: "ls", last_exit: 0 })], "code");
-    expect(tabRow(host([home]), home, ctx(), new Map()).line).toBe("idle · ls ✓");
+    expect(tabRow(host([idleShell]), idleShell, ctx(), new Map())).toMatchObject({ kind: "idle", line: "Idle · last: ls", when: "" });
+    // nothing run yet: where it is, unless the tab is named after that folder
+    const there = tab([pane(13, { cwd: "/Users/me/code" })], "work");
+    expect(tabRow(host([there]), there, ctx(), new Map()).line).toBe("Idle · ~/code");
+    const home = tab([pane(12, { cwd: "/Users/me/code" })], "code");
+    expect(tabRow(host([home]), home, ctx(), new Map()).line).toBe("Idle");
     const fresh = tab([pane(11, {})], "new");
-    expect(tabRow(host([fresh]), fresh, ctx(), new Map()).line).toBe("idle");
+    expect(tabRow(host([fresh]), fresh, ctx(), new Map()).line).toBe("Idle");
   });
 
   it("takes the start of a working pane from a Notify me when the computer sends none", () => {
@@ -166,20 +168,20 @@ describe("tabRow", () => {
   });
 });
 
-describe("Computers chips", () => {
+describe("Portals summary and cards", () => {
   const all = [asking, working, idleAgent, failed, quiet].map((t) => ({ kind: tabKind(t), id: t.title }));
 
-  it("counts failed tabs with the idle ones", () => {
-    expect(homeCounts(all)).toEqual({ needs: 1, working: 1, idle: 3 });
+  it("counts the tabs by state in words, what needs you first, none at zero", () => {
+    expect(homeSummary(all).map((p) => p.text)).toEqual(["1 needs you", "1 working", "1 failed", "2 idle"]);
+    expect(homeSummary(all.filter((r) => r.kind === "idle")).map((p) => p.text)).toEqual(["2 idle"]);
+    expect(homeSummary([])).toEqual([]);
   });
 
-  it("shows only the rows in the chosen state, and all of them without one", () => {
-    expect(filterHome(all, "idle").map((r) => r.id)).toEqual(["c", "flow", "zsh"]);
-    expect(filterHome(all, "needs").map((r) => r.id)).toEqual(["RIFT"]);
-    expect(filterHome(all, null)).toHaveLength(5);
-    // no filter: what needs an answer on top, the rest in tab order
-    const order = filterHome([{ id: "a", kind: "idle" }, { id: "b", kind: "working" }, { id: "c", kind: "needs" }, { id: "d", kind: "idle" }] as const, null);
-    expect(order.map((r) => r.id)).toEqual(["c", "a", "b", "d"]);
+  it("shows the tabs that matter first, at most five, each state in tab order", () => {
+    const order = homeRows([{ id: "a", kind: "idle" }, { id: "b", kind: "working" }, { id: "c", kind: "needs" }, { id: "d", kind: "idle" }, { id: "e", kind: "failed" }] as const);
+    expect(order.map((r) => r.id)).toEqual(["c", "b", "e", "a", "d"]);
+    const thirty = Array.from({ length: 30 }, (_, i) => ({ id: `t${i}`, kind: i === 20 ? ("needs" as const) : ("idle" as const) }));
+    expect(homeRows(thirty).map((r) => r.id)).toEqual(["t20", "t0", "t1", "t2", "t3"]);
   });
 });
 
@@ -197,7 +199,7 @@ describe("Tabs sheet", () => {
 
   it("words the empty state", () => {
     expect(sheetRows(rows, "needs")).toHaveLength(1);
-    expect(`No tab is ${EMPTY_WHAT.needs}.`).toBe("No tab is waiting for you.");
+    expect(EMPTY_FILTER.needs).toEqual({ title: "Nothing needs you", line: "Agents that ask a question show here." });
     expect(sheetRows([], "failed")).toEqual([]);
   });
 });

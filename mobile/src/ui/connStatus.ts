@@ -30,9 +30,6 @@ export function retrySeconds(conn: Pick<ConnState, "retryAt" | "retryInMs">, now
   return Math.max(0, Math.ceil((conn.retryInMs ?? 0) / 1000));
 }
 
-/** "retrying in 8 s", "retrying now". */
-export const retryText = (secs: number) => (secs === 0 ? "retrying now" : `retrying in ${secs} s`);
-
 /** "retry 2 of 5 in 8 s", "retry 2 of 5 now": the reconnect round that is waiting, of [MAX_RETRIES]. */
 export function retryRound(conn: Pick<ConnState, "attempt" | "retryAt" | "retryInMs">, now: number): string {
   const secs = retrySeconds(conn, now);
@@ -70,8 +67,12 @@ export const UPDATE_HINT = "Nothing is wrong. Your tabs come back by themselves.
 /** The hint once Rift quit on the computer. */
 export const QUIT_HINT = "Open Rift on the computer, then tap Try again.";
 
-/** The status line under a computer's name: how it is connected, or what is being tried. */
-export function hostLine(conn: ConnState, now: number, tabs: number | null): HostLine {
+/**
+ * The status line under a computer's name: where it is ("This network · 30 tabs", "Over the
+ * relay"), or what is being tried. `seenAt`: epoch ms it was last connected (null: not known),
+ * for a computer that stopped answering ("Can't reach it · last seen 2 h ago").
+ */
+export function hostLine(conn: ConnState, now: number, tabs: number | null, seenAt: number | null = null): HostLine {
   const line = (text: string, tone: LineTone, more: Partial<HostLine> = {}): HostLine => ({
     text,
     tone,
@@ -90,8 +91,8 @@ export function hostLine(conn: ConnState, now: number, tabs: number | null): Hos
   }
   switch (conn.status) {
     case "open": {
-      const via = conn.path?.kind === "relay" ? "through the relay" : "this network";
-      return line(`Connected · ${via}${tabs === null ? "" : ` · ${tabsText(tabs)}`}`, "muted");
+      const via = conn.path?.kind === "relay" ? "Over the relay" : "This network";
+      return line(`${via}${tabs === null ? "" : ` · ${tabsText(tabs)}`}`, "muted");
     }
     case "connecting": {
       if (conn.path?.kind === "relay") {
@@ -110,7 +111,7 @@ export function hostLine(conn: ConnState, now: number, tabs: number | null): Hos
       });
     case "failed":
       if (conn.failure === "gave_up") {
-        return line(`Can’t reach it · ${stoppedText(conn)}`, "bad", {
+        return line(`Can’t reach it · ${seenAt === null ? stoppedText(conn) : `last seen ${agoText(now - seenAt)}`}`, "bad", {
           retry: true,
           hint: "Check that your computer is on and Rift is running there. Rift tries again every 30 seconds while the app is open, when you tap Try again, when this phone is back online, and when you open the app.",
         });
@@ -145,16 +146,19 @@ const seconds = (ms: number | null) => (ms === null ? "" : ` (${Math.max(1, Math
 /** The relay says a phone's gateway is not there with a 404 ("gateway offline") or by closing the pair. */
 const NOT_REGISTERED = /\b404\b|gateway offline|did not answer/i;
 
+/** A raw error as a note's sentence: its first letter capitalised ("the computer's key …" → "The …"). */
+const sentence = (t: string): string => (t ? t.charAt(0).toUpperCase() + t.slice(1) : t);
+
 /** Why a path failed, in the board's words where the cause is known, else the error itself. */
 export function failNote(p: PathStatus): string {
   const error = p.error ?? "";
   if (p.path.kind === "relay") {
     if (NOT_REGISTERED.test(error)) return "The relay answered, but your computer is not registered there";
     if (error === NO_ANSWER) return p.reached ? "The relay answered, but your computer is not registered there" : `No answer from the relay${seconds(p.waitedMs)}`;
-    return error || "No answer from the relay";
+    return sentence(error) || "No answer from the relay";
   }
   if (error === NO_ANSWER) return `No answer on this network${seconds(p.waitedMs)}`;
-  return error || "No answer on this network";
+  return sentence(error) || "No answer on this network";
 }
 
 function row(p: PathStatus, tone: PathTone, note: string): PathRow {
@@ -189,14 +193,19 @@ export function pathRows(conn: ConnState): PathRow[] {
   });
 }
 
-/** Whether the sheet offers "Try again now" (the same cases as the card's Try again). */
-export const canRetry = (conn: ConnState, now: number): boolean => hostLine(conn, now, null).retry;
 
-/** "0:03", "1:05", "12:00" (an elapsed wait). */
-export function elapsedText(ms: number): string {
-  const s = Math.max(0, Math.floor(ms / 1000));
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+/** "paired 3 Nov" (this year) or "paired 3 Nov 2025": what tells two pairings of one computer apart. */
+export function pairedText(pairedAt: string, now: number): string {
+  const d = new Date(pairedAt);
+  if (Number.isNaN(d.getTime())) return "";
+  const month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getMonth()]!;
+  const year = d.getFullYear() === new Date(now).getFullYear() ? "" : ` ${d.getFullYear()}`;
+  return `paired ${d.getDate()} ${month}${year}`;
 }
+
+/** When a computer was last connected: this run's moment, else the one stored at its last `welcome`. */
+export const lastSeenAt = (host: { lastSeen: number | null; record: { seenAt?: number } }): number | null =>
+  host.lastSeen ?? host.record.seenAt ?? null;
 
 /** "a moment ago", "2 min ago", "3 h ago", "2 d ago". */
 export function agoText(ms: number): string {

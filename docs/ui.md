@@ -1665,6 +1665,12 @@ description) left, control right; it runs to the bottom edge.
     · <host> · pair phones again after a restart` or `Failed, retrying:
     <reason>`).
   - The page refreshes its data at most once a second.
+  - Phones draw with this computer's theme (Settings → Themes, light or dark
+    as the system is) unless the phone chooses its own in the app's
+    *Settings › This phone › Appearance*: *Same as the computer* (default),
+    *Match this phone* (Light or Dark Default) or *Choose a theme* (a radio
+    list of the builtin themes, each with a swatch of its ground and accent,
+    the chosen one ticked). The phone's choice never changes the computer.
 - **Permissions** (macOS only; lock icon, between Remote access and About) —
   *macOS privacy switches Rift can use. Status refreshes when you return from
   System Settings.* A checklist, each row with a status pill (`Granted` green,

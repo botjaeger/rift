@@ -1,7 +1,8 @@
-import { StyleSheet, Text, View } from "react-native";
+import { Text, View } from "react-native";
 import type { Avatar as AvatarModel } from "@/avatar";
-import { programMark } from "@/paneView";
-import { colors, monoBold, monoMedium, tint, tints, ui } from "./theme";
+import { CLAUDE_COLOR, programMark } from "@/paneView";
+import { avatarInk } from "./palette";
+import { monoBold, monoMedium, tint, ui, makeStyles, useColors } from "./theme";
 
 /**
  * A pane's round mark (the Computers and Host boards): the prompt mark `>_`, or Claude Code's
@@ -17,10 +18,12 @@ export function Avatar({
   size?: number;
   muted?: boolean;
 }) {
-  const color = muted ? colors.textMuted : avatar.color;
+  const colors = useColors();
+  const styles = useStyles();
+  const color = muted ? colors.textMuted : avatarInk(avatar.color, colors);
   return (
     <View style={styles.wrap} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
-      <View style={[styles.avatar, { width: size, height: size, borderRadius: size / 2, backgroundColor: muted ? "#ffffff0f" : tint(avatar.color, 0x2e) }]}>
+      <View style={[styles.avatar, { width: size, height: size, borderRadius: size / 2, backgroundColor: muted ? colors.faint : tint(avatar.color, 0x2e) }]}>
         <Text
           style={[avatar.glyph ? styles.glyph : styles.prompt, { color, fontSize: size * (avatar.glyph ? 0.42 : 0.36) }]}
           allowFontScaling={false}
@@ -32,18 +35,16 @@ export function Avatar({
   );
 }
 
-/** The coding agents' brand colour (the Computers mockup's ✳ tile). */
-export const AGENT_COLOR = "#d97757";
-
-const styles = StyleSheet.create({
+const useStyles = makeStyles((colors) => ({
   wrap: { flexShrink: 0 },
   avatar: { alignItems: "center", justifyContent: "center" },
   glyph: { fontFamily: ui(600) },
   prompt: { fontFamily: monoBold, letterSpacing: -0.5 },
   tile: { alignItems: "center", justifyContent: "center", flexShrink: 0 },
-  tileGlyph: { fontFamily: ui(500), fontSize: 20, color: AGENT_COLOR },
+  // the agent colour, held to 3:1 on its tint over a light page too
+  tileGlyph: { fontFamily: ui(500), fontSize: 20, color: avatarInk(CLAUDE_COLOR, colors) },
   tilePrompt: { fontFamily: monoMedium, fontSize: 14, color: colors.accent },
-});
+}));
 
 
 /**
@@ -52,6 +53,8 @@ const styles = StyleSheet.create({
  * row around it is labelled.
  */
 export function Tile({ agent, program = null, size = 40, radius = 12, promptSize = 14 }: { agent: boolean; program?: string | null; size?: number; radius?: number; promptSize?: number }) {
+  const colors = useColors();
+  const styles = useStyles();
   // an agent the app has no mark for (a session title says it is one) keeps the ✳
   const mark = programMark(program);
   const claude = agent && (mark.claude || mark.mark === ">_");
@@ -59,7 +62,7 @@ export function Tile({ agent, program = null, size = 40, radius = 12, promptSize
     <View
       style={[
         styles.tile,
-        { width: size, height: size, borderRadius: radius, backgroundColor: claude ? `${AGENT_COLOR}1f` : tints.accentBadge },
+        { width: size, height: size, borderRadius: radius, backgroundColor: claude ? `${CLAUDE_COLOR}1f` : colors.tints.accentBadge },
       ]}
       accessibilityElementsHidden
       importantForAccessibility="no-hide-descendants"

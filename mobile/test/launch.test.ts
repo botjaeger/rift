@@ -17,9 +17,9 @@ describe("the New tab and New pane rows", () => {
     ]);
   });
   it("words each row as the boards do", () => {
-    expect(programLine(shell, "tab")).toBe("A plain shell in the new tab");
-    expect(programLine(shell, "pane")).toBe("A plain shell in the new pane");
-    expect(programLine(PROGRAMS[2]!, "pane")).toBe("Opens a shell, then types codex");
+    expect(programLine(shell, "tab")).toBe("A plain shell");
+    expect(programLine(shell, "pane")).toBe("A plain shell");
+    expect(programLine(PROGRAMS[2]!, "pane")).toBe("Opens a shell, then runs codex");
   });
 });
 

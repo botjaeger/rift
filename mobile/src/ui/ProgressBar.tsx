@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { AccessibilityInfo, Animated, Easing, StyleSheet, View, type LayoutChangeEvent } from "react-native";
-import { colors } from "./theme";
+import { AccessibilityInfo, Animated, Easing, View, type LayoutChangeEvent } from "react-native";
+import { makeStyles } from "./theme";
 
 /**
  * The thin bar under a computer's status line while a path is tried (RelayPhone board): a 45 %
@@ -8,6 +8,7 @@ import { colors } from "./theme";
  * status line says the same in words.
  */
 export function ProgressBar() {
+  const styles = useStyles();
   const [width, setWidth] = useState(0);
   const [still, setStill] = useState(false);
   const [x] = useState(() => new Animated.Value(0));
@@ -41,7 +42,7 @@ export function ProgressBar() {
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = makeStyles((colors) => ({
   track: { height: 3, borderRadius: 2, backgroundColor: colors.glass, overflow: "hidden" },
   bar: { height: 3, backgroundColor: colors.accent },
-});
+}));

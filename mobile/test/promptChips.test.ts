@@ -23,7 +23,6 @@ import {
   type ChipFeatures,
 } from "../src/promptChips";
 import { decodeServer, type ComposeContainer, type Pane, type PaneChip, type RuntimeVersion, type TopologyMsg } from "../src/protocol/types";
-import { colors } from "../src/ui/palette";
 
 const ON: ChipFeatures = { git: true, menus: true, promptChips: true };
 
@@ -74,16 +73,16 @@ describe("the desktop's chips on the phone", () => {
 
   it("styles each part by its tone in the app's palette (the desktop's dim / muted are this palette's textMuted / textDim)", () => {
     const [, branch, docker] = chipItems(pane(chips), null, ON);
-    expect(branch!.iconColor).toBe(colors.success);
-    expect(branch!.short.map((p) => p.color)).toEqual([colors.text, colors.textDim]);
-    expect(docker!.iconColor).toBe(colors.accent);
-    expect(docker!.short[0]!.color).toBe(colors.success);
-    expect(toneColor("dim")).toBe(colors.textMuted);
-    expect(toneColor("muted")).toBe(colors.textDim);
-    expect(toneColor("magenta")).toBe(colors.magenta);
-    expect(toneColor("indigo")).toBe(colors.indigo);
+    expect(branch!.iconColor).toBe("success");
+    expect(branch!.short.map((p) => p.color)).toEqual(["text", "textDim"]);
+    expect(docker!.iconColor).toBe("accent");
+    expect(docker!.short[0]!.color).toBe("success");
+    expect(toneColor("dim")).toBe("textMuted");
+    expect(toneColor("muted")).toBe("textDim");
+    expect(toneColor("magenta")).toBe("magenta");
+    expect(toneColor("indigo")).toBe("indigo");
     // a tone from a newer desktop reads as ordinary text
-    expect(toneColor("chartreuse")).toBe(colors.text);
+    expect(toneColor("chartreuse")).toBe("text");
   });
 
   it("opens a menu for the chips that have one, and only shows the rest", () => {
@@ -106,7 +105,7 @@ describe("the desktop's chips on the phone", () => {
       ON,
     )[0]!;
     expect(diff.spoken).toBe("Changes: 102 files changed, 2086 lines added, 970 removed. Opens the changes");
-    expect(spokenValue("git_diff", [{ text: "1", color: "" }, { text: "•", color: "" }, { text: "+3", color: "" }, { text: "−0", color: "" }])).toBe(
+    expect(spokenValue("git_diff", [{ text: "1", color: "text" }, { text: "•", color: "text" }, { text: "+3", color: "text" }, { text: "−0", color: "text" }])).toBe(
       "1 file changed, 3 lines added, 0 removed",
     );
   });
@@ -136,8 +135,8 @@ describe("a desktop without prompt_chips", () => {
     expect(items.map((c) => c.short.map((p) => p.text).join(" "))).toEqual(["flow", "release/3.16.0 •", "102 +2.1k −970"]);
     expect(items[0]!.full[0]!.text).toBe("~/xxx/flow");
     expect(items[1]!.full.map((p) => p.text)).toEqual(["release/3.16.0", "↑2 •"]);
-    expect(items[2]!.short[1]!.color).toBe(colors.success);
-    expect(items[2]!.short[2]!.color).toBe(colors.error);
+    expect(items[2]!.short[1]!.color).toBe("success");
+    expect(items[2]!.short[2]!.color).toBe("error");
     expect(items.map((c) => c.opens)).toEqual(["dirs", "branches", "changes"]);
   });
 
@@ -309,8 +308,8 @@ describe("the menus of the new chips", () => {
       c({ service: "worker", state: "exited", running: false, ports: [], uptime: "Exited (1) 3 minutes ago", health: "unhealthy", logs: "docker compose --project-directory /w/flow logs --follow --tail 200 worker" }),
       c({ service: "x", logs: "echo hi" }),
     ]);
-    expect(rows[0]).toMatchObject({ service: "api", running: true, detail: "8080→8080, 5353→53/udp · 2 hours", health: { word: "healthy", color: colors.success } });
-    expect(rows[1]).toMatchObject({ running: false, detail: "Exited (1) 3 minutes ago", health: { word: "unhealthy", color: colors.error } });
+    expect(rows[0]).toMatchObject({ service: "api", running: true, detail: "8080→8080, 5353→53/udp · 2 hours", health: { word: "healthy", color: "success" } });
+    expect(rows[1]).toMatchObject({ running: false, detail: "Exited (1) 3 minutes ago", health: { word: "unhealthy", color: "error" } });
     expect(rows[2]!.command).toBeNull();
     expect(rows[0]!.command).toContain("logs --follow --tail 200 api");
   });

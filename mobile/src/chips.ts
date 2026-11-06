@@ -227,3 +227,16 @@ export function completionRows(
   for (const r of recent) if (r.startsWith(draft)) add(r, "history");
   return out;
 }
+
+/**
+ * The phone keyboard's Return at a prompt (the field puts a new line in, `typed`): the first
+ * completion (`first`, marked) takes the draft's place, since a command is one line. Null when the
+ * change is not one new line put into `draft`, or there is no completion: the field takes it as it is.
+ */
+export function returnTakes(draft: string, typed: string, first: string | undefined): string | null {
+  if (first === undefined || typed.length !== draft.length + 1) return null;
+  for (let i = typed.indexOf("\n"); i >= 0; i = typed.indexOf("\n", i + 1)) {
+    if (typed.slice(0, i) + typed.slice(i + 1) === draft) return first;
+  }
+  return null;
+}

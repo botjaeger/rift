@@ -1,6 +1,6 @@
 import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { useCallback, useState } from "react";
-import { ScrollView, StyleSheet, Text, View } from "react-native";
+import { ScrollView, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { ntfyUnsupported } from "@/fleet";
 import { fleet, useApp } from "@/runtime";
@@ -10,11 +10,13 @@ import { HostTree } from "@/ui/HostTree";
 import { StartTab, canStartTab } from "@/ui/StartTab";
 import { ErrorText } from "@/ui/Notice";
 import { IconButton, PageHeader } from "@/ui/Screen";
-import { colors, ui } from "@/ui/theme";
+import { ui, makeStyles, useColors } from "@/ui/theme";
 import { useHostNotifications } from "@/ui/useHostNotifications";
 
 /** A computer's tabs (the Host board): each tab a card of its panes. */
 export default function HostScreen() {
+  const colors = useColors();
+  const styles = useStyles();
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { key } = useLocalSearchParams<{ key: string }>();
@@ -58,7 +60,7 @@ export default function HostScreen() {
       <PageHeader
         title={name}
         subtitle={conn.label}
-        dot={conn.color}
+        dot={colors[conn.color]}
         back={back}
         backLabel="Back"
         right={
@@ -109,10 +111,10 @@ export default function HostScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = makeStyles((colors) => ({
   fill: { flex: 1, backgroundColor: colors.chrome },
   content: { maxWidth: 720, width: "100%", alignSelf: "center" },
   status: { gap: 10, paddingHorizontal: 20, paddingTop: 10 },
   note: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13, lineHeight: 18 },
   empty: { fontFamily: ui(400), color: colors.textMuted, fontSize: 14, padding: 20 },
-});
+}));

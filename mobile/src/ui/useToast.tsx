@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AccessibilityInfo, StyleSheet, Text } from "react-native";
-import { colors, ui } from "./theme";
+import { AccessibilityInfo, Text } from "react-native";
+import { ui, makeStyles } from "./theme";
 
 /** A line that goes after a moment and is announced, as the pane screen's toast (for the sheets). */
 export function useToast(): { say: (text: string) => void; toast: React.ReactNode } {
+  const styles = useStyles();
   const [text, setText] = useState("");
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(timer.current), []);
@@ -23,7 +24,7 @@ export function useToast(): { say: (text: string) => void; toast: React.ReactNod
   };
 }
 
-const styles = StyleSheet.create({
+const useStyles = makeStyles((colors) => ({
   toast: {
     alignSelf: "center",
     fontFamily: ui(500),
@@ -35,4 +36,4 @@ const styles = StyleSheet.create({
     overflow: "hidden",
     backgroundColor: colors.textBright,
   },
-});
+}));

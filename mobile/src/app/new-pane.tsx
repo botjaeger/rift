@@ -6,7 +6,7 @@ import { findPane, tabTitle } from "@/topology";
 import { Button } from "@/ui/Button";
 import { ErrorText } from "@/ui/Notice";
 import { canNewPane } from "@/ui/newTab";
-import { ConfirmProgram, Footnote, ProgramRows, SectionLabel, SheetFrame, SheetNote } from "@/ui/NewSheet";
+import { ConfirmProgram, Footnote, ProgramRows, SheetFrame, SheetNote } from "@/ui/NewSheet";
 import { useLaunch } from "@/ui/useLaunch";
 
 /**
@@ -39,7 +39,7 @@ export default function NewPaneSheet() {
   else
     body = (
       <>
-        <SectionLabel>Start with</SectionLabel>
+        {/* the same rows as New tab; where it starts is in the subtitle */}
         <ProgramRows kind="pane" disabled={launch.busy} onPick={launch.pick} />
         {launch.busy ? <Footnote>Opening…</Footnote> : null}
         <Footnote>{`The new pane starts in ${cwd ?? "the same folder"}, and this phone goes to it.`}</Footnote>
@@ -47,7 +47,11 @@ export default function NewPaneSheet() {
     );
 
   return (
-    <SheetFrame title="New pane" subtitle={loc ? `${tabTitle(loc.tab)} · ${name}` : name || "Computer not found"} online={!!online} onClose={launch.close}>
+    <SheetFrame
+      title="New pane"
+      subtitle={loc ? `Beside ${tabTitle(loc.tab)} · ${cwd ?? name}${online ? "" : " · offline"}` : name || "Computer not found"}
+      onClose={launch.close}
+    >
       {body}
       {launch.error ? <ErrorText>{launch.error}</ErrorText> : null}
       {launch.opened !== null ? <Button label="Go to the new pane" onPress={() => launch.finish(launch.opened ?? undefined)} /> : null}

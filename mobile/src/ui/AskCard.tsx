@@ -1,6 +1,6 @@
 import { useActionScope } from "@/ui/useActionScope";
 import { useRef, useState } from "react";
-import { AccessibilityInfo, Keyboard, Pressable, ScrollView, StyleSheet, Text, TextInput, View, useWindowDimensions } from "react-native";
+import { AccessibilityInfo, Keyboard, Pressable, ScrollView, Text, TextInput, View, useWindowDimensions } from "react-native";
 import { primaryChoice, questionKey, replyChoice, type Pick } from "@/answer";
 import { needsAuthBeforeRun } from "@/lock";
 import {
@@ -16,10 +16,12 @@ import {
 } from "@/paneView";
 import type { Waiting } from "@/protocol/types";
 import { authenticate, fleet, useApp } from "@/runtime";
+import { Button } from "./Button";
 import { Icon } from "./Icon";
 import { ErrorText } from "./Notice";
 import { PromptText } from "./PromptText";
-import { colors, mono, tints, ui } from "./theme";
+import { SheetHeader } from "./SheetHeader";
+import { mono, radius, ui, makeStyles, useColors } from "./theme";
 import { useNow } from "./useNow";
 
 /** When each question was first seen here (the pane gives no time): its "2 min ago". */
@@ -34,6 +36,8 @@ const KEYS = [
 ] as const;
 
 function DiffLine({ row }: { row: DiffRow }) {
+  const colors = useColors();
+  const styles = useStyles();
   const tinted = row.kind !== "kept";
   return (
     <View style={[styles.diffRow, row.kind === "added" && styles.diffAdded, row.kind === "removed" && styles.diffRemoved]}>
@@ -51,15 +55,17 @@ function DiffLine({ row }: { row: DiffRow }) {
 /**
  * A coding agent's question docked at the bottom of its pane (the PaneAsking board): who asks and
  * since when, the question, the file and its diff (Full diff / Less), the first entry as the
- * primary answer and the next ones outlined, "No…" opening a field for what to do instead, and
- * the keys an agent's menus use. Minimized, it is a 52 pt bar. Answers go as the answer page's
- * do (answer.ts `answerPlan` through `fleet.answer`, after the authentication Settings asks for).
+ * primary answer and the next ones outlined, each saying what happens; "No, explain" opens Tell it
+ * why (the reply field, under a sheet's header), and the keys an agent's menus use. Minimized, it
+ * is a 52 pt bar in the same place, under the screen, never over it. Answers go as the answer
+ * page's do (answer.ts `answerPlan` through `fleet.answer`, after the authentication Settings asks for).
  */
 export function AskCard({
   hostKey,
   paneId,
   waiting: w,
   program,
+  where: tabName,
   bottomInset,
   onSay,
 }: {
@@ -67,11 +73,15 @@ export function AskCard({
   paneId: number;
   waiting: Waiting;
   program: string | null;
+  /** The tab it asks in ("project4"), beside who asks. */
+  where?: string;
   /** The home indicator's room under the card. */
   bottomInset: number;
   /** A toast ("Sent: Yes"). */
   onSay: (text: string) => void;
 }) {
+  const colors = useColors();
+  const styles = useStyles();
   const s = useApp();
   const scope = useActionScope(`${hostKey}:${paneId}:${questionKey(w)}`);
   const { height } = useWindowDimensions();
@@ -143,7 +153,7 @@ export function AskCard({
     return (
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel={`${who} asks: ${w.prompt}. Answer`}
+        accessibilityLabel={`${who} asks: ${w.prompt}${/[.?!:]$/.test(w.prompt.trim()) ? "" : "."} Answer`}
         accessibilityHint="Opens the question"
         onPress={() => setMin(false)}
         style={({ pressed }) => [styles.bar, { marginBottom: 8 + bottomInset }, pressed && styles.pressed]}
@@ -156,23 +166,52 @@ export function AskCard({
       </Pressable>
     );
 
+  // No, explain: Tell it why, the reply as a sheet of its own in the card's place; ✕ goes back to the answers
+  if (replying && replyAt !== null)
+    return (
+      <View style={[styles.card, { paddingBottom: 8 + bottomInset }]}>
+        <View style={styles.replyHead}>
+          <SheetHeader
+            title="Tell it why"
+            docked
+            subtitle={[who, tabName].filter(Boolean).join(" · ")}
+            onClose={() => {
+              setReplying(false);
+              setReply("");
+            }}
+          />
+        </View>
+        <View style={styles.replyField}>
+          <TextInput
+            keyboardAppearance={colors.dark ? "dark" : "light"}
+            value={reply}
+            onChangeText={setReply}
+            autoFocus
+            placeholder="What should it do instead?"
+            placeholderTextColor={colors.textMuted}
+            accessibilityLabel={`Tell ${who} what to do instead`}
+            returnKeyType="send"
+            onSubmitEditing={() => void send({ choice: replyAt, reply }, "Sent: No")}
+            style={styles.replyInput}
+          />
+          <Button
+            label="Send"
+            variant="primary"
+            size="small"
+            accessibilityLabel={`Send ${w.choices[replyAt]}`}
+            disabled={busy}
+            onPress={() => void send({ choice: replyAt, reply }, "Sent: No")}
+          />
+        </View>
+        {error ? <ErrorText>{error}</ErrorText> : null}
+      </View>
+    );
+
   return (
     <View style={[styles.card, { paddingBottom: 8 + bottomInset }]} accessibilityLabel={`${who} asks: ${w.prompt}`}>
-      <View style={styles.top}>
-        <View style={styles.who}>
-          <View style={styles.dot} />
-          <Text style={styles.whoText}>{who} asks</Text>
-        </View>
-        <Text style={styles.since}>{since}</Text>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Minimize"
-          onPress={() => setMin(true)}
-          hitSlop={4}
-          style={({ pressed }) => [styles.minimize, pressed && styles.pressed]}
-        >
-          <Icon name="chevronDown" size={16} color={colors.text} />
-        </Pressable>
+      {/* the standard sheet header (the Agent question board): who asks, where and since when; ✕ folds it */}
+      <View style={styles.replyHead}>
+        <SheetHeader title={`${who} asks`} subtitle={[tabName, since].filter(Boolean).join(" · ")} docked closeLabel="Fold the question" onClose={() => setMin(true)} />
       </View>
       <ScrollView style={{ maxHeight: height * (others.length > MANY_ANSWERS ? 0.3 : 0.55) }} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled" bounces={false}>
         <PromptText text={w.prompt} style={styles.title} monoSize={14} />
@@ -189,15 +228,12 @@ export function AskCard({
                   </>
                 ) : null}
                 {hasMoreRows(ctx) ? (
-                  <Pressable
-                    accessibilityRole="button"
+                  <Button
+                    label={full ? "Less" : "Full diff"}
                     accessibilityLabel={full ? "Less of the diff" : "Full diff"}
+                    size="small"
                     onPress={() => setFull((f) => !f)}
-                    hitSlop={{ top: 8, bottom: 8 }}
-                    style={({ pressed }) => [styles.diffToggle, pressed && styles.pressed]}
-                  >
-                    <Text style={styles.diffToggleText}>{full ? "Less" : "Full diff"}</Text>
-                  </Pressable>
+                  />
                 ) : null}
               </View>
             ) : null}
@@ -228,78 +264,30 @@ export function AskCard({
           </Text>
         ) : null;
       })}
-      {replying && replyAt !== null ? (
-        <View style={styles.answers}>
-          <View style={styles.replyField}>
-            <TextInput
-              value={reply}
-              onChangeText={setReply}
-              autoFocus
-              placeholder={`Tell ${who} what to do instead`}
-              placeholderTextColor={colors.textMuted}
-              accessibilityLabel={`Tell ${who} what to do instead`}
-              returnKeyType="send"
-              onSubmitEditing={() => void send({ choice: replyAt, reply }, "Sent: No")}
-              style={styles.replyInput}
-            />
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={`Send ${w.choices[replyAt]}`}
-              accessibilityState={{ disabled: busy }}
+      {/* a long menu scrolls here, so its last entries and the Keys (Esc leaves it) stay on the screen */}
+      <ScrollView style={{ maxHeight: height * 0.34 }} contentContainerStyle={styles.answers} keyboardShouldPersistTaps="handled" nestedScrollEnabled>
+        <Button
+          label={answerLabel(w, primary)}
+          accessibilityLabel={w.choices[primary]}
+          variant="primary"
+          numberOfLines={1}
+          disabled={busy}
+          onPress={() => void send({ choice: primary }, `Sent: ${answerLabel(w, primary)}`)}
+        />
+        <View style={styles.others}>
+          {others.map((i) => (
+            <Button
+              key={i}
+              label={answerLabel(w, i)}
+              accessibilityLabel={w.choices[i]}
+              numberOfLines={1}
               disabled={busy}
-              onPress={() => void send({ choice: replyAt, reply }, "Sent: No")}
-              hitSlop={4}
-              style={({ pressed }) => [styles.replySend, busy && styles.disabled, pressed && styles.pressed]}
-            >
-              <Icon name="run" size={18} color={colors.bg} />
-            </Pressable>
-          </View>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Back to the answers"
-            onPress={() => {
-              setReplying(false);
-              setReply("");
-            }}
-            style={({ pressed }) => [styles.back, pressed && styles.pressed]}
-          >
-            <Text style={styles.backText}>Back to the answers</Text>
-          </Pressable>
+              onPress={() => (i === replyAt ? setReplying(true) : void send({ choice: i }, `Sent: ${answerLabel(w, i)}`))}
+              style={styles.outline}
+            />
+          ))}
         </View>
-      ) : (
-        // a long menu scrolls here, so its last entries and the Keys (Esc leaves it) stay on the screen
-        <ScrollView style={{ maxHeight: height * 0.34 }} contentContainerStyle={styles.answers} keyboardShouldPersistTaps="handled" nestedScrollEnabled>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={w.choices[primary]}
-            accessibilityState={{ disabled: busy }}
-            disabled={busy}
-            onPress={() => void send({ choice: primary }, `Sent: ${answerLabel(w, primary)}`)}
-            style={({ pressed }) => [styles.primary, busy && styles.disabled, pressed && styles.pressed]}
-          >
-            <Text style={styles.primaryText} numberOfLines={1}>
-              {answerLabel(w, primary)}
-            </Text>
-          </Pressable>
-          <View style={styles.others}>
-            {others.map((i) => (
-              <Pressable
-                key={i}
-                accessibilityRole="button"
-                accessibilityLabel={w.choices[i]}
-                accessibilityState={{ disabled: busy }}
-                disabled={busy}
-                onPress={() => (i === replyAt ? setReplying(true) : void send({ choice: i }, `Sent: ${answerLabel(w, i)}`))}
-                style={({ pressed }) => [styles.outline, busy && styles.disabled, pressed && styles.pressed]}
-              >
-                <Text style={styles.outlineText} numberOfLines={1}>
-                  {answerLabel(w, i)}
-                </Text>
-              </Pressable>
-            ))}
-          </View>
-        </ScrollView>
-      )}
+      </ScrollView>
       <View style={styles.keys} accessibilityRole="toolbar" accessibilityLabel="Keys">
         <Text style={styles.keysCaption}>Keys</Text>
         {KEYS.map((k) => (
@@ -322,9 +310,8 @@ export function AskCard({
 /** Past this many answers under the primary one, the question gives up room to them. */
 const MANY_ANSWERS = 4;
 
-const styles = StyleSheet.create({
+const useStyles = makeStyles((colors) => ({
   pressed: { opacity: 0.7 },
-  disabled: { opacity: 0.45 },
   // the minimized bar: 52 pt, a pill on a warm dark ground with the caution colour's border
   bar: {
     height: 52,
@@ -336,7 +323,7 @@ const styles = StyleSheet.create({
     borderRadius: 26,
     borderWidth: 1,
     borderColor: `${colors.warning}55`,
-    backgroundColor: "#201808",
+    backgroundColor: colors.askGround,
   },
   barText: { flex: 1, minWidth: 0, fontFamily: ui(400), color: colors.textBright, fontSize: 14 },
   barAnswer: { fontFamily: ui(600), color: colors.warning, fontSize: 14 },
@@ -351,51 +338,32 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     gap: 12,
   },
-  top: { flexDirection: "row", alignItems: "center", gap: 8 },
-  who: { height: 26, flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 10, borderRadius: 13, backgroundColor: tints.warningBadge },
-  whoText: { fontFamily: ui(600), color: colors.warning, fontSize: 13 },
-  since: { flex: 1, fontFamily: ui(400), color: colors.textMuted, fontSize: 13 },
-  minimize: { width: 36, height: 36, borderRadius: 18, backgroundColor: colors.glass, alignItems: "center", justifyContent: "center" },
   content: { gap: 6 },
   title: { fontFamily: ui(600), color: colors.textBright, fontSize: 17, lineHeight: 24 },
-  context: { borderRadius: 12, backgroundColor: colors.chrome, overflow: "hidden" },
+  context: { borderRadius: radius.field, backgroundColor: colors.chrome, overflow: "hidden" },
   fileRow: { flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 8, paddingLeft: 12, paddingRight: 6 },
   fileRule: { borderBottomWidth: 1, borderBottomColor: colors.hairline },
   runs: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12, lineHeight: 17 },
   runsCommand: { fontFamily: mono, color: colors.textBright, fontSize: 12 },
   file: { flex: 1, minWidth: 0, fontFamily: mono, color: colors.textBright, fontSize: 13 },
   count: { fontFamily: mono, fontSize: 12 },
-  diffToggle: { height: 28, paddingHorizontal: 10, borderRadius: 14, borderWidth: 1, borderColor: colors.borderStrong, justifyContent: "center" },
-  diffToggleText: { fontFamily: ui(500), color: colors.text, fontSize: 12 },
   diffBody: { maxHeight: 220, paddingVertical: 6 },
   diffRow: { flexDirection: "row", gap: 10, paddingHorizontal: 12 },
-  diffAdded: { backgroundColor: tints.answerAdded },
-  diffRemoved: { backgroundColor: tints.answerRemoved },
+  diffAdded: { backgroundColor: colors.tints.answerAdded },
+  diffRemoved: { backgroundColor: colors.tints.answerRemoved },
   diffNum: { width: 22, textAlign: "right", fontFamily: mono, fontSize: 12, lineHeight: 19 },
   diffSign: { fontFamily: mono, fontSize: 12, lineHeight: 19 },
   diffText: { flex: 1, minWidth: 0, fontFamily: mono, color: colors.textBright, fontSize: 12, lineHeight: 19 },
   metaBody: { paddingVertical: 6, paddingHorizontal: 12, gap: 2 },
   meta: { fontFamily: mono, color: colors.textMuted, fontSize: 12, lineHeight: 19 },
   answers: { gap: 8 },
-  primary: { height: 50, borderRadius: 25, backgroundColor: colors.accent, alignItems: "center", justifyContent: "center", paddingHorizontal: 16 },
-  primaryText: { fontFamily: ui(600), color: colors.bg, fontSize: 16 },
   others: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  outline: {
-    flexGrow: 1,
-    flexBasis: "45%",
-    height: 46,
-    borderRadius: 23,
-    borderWidth: 1,
-    borderColor: colors.borderStrong,
-    alignItems: "center",
-    justifyContent: "center",
-    paddingHorizontal: 12,
-  },
-  outlineText: { fontFamily: ui(500), color: colors.text, fontSize: 14 },
+  outline: { flexGrow: 1, flexBasis: "45%", paddingHorizontal: 12 },
   replyField: {
     height: 50,
     flexDirection: "row",
     alignItems: "center",
+    gap: 8,
     paddingLeft: 16,
     paddingRight: 5,
     borderRadius: 25,
@@ -404,9 +372,8 @@ const styles = StyleSheet.create({
     backgroundColor: colors.bg,
   },
   replyInput: { flex: 1, minWidth: 0, padding: 0, fontFamily: ui(400), color: colors.textBright, fontSize: 15 },
-  replySend: { width: 40, height: 40, borderRadius: 20, backgroundColor: colors.accent, alignItems: "center", justifyContent: "center" },
-  back: { height: 36, alignItems: "center", justifyContent: "center" },
-  backText: { fontFamily: ui(400), color: colors.textMuted, fontSize: 14 },
+  // the sheet header's own gutters, inside the card's
+  replyHead: { marginHorizontal: -16, marginTop: -12 },
   keys: { flexDirection: "row", alignItems: "center", gap: 6 },
   // textMuted: the mockup's textDim is 4.49:1 on a surface (palette.ts)
   keysCaption: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12, marginRight: 2 },
@@ -422,4 +389,4 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   keyText: { fontFamily: ui(500), color: colors.text, fontSize: 13 },
-});
+}));

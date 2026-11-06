@@ -9,7 +9,7 @@ use rift_remote::protocol::{
     ChangedFile, Completion, CompletionKind, DiffLine, HistoryEntry, Waiting, WaitingKind,
 };
 use rift_remote::protocol::{
-    ChipDetail, ChipKind, ClosingReason, ComposeContainer, PaneChip, Part, Tone,
+    ChipDetail, ChipKind, ClosingReason, ComposeContainer, PaneChip, Part, Theme, Tone,
 };
 use rift_remote::registry::{self, PairingLink};
 use rift_remote::transport::{self, Channel, HandshakeError, Recv};
@@ -76,6 +76,8 @@ struct State {
     files: Vec<(u64, String, String, Vec<u8>)>,
     /// What `upload_ready` answers (a pane at its prompt: `Busy`).
     ready_error: Option<InputError>,
+    /// The desktop's theme (`None`: an older computer, no feature).
+    theme: Option<Theme>,
 }
 
 #[derive(Clone, Default)]
@@ -186,6 +188,10 @@ impl Source for Fake {
             .copy
             .clone()
             .filter(|(seq, _)| *seq > since)
+    }
+
+    fn theme(&self) -> Option<Theme> {
+        self.0.lock().unwrap().theme.clone()
     }
 
     fn input(&self, pane: u64, device: &str, input: Input) -> Result<(), InputError> {
@@ -3040,6 +3046,71 @@ fn copies_reach_operating_phones_and_never_an_older_one() {
     std::thread::sleep(settle);
     copy(4, "after coming back");
     assert_eq!(recv_t(&mut back, "clipboard")["text"], "after coming back");
+}
+
+fn theme(name: &str, bg: &str) -> Theme {
+    let c = |s: &str| s.to_string();
+    Theme {
+        name: c(name),
+        dark: true,
+        bg: c(bg),
+        bg_chrome: c("000000"),
+        surface: c("1e1e1e"),
+        border: c("ffffff1a"),
+        fg: c("ffffff"),
+        text_bright: c("ffffff"),
+        text_ui: c("e6e6e6"),
+        text_dim: c("9b9b9b"),
+        text_muted: c("828282"),
+        accent: c("19aad8"),
+        success: c("1ca05a"),
+        error: c("ff8272"),
+        warning: c("e5a01a"),
+        selection: c("76a7fa66"),
+        ansi: vec![c("616161"); 16],
+    }
+}
+
+/// The welcome carries the desktop's theme and says `theme`; a change on
+/// the computer reaches every phone, a computer without one sends neither.
+#[test]
+fn the_desktops_theme_comes_with_the_welcome_and_follows_changes() {
+    let env = start(|_| {});
+    // an older computer: no theme, no feature
+    let (_k, _old, welcome) = env.pair(Permission::Operate);
+    assert!(welcome.get("theme").is_none(), "{welcome}");
+    assert!(
+        !welcome["features"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("theme"))
+    );
+    drop(_old);
+    env.fake.0.lock().unwrap().theme = Some(theme("Dark Default", "050505"));
+    let (_k, mut phone, welcome) = env.pair(Permission::Operate);
+    let (_v, mut viewer, _) = env.pair(Permission::View);
+    assert_eq!(welcome["theme"]["name"], "Dark Default");
+    assert_eq!(welcome["theme"]["bg"], "050505");
+    assert_eq!(welcome["theme"]["ansi"].as_array().unwrap().len(), 16);
+    assert!(
+        welcome["features"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("theme"))
+    );
+    // the theme changes on the computer: both phones hear it, whatever
+    // they may do (the first look may repeat the welcome's theme)
+    env.fake.0.lock().unwrap().theme = Some(theme("Dracula", "282a36"));
+    for ch in [&mut phone, &mut viewer] {
+        let t = loop {
+            let t = recv_t(ch, "theme");
+            if t["theme"]["name"] != "Dark Default" {
+                break t;
+            }
+        };
+        assert_eq!(t["theme"]["name"], "Dracula");
+        assert_eq!(t["theme"]["bg"], "282a36");
+    }
 }
 
 #[test]

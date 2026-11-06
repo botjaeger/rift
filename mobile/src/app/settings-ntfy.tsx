@@ -1,20 +1,23 @@
 import * as Clipboard from "expo-clipboard";
 import { useState } from "react";
-import { AccessibilityInfo, Linking, Platform, StyleSheet, Text, TextInput, View } from "react-native";
+import { AccessibilityInfo, Linking, Platform, Text, TextInput, View } from "react-native";
 import { ntfyUnsupported } from "@/fleet";
 import { NTFY_ROTATED, normalizeNtfyServer, ntfyFooter, ntfyServerChanged, ntfySubscribeFallback, ntfySubscribeLink, pushFooter } from "@/notify";
 import { fleet, useApp } from "@/runtime";
 import { confirmDestructive } from "@/ui/confirm";
 import { ErrorText } from "@/ui/Notice";
-import { CardBox, Group, Pill, Row, SettingsPage, SwitchRow } from "@/ui/Rows";
+import { Button } from "@/ui/Button";
+import { CardBox, Group, Row, SettingsPage, SwitchRow } from "@/ui/Rows";
 import { SaveError } from "@/ui/SaveError";
-import { colors, mono, ui } from "@/ui/theme";
+import { mono, radius, ui, makeStyles, useColors } from "@/ui/theme";
 
 /**
  * Settings › While the app is closed › "Alerts through ntfy": a random topic on ntfy.sh (or a
  * self-hosted server) that the computers post alerts to; the ntfy app subscribed to it shows them.
  */
 export default function NtfyScreen() {
+  const colors = useColors();
+  const styles = useStyles();
   const s = useApp();
   const st = s.settings;
   const { ntfyServer: server, ntfyEnabled: on, ntfyTopic: topic } = st;
@@ -100,6 +103,7 @@ export default function NtfyScreen() {
             <Row first>
               <Text style={[styles.label, styles.text]}>Server</Text>
               <TextInput
+                keyboardAppearance={colors.dark ? "dark" : "light"}
                 value={draft ?? server}
                 onChangeText={setDraft}
                 // an unusable draft stays to be corrected
@@ -127,13 +131,13 @@ export default function NtfyScreen() {
             </View>
           </CardBox>
           <View style={styles.buttons}>
-            <Pill kind="primary" height={50} label="Subscribe in ntfy" hint="Opens the ntfy app on this topic" onPress={() => void subscribe()} />
+            <Button variant="primary" label="Subscribe in ntfy" accessibilityHint="Opens the ntfy app on this topic" onPress={() => void subscribe()} />
             <View style={styles.pair}>
-              <Pill label="Copy topic" hint="Copies the topic" onPress={() => void copy("Topic copied")} style={styles.flex1} />
-              <Pill
-                kind="caution"
+              <Button label="Copy topic" accessibilityHint="Copies the topic" onPress={() => void copy("Topic copied")} style={styles.flex1} />
+              <Button
+                variant="destructive"
                 label="New topic…"
-                hint="Makes a new topic; the ntfy app must subscribe again. Asks first"
+                accessibilityHint="Makes a new topic; the ntfy app must subscribe again. Asks first"
                 onPress={() => void rotate()}
                 style={styles.flex1}
               />
@@ -152,25 +156,26 @@ export default function NtfyScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = makeStyles((colors) => ({
   flex1: { flex: 1 },
   text: { flex: 1 },
-  label: { fontFamily: ui(400), color: colors.textBright, fontSize: 15 },
-  secret: { fontFamily: ui(400), fontSize: 12, color: colors.warning },
-  reason: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13, lineHeight: 19, paddingHorizontal: 16 },
-  foot: { fontFamily: ui(400), color: colors.textDim, fontSize: 12, lineHeight: 17, paddingHorizontal: 16 },
+  label: { fontFamily: ui(400), color: colors.textBright, fontSize: 16 },
+  // orange means "needs you" only: the caution is words
+  secret: { fontFamily: ui(400), fontSize: 13, color: colors.textMuted },
+  reason: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13, lineHeight: 19, paddingHorizontal: 4 },
+  foot: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13, lineHeight: 18, paddingHorizontal: 4 },
   serverInput: {
-    fontFamily: mono,
+    fontFamily: ui(400),
     width: 170,
     minHeight: 44,
     paddingVertical: 0,
     color: colors.textMuted,
-    fontSize: 14,
+    fontSize: 16,
     textAlign: "right",
   },
   topicBlock: {
     gap: 6,
-    paddingHorizontal: 14,
+    paddingHorizontal: 16,
     paddingVertical: 12,
     borderTopWidth: 1,
     borderTopColor: colors.hairline,
@@ -181,10 +186,10 @@ const styles = StyleSheet.create({
     fontSize: 13,
     paddingVertical: 10,
     paddingHorizontal: 12,
-    borderRadius: 10,
+    borderRadius: radius.field,
     backgroundColor: colors.chrome,
     overflow: "hidden",
   },
   buttons: { gap: 8, marginTop: 4 },
   pair: { flexDirection: "row", gap: 8 },
-});
+}));

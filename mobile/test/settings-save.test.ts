@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
+import { themeStub } from "./helpers/themeStub";
 
 type Input = {
   value: string;
@@ -54,7 +55,7 @@ function harness() {
       if (name === "react") return react;
       if (name === "react-native") return { TextInput: "TextInput", Text: "Text", View: "View", StyleSheet: { create: (s: unknown) => s } };
       if (name === "@/runtime") return { fleet: { updateSettings } };
-      if (name === "@/ui/theme") return { colors: {}, ui: () => "ui" };
+      if (name === "@/ui/theme") return themeStub;
       return leaves;
     },
   });

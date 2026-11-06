@@ -4,7 +4,9 @@ import { describe, expect, it } from "vitest";
 import { reduceScreen, type ScreenState } from "../src/protocol/store";
 import { decodeServer, type ScreenMsg, type ScreenRun } from "../src/protocol/types";
 import { textRoom, charWidth, atEnd, cursorScrollY, fitArea, fitFont, lastTextRow, isWide, mix, rowPieces, rowSegments, screenDefaults, segmentColors } from "../src/terminal";
-import { colors, contrast } from "../src/ui/palette";
+import { DARK_DEFAULT, contrast, paletteFrom } from "../src/ui/palette";
+
+const colors = paletteFrom(DARK_DEFAULT);
 
 const fixture = (name: string) =>
   JSON.parse(

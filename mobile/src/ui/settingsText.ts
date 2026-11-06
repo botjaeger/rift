@@ -2,22 +2,32 @@
 
 import type { ConnState } from "../protocol/client";
 import { doneText } from "../notifyText";
-import { osName, updateStatusText } from "./format";
+import { updateStatusText } from "./format";
 
 /** "30 s", "1 min", "5 min": the "Only if it ran longer than" value. */
 export const shortAfter = (ms: number) => (ms < 60_000 ? `${Math.round(ms / 1000)} s` : `${Math.round(ms / 60_000)} min`);
 
-/** Where a connection runs: "LAN" or "Relay" while connected, "Connecting" or "Offline" otherwise. */
-export function connWord(conn: Pick<ConnState, "status" | "path">): string {
-  if (conn.status === "open") return conn.path?.kind === "relay" ? "Relay" : conn.path?.kind === "lan" ? "LAN" : "Connected";
-  return conn.status === "connecting" ? "Connecting" : "Offline";
+/** Where a computer is, in words: "This network" or "Over the relay" while connected, else what stops it. */
+export function placeWord(conn: Pick<ConnState, "status" | "path">): string {
+  switch (conn.status) {
+    case "open":
+      return conn.path?.kind === "relay" ? "Over the relay" : "This network";
+    case "connecting":
+      return "Connecting…";
+    case "offline":
+      return "Offline";
+    case "idle":
+      return "Not connected";
+    case "closed":
+    case "failed":
+      return "Can’t reach it";
+  }
 }
 
-/** "macOS · LAN · can run commands" (or "view only"); the system is left out until known. */
-export function hostMeta(host: { os: string | null; conn: Pick<ConnState, "status" | "path">; viewOnly: boolean }): string {
-  return [host.os ? osName(host.os) : null, connWord(host.conn), host.viewOnly ? "view only" : "can run commands"]
-    .filter(Boolean)
-    .join(" · ");
+/** A computer's line on Settings: "This network · can run commands"; one it cannot reach says only that. */
+export function hostMeta(host: { conn: Pick<ConnState, "status" | "path">; viewOnly: boolean }): string {
+  const where = placeWord(host.conn);
+  return host.conn.status === "open" ? `${where} · ${host.viewOnly ? "view only" : "can run commands"}` : where;
 }
 
 /** "Show the command"'s detail: the example alert for the current value, as the app posts it. */

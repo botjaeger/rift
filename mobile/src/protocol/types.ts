@@ -169,7 +169,8 @@ export type Feature =
   | "upload_files"
   | "paste"
   | "mouse"
-  | "clipboard";
+  | "clipboard"
+  | "theme";
 
 /** `complete` bounds: line bytes, entries per list, bytes per entry. */
 export const MAX_COMPLETE_LINE = 1024;
@@ -501,6 +502,38 @@ export interface WelcomeMsg {
   permission: Permission;
   /** What this gateway serves beyond Phase 2; [] when it leaves the field out. Unknown names are kept. */
   features: string[];
+  /** The desktop's theme (feature `theme`); absent from an older computer (or a malformed one, dropped). */
+  theme?: Theme;
+}
+/**
+ * A desktop theme: its name, whether its ground is dark, and its tokens as `rrggbb` / `rrggbbaa`
+ * (no `#`), named as the desktop's theme files name them. A computer sends its own (welcome,
+ * `theme`); the builtin ones are in themes.data.ts.
+ */
+export interface Theme {
+  name: string;
+  dark: boolean;
+  bg: string;
+  bg_chrome: string;
+  surface: string;
+  border: string;
+  fg: string;
+  text_bright: string;
+  text_ui: string;
+  text_dim: string;
+  text_muted: string;
+  accent: string;
+  success: string;
+  error: string;
+  warning: string;
+  selection: string;
+  /** The 16 ANSI colours. */
+  ansi: string[];
+}
+/** The desktop's theme changed (feature `theme`). */
+export interface ThemeMsg {
+  t: "theme";
+  theme: Theme;
 }
 export interface TopologyMsg {
   t: "topology";
@@ -724,6 +757,7 @@ export type ServerMsg =
   | DoneMsg
   | PongMsg
   | ClipboardMsg
+  | ThemeMsg
   | ClosingMsg
   | ErrorMsg
   | ScreenMsg
@@ -749,6 +783,41 @@ const arrayOf =
 const isStrOrNull = orNull(isStr);
 const isIntOrNull = orNull(isInt);
 const isOptStr = (v: unknown) => v === undefined || isStr(v);
+
+/** Longest theme name kept. */
+export const MAX_THEME_NAME = 64;
+const THEME_TOKENS = [
+  "bg",
+  "bg_chrome",
+  "surface",
+  "border",
+  "fg",
+  "text_bright",
+  "text_ui",
+  "text_dim",
+  "text_muted",
+  "accent",
+  "success",
+  "error",
+  "warning",
+  "selection",
+] as const;
+const isWireColor = (v: unknown) => isStr(v) && /^[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/.test(v);
+
+/** A well-formed theme: a short name, every token a colour, 16 ANSI colours. */
+export function isTheme(v: unknown): v is Theme {
+  return (
+    isObj(v) &&
+    isStr(v.name) &&
+    v.name.length > 0 &&
+    v.name.length <= MAX_THEME_NAME &&
+    isBool(v.dark) &&
+    THEME_TOKENS.every((k) => isWireColor(v[k])) &&
+    Array.isArray(v.ansi) &&
+    v.ansi.length === 16 &&
+    v.ansi.every(isWireColor)
+  );
+}
 
 export function isBlock(v: unknown): v is Block {
   return (
@@ -920,16 +989,23 @@ export function decodeServer(json: unknown): ServerMsg | null {
   if (!isObj(json)) return null;
   const m = json;
   switch (m.t) {
-    case "welcome":
-      return isUint(m.v) &&
-        isStr(m.host) &&
-        isStr(m.os) &&
-        isStr(m.version) &&
-        isStr(m.device) &&
-        (m.permission === "operate" || m.permission === "view") &&
-        (m.features === undefined || arrayOf(isStr)(m.features))
-        ? ({ ...m, features: m.features ?? [] } as unknown as WelcomeMsg)
-        : null;
+    case "welcome": {
+      if (
+        !(
+          isUint(m.v) &&
+          isStr(m.host) &&
+          isStr(m.os) &&
+          isStr(m.version) &&
+          isStr(m.device) &&
+          (m.permission === "operate" || m.permission === "view") &&
+          (m.features === undefined || arrayOf(isStr)(m.features))
+        )
+      )
+        return null;
+      // a malformed theme is left out: the welcome itself still counts
+      const { theme, ...rest } = m;
+      return { ...rest, features: m.features ?? [], ...(isTheme(theme) ? { theme } : {}) } as unknown as WelcomeMsg;
+    }
     case "topology":
       return arrayOf(isWindow)(m.windows) ? (m as unknown as TopologyMsg) : null;
     case "snapshot":
@@ -954,6 +1030,8 @@ export function decodeServer(json: unknown): ServerMsg | null {
       return isUint(m.n) ? (m as unknown as PongMsg) : null;
     case "clipboard":
       return isStr(m.text) ? (m as unknown as ClipboardMsg) : null;
+    case "theme":
+      return isTheme(m.theme) ? (m as unknown as ThemeMsg) : null;
     case "closing":
       return (m.reason === "quit" || m.reason === "update") && (m.back_in_s === undefined || isUint(m.back_in_s))
         ? (m as unknown as ClosingMsg)

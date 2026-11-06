@@ -1,19 +1,24 @@
-import { Stack } from "expo-router";
+import { useRouter } from "expo-router";
 import { useState } from "react";
-import { ScrollView, StyleSheet, Text } from "react-native";
+import { ScrollView, Text, View } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { runCryptoBench, type BenchResult } from "@/bench";
 import { randomBytes } from "@/runtime";
 import { Button } from "@/ui/Button";
 import { ErrorText } from "@/ui/Notice";
-import { InfoRow } from "@/ui/Rows";
-import { Section } from "@/ui/Screen";
-import { colors, mono, ui } from "@/ui/theme";
+import { CardBox, Group, InfoRow, Row } from "@/ui/Rows";
+import { PageHeader } from "@/ui/Screen";
+import { mono, ui, makeStyles } from "@/ui/theme";
 
 /**
  * Hidden diagnostics (rift://diagnostics): how fast this device's JavaScript engine runs the
- * transport. A snapshot is at most 1 MiB; the gateway's frames are this size or smaller.
+ * transport. A snapshot is at most 1 MiB; the gateway's frames are this size or smaller. The
+ * app's own page header: the system bar it had named Back after the page under it.
  */
 export default function DiagnosticsScreen() {
+  const styles = useStyles();
+  const router = useRouter();
+  const insets = useSafeAreaInsets();
   const [runs, setRuns] = useState<BenchResult[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -34,38 +39,53 @@ export default function DiagnosticsScreen() {
   };
 
   return (
-    <ScrollView style={styles.fill} contentContainerStyle={styles.content}>
-      <Stack.Screen options={{ title: "Diagnostics" }} />
-      <Text style={styles.lead}>
-        Runs one Noise handshake and seals then opens 1 MiB in 65 000-byte chunks, as the gateway sends a full snapshot.
-      </Text>
-      <Button label={busy ? "Running…" : "Run crypto benchmark"} variant="primary" disabled={busy} onPress={run} />
-      {error ? <ErrorText>{error}</ErrorText> : null}
-      {runs.map((r, n) => (
-        <Section key={n} title={`Run ${n + 1} · ${r.engine}`}>
-          <InfoRow label="Handshake" first>
-            <Text style={styles.value} accessibilityLabel={`handshake ${r.handshakeMs.toFixed(1)} ms`}>{r.handshakeMs.toFixed(1)} ms</Text>
-          </InfoRow>
-          <InfoRow label="Seal 1 MiB">
-            <Text style={styles.value} accessibilityLabel={`seal ${r.sealMs.toFixed(0)} ms`}>{r.sealMs.toFixed(0)} ms</Text>
-          </InfoRow>
-          <InfoRow label="Open 1 MiB">
-            <Text style={styles.value} accessibilityLabel={`open ${r.openMs.toFixed(0)} ms`}>{r.openMs.toFixed(0)} ms</Text>
-          </InfoRow>
-          <InfoRow label="Throughput">
-            <Text style={styles.value} accessibilityLabel={`throughput ${r.mibPerSecond.toFixed(1)} MiB per second`}>
-              {r.mibPerSecond.toFixed(1)} MiB/s
-            </Text>
-          </InfoRow>
-        </Section>
-      ))}
-    </ScrollView>
+    <View style={styles.fill}>
+      <PageHeader title="Diagnostics" back={() => (router.canGoBack() ? router.back() : router.replace("/"))} />
+      <ScrollView style={styles.fill} contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + 24 }]}>
+        {/* the Diagnostics board: what it measures as a row under Encryption, then Run */}
+        <Group title="Encryption">
+          <CardBox>
+            <Row first wrap>
+              <View style={styles.text}>
+                <Text style={styles.label}>Crypto benchmark</Text>
+                <Text style={styles.lead}>One Noise handshake, then 1 MiB sealed and opened in 65 000-byte chunks, as the gateway sends a full snapshot</Text>
+              </View>
+            </Row>
+          </CardBox>
+        </Group>
+        <Button label={busy ? "Running…" : "Run"} accessibilityLabel="Run the crypto benchmark" disabled={busy} onPress={run} />
+        {error ? <ErrorText>{error}</ErrorText> : null}
+        {runs.map((r, n) => (
+          <Group key={n} title={`Run ${n + 1} · ${r.engine}`}>
+            <CardBox>
+              <InfoRow label="Handshake" first>
+                <Text style={styles.value} accessibilityLabel={`handshake ${r.handshakeMs.toFixed(1)} ms`}>{r.handshakeMs.toFixed(1)} ms</Text>
+              </InfoRow>
+              <InfoRow label="Seal 1 MiB">
+                <Text style={styles.value} accessibilityLabel={`seal ${r.sealMs.toFixed(0)} ms`}>{r.sealMs.toFixed(0)} ms</Text>
+              </InfoRow>
+              <InfoRow label="Open 1 MiB">
+                <Text style={styles.value} accessibilityLabel={`open ${r.openMs.toFixed(0)} ms`}>{r.openMs.toFixed(0)} ms</Text>
+              </InfoRow>
+              <InfoRow label="Throughput">
+                <Text style={styles.value} accessibilityLabel={`throughput ${r.mibPerSecond.toFixed(1)} MiB per second`}>
+                  {r.mibPerSecond.toFixed(1)} MiB/s
+                </Text>
+              </InfoRow>
+            </CardBox>
+          </Group>
+        ))}
+      </ScrollView>
+    </View>
   );
 }
 
-const styles = StyleSheet.create({
-  fill: { flex: 1, backgroundColor: colors.bg },
-  content: { padding: 16, gap: 14 },
+const useStyles = makeStyles((colors) => ({
+  fill: { flex: 1, backgroundColor: colors.chrome },
+  content: { padding: 16, gap: 16, maxWidth: 720, width: "100%", alignSelf: "center" },
+  text: { flex: 1, gap: 2, paddingVertical: 10 },
+  label: { fontFamily: ui(400), color: colors.text, fontSize: 16, lineHeight: 22 },
   lead: { fontFamily: ui(400), color: colors.textMuted, fontSize: 14, lineHeight: 20 },
+  // measured numbers: tabular, as output
   value: { color: colors.textBright, fontFamily: mono, fontSize: 14 },
-});
+}));

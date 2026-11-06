@@ -5,8 +5,10 @@ import { useApp } from "@/runtime";
 import { Button } from "@/ui/Button";
 import { ErrorText } from "@/ui/Notice";
 import { basePane, newTabCwd } from "@/ui/newTab";
-import { ConfirmProgram, Footnote, Group, InfoRow, ProgramRows, SectionLabel, SheetFrame, SheetNote } from "@/ui/NewSheet";
+import { ConfirmProgram, Footnote, ProgramRows, SheetFrame, SheetNote } from "@/ui/NewSheet";
+import { CardBox, Group, ValueRow } from "@/ui/Rows";
 import { canStartTab, StartTab } from "@/ui/StartTab";
+import { findPane, tabTitle } from "@/topology";
 import { useLaunch } from "@/ui/useLaunch";
 
 /**
@@ -25,6 +27,8 @@ export default function NewTabSheet() {
   const name = host?.record.name ?? "";
   const cwd = host ? newTabCwd(host) : null;
   const closed = !!host && canStartTab(host);
+  // the tab it opens beside ("On studio-mac, beside project1")
+  const beside = host && base !== null ? findPane(host.windows, base) : null;
 
   let body;
   if (!host) body = <SheetNote error>Computer not found.</SheetNote>;
@@ -39,19 +43,26 @@ export default function NewTabSheet() {
   else
     body = (
       <>
-        <Group>
-          <InfoRow first label="Opens on" value={`${name}, in Rift’s window`} />
-          {cwd ? <InfoRow path label="Starts in" value={tildePath(cwd)} /> : null}
+        {/* the folder as one row (the new tab starts where the tab beside it is) */}
+        {cwd ? (
+          <CardBox>
+            <ValueRow first path label="Folder" value={tildePath(cwd)} />
+          </CardBox>
+        ) : null}
+        <Group title="Start with">
+          <ProgramRows kind="tab" disabled={launch.busy} onPick={launch.pick} />
         </Group>
-        <SectionLabel>Start with</SectionLabel>
-        <ProgramRows kind="tab" disabled={launch.busy} onPick={launch.pick} />
         {launch.busy ? <Footnote>Opening…</Footnote> : null}
         <Footnote>The new tab opens beside this one on the computer, and this phone goes to it. Ask before running applies to the program’s name.</Footnote>
       </>
     );
 
   return (
-    <SheetFrame title="New tab" subtitle={name || "Computer not found"} online={!!online} onClose={launch.close}>
+    <SheetFrame
+      title="New tab"
+      subtitle={name ? `On ${name}${beside ? `, beside ${tabTitle(beside.tab)}` : ""}${online ? "" : " · offline"}` : "Computer not found"}
+      onClose={launch.close}
+    >
       {body}
       {launch.error ? <ErrorText>{launch.error}</ErrorText> : null}
       {launch.opened !== null ? <Button label="Go to the new tab" onPress={() => launch.finish(launch.opened ?? undefined)} /> : null}

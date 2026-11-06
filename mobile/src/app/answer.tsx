@@ -7,7 +7,6 @@ import {
   KeyboardAvoidingView,
   Pressable,
   ScrollView,
-  StyleSheet,
   Text,
   TextInput,
   View,
@@ -21,13 +20,15 @@ import type { Waiting } from "@/protocol/types";
 import { authenticate, fleet, useApp } from "@/runtime";
 import { findPane, tabTitle } from "@/topology";
 import { Icon } from "@/ui/Icon";
+import { Button } from "@/ui/Button";
 import { ErrorText } from "@/ui/Notice";
 import { PromptText } from "@/ui/PromptText";
 import { PageHeader } from "@/ui/Screen";
-import { colors, mono, tints, ui } from "@/ui/theme";
+import { mono, ui, makeStyles, useColors } from "@/ui/theme";
 
 /** The agent's lines above its question, a diff drawn as the desktop's review panel draws one. */
 function Context({ lines }: { lines: string[] }) {
+  const styles = useStyles();
   return (
     <View style={styles.context} accessible accessibilityLabel={`What it is about: ${lines.join(". ")}`}>
       {lines.map((l, i) => {
@@ -58,6 +59,8 @@ function Context({ lines }: { lines: string[] }) {
  * with "No, and tell it what to do" as a field; a password or other question as a field.
  */
 export default function AnswerScreen() {
+  const colors = useColors();
+  const styles = useStyles();
   const { key, pane: paneParam, reply, from } = useLocalSearchParams<{ key: string; pane: string; reply?: string; from?: string }>();
   const paneId = Number(paneParam);
   const router = useRouter();
@@ -127,23 +130,11 @@ export default function AnswerScreen() {
     <KeyboardAvoidingView style={styles.fill} behavior="padding">
       <Stack.Screen options={{ headerShown: false }} />
       <PageHeader
-        chrome
         title={w ? askingTitle(w, program) : "Nothing is waiting"}
-        titleSize={15}
         subtitle={where}
-        subtitleLines={1}
         back={back}
         backLabel={from === "pane" ? "Back to the pane" : "Back to Portals"}
-        right={
-          <Pressable
-            accessibilityRole="link"
-            accessibilityLabel="Open pane"
-            onPress={openPane}
-            style={({ pressed }) => [styles.openPane, pressed && styles.pressed]}
-          >
-            <Text style={styles.openPaneText}>Open pane</Text>
-          </Pressable>
-        }
+        right={<Button label="Open pane" variant="text" size="small" onPress={openPane} />}
       />
       <ScrollView style={styles.fill} contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
         {w ? (
@@ -176,24 +167,20 @@ export default function AnswerScreen() {
             <>
               {w.choices.map((_, i) =>
                 i === replyAt ? null : (
-                  <Pressable
+                  <Button
                     key={i}
-                    accessibilityRole="button"
-                    accessibilityLabel={label(i)}
-                    accessibilityState={{ disabled: busy }}
+                    label={label(i)}
+                    variant={i === primary ? "primary" : "secondary"}
+                    numberOfLines={2}
                     disabled={busy}
                     onPress={() => void send({ choice: i })}
-                    style={({ pressed }) => [styles.choice, i === primary ? styles.choicePrimary : styles.choiceOutline, pressed && styles.pressed]}
-                  >
-                    <Text style={i === primary ? styles.choicePrimaryText : styles.choiceText} numberOfLines={2}>
-                      {label(i)}
-                    </Text>
-                  </Pressable>
+                  />
                 ),
               )}
               {replyAt !== null ? (
                 <View style={styles.replyRow}>
                   <TextInput
+                    keyboardAppearance={colors.dark ? "dark" : "light"}
                     value={text}
                     onChangeText={setText}
                     autoFocus={reply === "1"}
@@ -222,6 +209,7 @@ export default function AnswerScreen() {
           ) : (
             <View style={styles.replyRow}>
               <TextInput
+                keyboardAppearance={colors.dark ? "dark" : "light"}
                 value={text}
                 onChangeText={setText}
                 autoFocus
@@ -258,12 +246,10 @@ export default function AnswerScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = makeStyles((colors) => ({
   fill: { flex: 1, backgroundColor: colors.bg },
   pressed: { opacity: 0.75 },
   disabled: { opacity: 0.45 },
-  openPane: { height: 44, paddingHorizontal: 12, justifyContent: "center" },
-  openPaneText: { fontFamily: ui(400), color: colors.accent, fontSize: 14 },
   body: { padding: 16, gap: 14 },
   prompt: { fontFamily: ui(400), color: colors.textBright, fontSize: 17, lineHeight: 24.6 },
   context: { borderRadius: 10, backgroundColor: colors.chrome, borderWidth: 1, borderColor: colors.hairline, overflow: "hidden" },
@@ -271,10 +257,11 @@ const styles = StyleSheet.create({
   ctxFirst: { paddingTop: 6 },
   ctxLast: { paddingBottom: 6 },
   ctxMeta: { fontFamily: mono, fontSize: 11, color: colors.textMuted },
-  ctxAdded: { backgroundColor: tints.answerAdded, color: colors.textBright },
-  ctxRemoved: { backgroundColor: tints.answerRemoved, color: colors.textBright },
+  ctxAdded: { backgroundColor: colors.tints.answerAdded, color: colors.textBright },
+  ctxRemoved: { backgroundColor: colors.tints.answerRemoved, color: colors.textBright },
   note: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13, lineHeight: 18.9 },
-  gone: { fontFamily: ui(400), color: colors.warning, fontSize: 14 },
+  // news, not a call for attention: orange is for "needs you" only
+  gone: { fontFamily: ui(400), color: colors.textBright, fontSize: 14 },
   answer: {
     backgroundColor: colors.chrome,
     borderTopWidth: 1,
@@ -284,11 +271,6 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   viewOnly: { fontFamily: ui(400), color: colors.textDim, fontSize: 13, textAlign: "center", paddingVertical: 6 },
-  choice: { minHeight: 52, borderRadius: 10, alignItems: "center", justifyContent: "center", paddingHorizontal: 14, paddingVertical: 6 },
-  choicePrimary: { backgroundColor: colors.accent },
-  choiceOutline: { borderWidth: 1, borderColor: colors.borderStrong },
-  choicePrimaryText: { fontFamily: ui(600), color: colors.bg, fontSize: 16, textAlign: "center" },
-  choiceText: { fontFamily: ui(400), color: colors.text, fontSize: 16, textAlign: "center" },
   replyRow: { flexDirection: "row", gap: 8, alignItems: "center" },
   replyInput: {
     flex: 1,
@@ -303,4 +285,4 @@ const styles = StyleSheet.create({
     fontSize: 15,
   },
   sendButton: { width: 48, height: 48, borderRadius: 10, backgroundColor: colors.surface, alignItems: "center", justifyContent: "center" },
-});
+}));

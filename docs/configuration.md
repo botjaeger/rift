@@ -524,6 +524,10 @@ file stem (`toml` wins if several exist). A file named like a built-in
 replaces that built-in (a Warp `dracula.yaml` keeps showing). It appears in
 Settings → Themes and the palette's theme switcher. Editing the selected
 theme file reloads its colors without changing `config.toml` or restarting.
+Paired phones get the theme in use (`theme`, or `theme_light` while the
+system is light with `sync_os_theme` on) and follow a change within about a
+second, unless the phone chooses its own (docs/remote-protocol.md, The
+desktop's theme).
 
 **Theme picker** (`theme_picker`, unbound; palette *Theme picker (live
 preview)*): the palette lists every theme; the selected one applies at once

@@ -93,26 +93,32 @@ its **+** pairs a computer. `src/now.ts` and `src/paneView.ts` hold the models.
   A password is a secure field sent as `text` and Enter, never shown, logged or kept. An answer
   goes only to the question it was shown for (the pane must still ask it). View-only devices
   get no answers. Ask before running asks for Face ID first; otherwise nothing confirms. The page
-opens from the **No…** answer on Portals, from the line under a pane's header for a question its
+opens from the **No** answer on Portals, from the line under a pane's header for a question its
 card cannot answer (a password, other input, a view-only device), and from an alert.
 - **Portals** (home, the P4 board): the title with a gear (**Settings**) and **+** (**Pair a
-  computer**). No search bar. Chips under the title filter the tabs of every computer by state:
-  "N needs you", "N working", "N idle" (a tab whose last command failed counts as idle). A chip shows
-  only while a tab is in its state; a second tap clears it; "needs you" stands out while nothing
-  filters. Below, a card per paired computer (with a filter on, only those with a matching tab):
+  computer**). No search bar. Under the title one line counts the tabs of every computer in words,
+  what needs you first and in orange: "● 1 needs you · 2 working · 1 failed · 27 idle" (counts,
+  not filters: the Tabs page filters; `now.ts` `homeSummary`). Below, a card per paired computer:
   a dot (green while connected, blue while trying, red when it cannot be reached), the name,
-  "view only" when this phone cannot run commands, and a status line that says how it is
-  connected: "Connected · this network · 4 tabs", "Connected · through the relay · 1 tab",
-  "Looking on this network…", "Not on this network · trying the relay…" (with a thin progress bar),
-  "Can’t reach it · retrying in 8 s" (counting down, with a paragraph saying why and what happens
-  next), "Offline · this phone has no network", "Not connected". The line is a button: it opens
-  the **Connection** sheet (below). On the card's right: **New tab** (the icon; a connected computer that this phone
-  may operate and that offers `open`, or `start` while Rift is closed), **Try again** while it
-  cannot be reached (it connects at once, backoff reset), **Pair again** when it refused this
-  phone's key (other failures say why under the name, in full). A connected card lists its tabs, what needs an answer on top and the rest in tab order: a tile (✳ in orange for a coding agent, `>_` for a
-  shell), the tab's name, and under it what its lead pane does: its program or command and
-  running, idle or waiting for you (with several computers paired a question shows its first
-  line). On the right the tab's mark as the desktop's tab bar draws it (a spinner while it works,
+  "view only" when this phone cannot run commands, and a line that says where it is: "This
+  network · 30 tabs", "Over the relay · 1 tab", "Looking on this network…", "Not on this network ·
+  trying the relay…" (with a thin progress bar), "Can’t reach it · retry 2 of 5 in 8 s" (counting
+  down, with a paragraph saying why and what happens next), "Can’t reach it · last seen 2 h ago"
+  once it stopped trying (this run's last connection, else the stored `seenAt` of its last
+  `welcome`), "Offline · this phone has no network", "Not connected". Two pairings with one name
+  (an old one left behind) each add when they were paired ("· paired 3 Nov"). The line is a
+  button: it opens the **Connection** sheet (below). On the card's right **New tab** (the icon; a
+  connected computer that this phone may operate and that offers `open`, or `start` while Rift is
+  closed). A card that cannot be reached offers its fixes as rows in the card: **Try again** (it
+  connects at once, backoff reset) or **Pair again** when it refused this phone's key (other
+  failures say why under the name, in full), and **Unpair** in red, which asks first (as the
+  card's swipe left does). A connected card shows five of its tabs, the ones that matter first:
+  what needs you (tinted), then what works, what failed and what idles, each in tab order
+  (`now.ts` `homeRows`); **Show all N tabs** opens the Tabs page for the rest. A row: a tile (✳ in
+  orange for a coding agent, `>_` for a shell), the tab's name (cut once at its end; a split tab's
+  "· 2 panes" stays whole), and under it what its lead pane does, in words with only its command
+  in mono: "Waiting for you · Make this edit?", "npm run dev · running", "cargo test · failed with
+  101", "Idle · last: echo one", "Idle · ~/code" before any command. On the right the tab's mark as the desktop's tab bar draws it (a spinner while it works,
   a dot in its state's colour, ringed while it needs you) and a short time beside it ("2m",
   "3:56", "✕ 1", "12m"; the idle time only for an agent the app saw working); the state in words
   ("Needs you · 2m", "Working 3:56") is the row's screen-reader label. A tap opens the tab's pane. With one computer paired, a needs-you tab whose agent asks a menu of up to
@@ -127,23 +133,39 @@ card cannot answer (a password, other input, a view-only device), and from an al
   note: "In use · 6 ms" (the round trip of the latest ping; no number until one is answered),
   "No answer on this network (2 s)", "Relay up · your computer has not joined", "The relay
   answered, but your computer is not registered there", or the error the socket reported;
-  then "End-to-end encrypted. The relay passes bytes it cannot read." and, when the computer cannot
-  be reached, **Try again now**. The client records each path's state in `ConnState.paths`
+  then "End-to-end encrypted. The relay passes bytes it cannot read." and **Test again** while
+  connected (it connects again at once, this network's addresses first, so a phone back on the
+  home Wi-Fi leaves the relay), or **Try again now** when the computer cannot be reached. The client records each path's state in `ConnState.paths`
   (`src/protocol/client.ts`); the wording is `src/ui/connStatus.ts` (tested in node).
 - **Tabs** (a full page, from the middle of the pane's tab row; `src/app/tabs.tsx`): every tab of
   that computer, pinned ones first under **Pinned** as on its tab bar, then the rest in the
-  computer's tab order. The header: "Tabs", the computer and its tab count, and **Split pane**,
-  **New tab** (operating devices only) and Close. A search field matches a tab's name, what its
-  lead pane does and any pane's folder; chips filter All, Needs you, Working, Failed, each with its
-  count. A row (`src/ui/ListRow.tsx`): the grip, the tab's name (a pin on a pinned tab, "N panes"
-  on a split one, which opens its Panes page), what its lead pane does, and on the right its mark
-  and short time as on Portals; the open tab is tinted. A tap goes to that tab's pane in place of
-  this one (Back still leads where it led); ✕ closes the tab. The list is virtualized, so a
+  computer's tab order. The header (the page header): ‹ Back, "Tabs", the computer and its tab
+  count, and **+** New tab (operating devices only; Split pane is in the pane's ⋯). A search field
+  matches a tab's name, what its lead pane does and any pane's folder; filter chips: All, Needs
+  you, Working, Failed, each with its count. A 60 pt row (`src/ui/ListRow.tsx`): the grip, the
+  tab's name (a pin on a pinned tab, "N panes" on a split one, which opens its Panes page), what
+  its lead pane does (Inter, its command or path in mono), and on the right its mark and short
+  time as on Portals; the open tab is tinted. A tap goes to that tab's pane in place of this one
+  (Back still leads where it led; opened from Portals' **Show all**, the pane opens over Portals);
+  ✕ closes the tab. The whole list's captions are **Pinned** and **Tabs · Drag ≡ to reorder**; a
+  search or filter lists what it found under "13 tabs" without grips, and says under the rows that
+  reordering works on the whole list. A filter that holds nothing says so ("Nothing needs you ·
+  Agents that ask a question show here.") with **Show all tabs**. The list is virtualized, so a
   computer of a hundred tabs draws the rows in view only.
-- **Panes** (a full page, from the pane row or a tab's "N panes"): the tab's panes as the same
-  rows, each with its program's tile (✳ or `>_`), name, what it does, its mark and short time; the
-  open one is tinted. A tap opens that pane in place of this one. **New pane** at the foot opens
-  the **New pane** sheet.
+- **Panes** (a full page, from the pane row or a tab's "N panes"): the same header (‹ Back,
+  "Panes", the tab and its pane count, **+** for the **New pane** sheet) over the same rows, each
+  with its program's tile (✳ or `>_`), name, what it does, its mark and short time; the open one
+  is tinted. A tap opens that pane in place of this one.
+- **The standard** (the Standard board; one component per job in `src/ui/`): `PageHeader`
+  (`Screen.tsx`: ‹ Back, or ✕ only on the camera page; title; subtitle; at most two actions),
+  `SheetHeader` (grabber — iOS draws its own —, title, subtitle, round ✕ named Close; Escape
+  closes a sheet on the web), `Field` (44 pt, radius 10, icon, clear button, Inter), `FilterChip`,
+  `Button` (`primary`, `secondary`, `text`, `destructive`; `regular` 44 pt or `small` 32 pt with
+  a 44 pt hit area; radius 10), the list rows of `Rows.tsx` in two densities (56 pt with a line,
+  44 pt without; in cards on settings pages) and `ListRow` (60 pt content rows, edge to edge).
+  Radii: keys 6, buttons and fields 10, cards 14, sheets 20 (`theme.ts` `radius`). Destructive
+  actions are the error red; orange means "needs you" only. Mono is for commands, paths, output
+  and keys; a row's line runs through `CodeText` (`codeSpans` in `src/ui/format.ts`).
 - **New tab** and **New pane** (sheets: `new-tab`, `new-pane`; opened from the pane's ⋯, the
   Tabs page, the Panes page, and a computer's card on Portals for the tab): **Start with** Shell, Claude Code,
   Codex or OpenCode. A shell is one `open` (kind `tab` or `pane`; the pane opens in the folder of
@@ -172,7 +194,9 @@ card cannot answer (a password, other input, a view-only device), and from an al
   paired computer with its state, the current one ticked; a tap on another goes to its last pane,
   one that cannot be reached goes to Portals; then **Connection** and **All portals**);
   **Search output** (filters the blocks by command or output, "N of M"; not under a full-screen
-  view); and **⋯**. Under the header the **tab row** (`src/ui/TabBar.tsx`): ‹ and › go to the
+  view; each match in the shown commands and output is marked on the `match` tint, at most
+  `MAX_MARKS` per text, `markParts` in `src/paneView.ts`, `src/ui/Marked.tsx`; marked output
+  stays a selectable field, its text as styled pieces); and **⋯**. Under the header the **tab row** (`src/ui/TabBar.tsx`): ‹ and › go to the
   previous and next tab, the new pane sliding in from the side it comes from (a fling across the
   row does the same); the middle, the tab's name, its mark and "tab 2 of 30", opens the Tabs page.
   For a tab of several panes the pane row follows: the pane's mark, name and "· 1/2", a dot and
@@ -188,7 +212,10 @@ card cannot answer (a password, other input, a view-only device), and from an al
   switches: **Wrap long lines** for this pane (Settings › Panes › Wrap long lines sets the
   default; off, each block's output scrolls sideways with a position bar) and **Notifications**
   for this computer, then **Split pane** and **New tab** (their sheets; operating devices on a
-  computer that offers them) and Close pane / Close tab.
+  computer that offers them) and Close pane / Close tab. Over a full-screen program Wrap long
+  lines gives way to **Text size** (`src/ui/TextSizeMenu.tsx`): − / the size / + and **Reset**
+  set the same kept zoom a pinch sets (`setKeptZoom` in `src/paneView.ts`; the screen follows at
+  once), one adjustable control for a screen reader.
   **While a pane opens** (the PaneLoading board; `src/ui/paneLoad.ts`, `src/ui/PaneLoading.tsx`):
   the header keeps the tab's last known title (`rift.paneTitles`, written from every topology;
   the computer's name when the pane was never seen). Under it a full-width status strip, its text
@@ -214,9 +241,9 @@ card cannot answer (a password, other input, a view-only device), and from an al
   screen). It is on to start with for a pane that runs a coding agent (Claude Code, Codex: the
   desktop's `running.agent`, its session title, or the program's name), and off for a plain
   shell; the button turns it on or off for that pane until the screen closes. A coding agent's
-  pane always has the message input ("Message for claude") under its screen, on either screen
+  pane always has the message input ("Type to claude") under its screen, on either screen
   (Claude Code picks its renderer per launch: the fullscreen one draws on the alternate screen,
-  the classic one does not); its **⌃** opens the key row. Other full-screen programs keep the
+  the classic one does not); its **⌨** shows the keys. Other full-screen programs keep the
   keys. A vertical drag on the screen scrolls the pane on the computer (feature `scroll`, as the
   desktop's wheel: the agent's or vim's own scrolling, less's lines, or the shell's scrollback),
   counted in rows and sent at most every 30 ms (every 80 ms to a desktop that refuses that pace
@@ -231,7 +258,7 @@ card cannot answer (a password, other input, a view-only device), and from an al
   but not a program. **Paste** puts the clipboard in the message box and sends nothing (below); on **Send** an image
   goes to the computer (feature `upload`, operate only, at most 10 MB, `src/upload.ts`), which saves it and
   pastes its path into the running program, as dropping the file on the window does: Claude
-  Code and Codex attach it. A file on the clipboard goes the same way (feature `upload_files`): a Files copy through iOS's paste button, the clip's content URI on Android, which shows its own "pasted from" notice. It keeps only its extension (1 to 8 letters or digits; a file without one is refused, and so is anything over 10 MB, at a shell prompt, or to an older computer's Rift, each with a message). On iOS the row's Paste is the system's own button, so no prompt. `src/pickFile.ts` wraps `expo-document-picker` for picking a file. Selecting copies, with no Copy button: hold a finger still (450 ms) on the screen and the word under it is selected and copied (a light vibration), with a handle at each end (a stem the row's height, the start's knob above, the end's below, taken within 44 pt); a dragged handle shows a loupe over the finger and ticks at each word it steps onto, and lifting it copies the new range (nothing is copied while it moves). The bar over the screen (at the bottom, at the top when the selection reaches the bottom rows) shows the lines and characters selected, **Copied** (not on Android 13 and later, whose system says it), **Word**, **Line** and **Screen** (widen to whole words, whole rows or every cell), **To prompt** while the command line shows under the screen, and cancel; a tap copies nothing and leaves the clipboard as it was; the screen stands still until then (a screen reader's **Copy the screen** action takes it all). A tap is a click for a program that tracks the mouse (feature `mouse`). The message box grows to five lines: **+** beside it opens Attach (what it brings goes in the message, as for Paste below), the phone keyboard's Return is a new line and only the round **Send** or **Run** button sends (an empty box sends nothing; the key row's **Return** key is a new line with text in the box, and with an empty box confirms what the program shows). With a hardware keyboard Shift+Return is a new line and Return sends. **New line** is not in the default key row; it stays in Choose keys. Both screens have pinch to zoom, double-tap to reset, with the controls floating over the screen while it changes
+  Code and Codex attach it. A file on the clipboard goes the same way (feature `upload_files`): a Files copy through iOS's paste button, the clip's content URI on Android, which shows its own "pasted from" notice. It keeps only its extension (1 to 8 letters or digits; a file without one is refused, and so is anything over 10 MB, at a shell prompt, or to an older computer's Rift, each with a message). On iOS the key block's Paste is the system's own button, so no prompt. `src/pickFile.ts` wraps `expo-document-picker` for picking a file. Selecting copies, with no Copy button: hold a finger still (450 ms) on the screen and the word under it is selected and copied (a light vibration), with a handle at each end (a stem the row's height, the start's 18 pt knob above, the end's below, taken within 44 pt); a dragged handle shows a loupe over the finger and ticks at each word it steps onto, and lifting it copies the new range (nothing is copied while it moves). The bar docked over the keys shows the lines and characters selected and **✓ Copied** while the selection is on the clipboard (announced once per copy), then **Word**, **Line**, **All** (widen to whole words, whole rows or the whole screen), **To prompt** (disabled, with the reason, unless the command line shows under the screen) and ✕; Android's Back ends the selection; a tap copies nothing and leaves the clipboard as it was; the screen stands still until then (a screen reader's **Copy the screen** action takes it all). A tap is a click for a program that tracks the mouse (feature `mouse`). The message box grows to five lines: **+** beside it opens Attach (what it brings goes in the message, as for Paste below), the phone keyboard's Return is a new line and only the round **Send** or **Run** button sends (an empty box sends nothing; the key row's **Return** key is a new line with text in the box, and with an empty box confirms what the program shows). With a hardware keyboard Shift+Return is a new line and Return sends. **New line** is not in the default key row; it stays in Choose keys. Both screens have pinch to zoom, double-tap to reset, with the controls floating over the screen while it changes
   with **−** and **+** and the percentage (60 to 200 %, kept until the app closes). With a
   computer whose Rift has `fit` and a device that may operate, the zoom also reflows the
   program: the view tells the computer how many columns and rows fit at 11 pt times the zoom
@@ -241,24 +268,30 @@ card cannot answer (a password, other input, a view-only device), and from an al
   capture its output moved on from says **Updated N s ago** and gives way after 10 s to the live
   frame at the computer's size, as a program on the primary screen always has; a tap on a capture
   does nothing. Without `fit` the text shrinks to the program's columns as before.
-  Above the command line: the prompt chips (feature `prompt_chips`: what the desktop draws for the
-  pane, in its order, each chip's short value in the desktop's colours; one row that never wraps or
-  scrolls, the chips that fit by their measured widths and the rest folded into **+N** with a dot
-  for each folded chip that needs attention; **+N** opens the *This pane* sheet, `pane-chips`,
-  listing every chip with its full value; a tap opens the chip's menu). A desktop without the
-  feature gets the folder, branch and changed-files chips from `cwd` and `git`. While typing the
-  row is the suggestions (the desktop's completions for what is typed and this pane's history,
-  feature `complete`; else its recent commands). Under them **+** (the **Attach** sheet) and **⌃**, which shows the key row above the chips, and the round
-  field with its run button; Paste and Photo are not in the field any more. The phone keyboard's Return is a new line in the field, so only the button
+  The command line (the command line redesign board), top to bottom. The context: the prompt
+  chips (feature `prompt_chips`: what the desktop draws for the pane, in its order, each chip's
+  short value in the desktop's colours, 28 pt pills; one row that never wraps or scrolls, the chips
+  that fit by their measured widths and the rest folded into **+N** with a dot for each folded chip
+  that needs attention; **+N** opens the *This pane* sheet, `pane-chips`, listing every chip with
+  its full value; a tap opens the chip's menu, Change folder or Switch branch). A timer (Time on
+  tab, the date or clock) is plain text after the chips ("· 2m"), still opening its card. A
+  desktop without the feature gets the folder, branch and changed-files chips from `cwd` and `git`.
+  Then one line, one job each side: **+** (the **Attach** sheet), the round field with its run
+  button, and **⌨**, which shows the keys under the field (held, it opens Settings › Keys); the ^
+  that opened the keys is gone, since it read as "go up". Then the keys (below), and last, closest
+  to the keyboard, the suggestions while typing (the desktop's completions for what is typed and
+  this pane's history, feature `complete`; else its recent commands), the first marked in the
+  accent: at a prompt the phone keyboard's Return takes it (`src/chips.ts` `returnTakes`). Paste
+  and Photo are not in the field any more. Otherwise the phone keyboard's Return is a new line in the field, so only the button
   runs; a hardware keyboard's Return runs and Shift+Return is a new line (told apart by the key event
   in modules/rift-keys). The gateway refuses a `run` with a line break (`bad_request`, nothing runs),
   so a command with line breaks says "A command runs as one line" under the field and Run stays off.
-  While a program runs (Claude Code, a build) the field
-  talks to it: "Message for claude", a **Send** button (all lines go as one message), and Send sends the line as typed text
+  While a program runs (Claude Code, a build) the line changes: **Stop ⌃C** comes first (it sends
+  ctrl+c), and the field talks to the program and says who it types to: "Type to claude" (the
+  program's name alone, or "Type here", where that does not fit), a **Send** button (all lines go as one message), and Send sends the line as typed text
   and then Return as a key, a second request so the program reads it as a message (feature
   `text`; an older Rift is told to update; authentication as for any key that submits; no
-  Confirm sheet). While the keyboard is up the key row starts with
-  Hide keyboard and ends with **Edit keys**. The keyboard's smart dashes and quotes are undone in
+  Confirm sheet). The keyboard's smart dashes and quotes are undone in
   the command line.
 - **Block cards** (the P3 board): a thin border in the state's colour, no left edge.
   Succeeded: the command, "✓ 1.2s" and the first output line; output that is a table
@@ -276,12 +309,14 @@ card cannot answer (a password, other input, a view-only device), and from an al
   command in the pane's command line (asking first when that holds other text). Run again is off
   while the pane runs a program or the computer is not connected; view-only devices get no buttons.
 - **Question card** (the PaneAsking board): an agent's menu on an `operate` device docks at the
-  bottom of its pane in place of the command line: "Claude asks" with how long ago, a minimize
-  chevron (to a bar, "Claude asks: …  Answer"), the question, the file with +/− counts and its
-  changed lines (**Full diff** / **Less**), the first entry as the filled answer ("Yes"), the other
-  entries outlined ("Yes, this session", "Yes, always", "No…"), and a **Keys** row (Esc, ⇧Tab, ↑,
-  ↓). **No…** opens a field, "Tell Claude what to do instead", with a send button and **Back to
-  the answers**. Answers go as the Answer page's do.
+  bottom of its pane in place of the command line, where the keys are, never over the screen:
+  the standard sheet header: "Claude Code asks" (the program by its own name) over the tab and how
+  long ago, and a round ✕ that folds it (to a bar in the same place, "Claude Code asks: …  Answer"), the question, the file with
+  +/− counts and its changed lines (**Full diff** / **Less**), the first entry as the filled answer
+  ("Yes"), the other entries outlined, each saying what it does ("Yes, this session", "Yes,
+  always", "No, explain"), and a **Keys** row (Esc, ⇧Tab, ↑, ↓). **No, explain** turns the card
+  into **Tell it why**: a sheet header ("Claude Code · project4", ✕ back to the answers) over a
+  field and **Send**. Answers go as the Answer page's do.
 - **Pull request, Python, PHP, Docker and Time on tab menus** (feature `prompt_chips`): the pull
   request opens its URL in the browser (`https` only); Python and PHP list the installed versions
   and a pick runs the desktop's own `rift-use …`; Docker lists containers (ports, uptime, health)
@@ -297,30 +332,42 @@ card cannot answer (a password, other input, a view-only device), and from an al
   read-only. Names from the computer are untrusted: they are shell-quoted as the desktop quotes
   them (`src/chips.ts` `shellQuote`), never run unquoted. The commands run as the command line's
   Run does (the Confirm sheet first with Ask before running), without a "Notify me".
-- **Keys above the command line** (Settings › Panes, off by default): whether the pane
-  opens with the key row shown (**⌃** switches it; ^C stays on the running card: Stop); under a
+- **Keys under the command line** (Settings › Panes, off by default): whether the pane
+  opens with the keys shown (**⌨** switches them; ^C is Stop ⌃C on the line while a program runs); under a
   full-screen program the keys always show.
 - **Running**: Run sends at once; Settings › Running commands › Ask before running (off by
-  default) shows the Confirm sheet first. With Settings › Notifications › My commands (on by
+  default) shows the Confirm sheet first ("Run this?", "Ask before running is on", the command,
+  "In ~/code/project1 (main) on studio-mac.", Cancel and Run). With Settings › Notifications ›
+  Commands I ran from here (on by
   default) every command run from this phone asks to be told when it finishes; the bell on a
   running block switches that for one command (and on a computer with `notify_off` also
   drops the computer's own wait).
-- **Settings** (the gear on Portals; the Settings board), in groups:
-  - **Computers**: each paired computer (green dot while connected, with its system and
-    connection) opens its page; **Pair a computer**; under them **This phone's name** (computers
-    show it in toasts and logs). A computer's page: **Connection**, **System**, **This phone can**
-    (Run commands / View only), **Notifications** (From this computer) and **Unpair this
-    computer** (a second tap, "Tap again to unpair", does it).
-  - **Notifications**: **My commands** (a command you ran from this phone finishes), **Other
-    commands on your computers** (Nothing / Failures / Everything), **Only if it ran longer than**
+- **Settings** (the gear on Portals; the Settings board), in groups sorted by what people look for:
+  - **Computers**: each paired computer (Portals' dot, and where it is: "This network · can run
+    commands", "Over the relay · view only", "Can’t reach it") opens its page; **Pair a computer**.
+    A computer's page: its system and pairing day under the name ("macOS · paired 3 Nov"), then
+    **This computer**: **Connection** (This network, Over the relay, Can’t reach it), **Access**
+    (Can run commands / View only), **Theme** (the theme it sends, "Dracula"; opens Appearance),
+    **Notifications** (finished, failed and questions), and **Unpair this computer** in red (a
+    second tap, "Tap again to unpair", does it).
+  - **This phone**: **Name** (computers show it in toasts and logs), **App lock** (Face ID, the
+    device's own name for it; on opening and after 5 minutes away) and **Appearance ›** (the Themes board; `src/app/appearance.tsx`): **Same as the computer** (the
+    default: the theme of the computer in view, "studio-mac uses Dracula now"), **Match this
+    phone** (Light Default in light mode, Dark Default in dark mode) or **Choose a theme**, then
+    the desktop's builtin themes as radio rows with a swatch (ground and accent dot). The choice
+    stays on the phone and never changes a computer.
+  - **Notifications**: **Commands I ran from here** (a command you ran from this phone finishes),
+    **Other commands** (Nothing / Failures / Everything), **Only if it ran longer than**
     (shown unless Nothing), **Show the command**, and **While the app is closed ›** (the ntfy
     page, below). Nothing notifies for the pane on screen; questions always notify.
-  - **Running commands**: **Ask before running**.
-  - **Security**: **Lock with Face ID** (the device's own name for it) and **Confirm commands with
-    Face ID**.
-  - **Panes**: **Wrap long lines**, **Keys above the command line**, **Choose keys ›**.
+  - **Running commands**: **Ask before running** and **Confirm with Face ID** (needs App lock and
+    Ask before running).
+  - **Panes**: **Wrap long lines**, **Keys under the command line**, **Keys ›** (its keys under it).
   - **About**: the version and update, **Check now** / **Restart now**, **Check automatically**
-    and **What's New**.
+    and **What's new**.
+
+The lock screen shows Rift's mark, "Rift is locked", "Your tabs stay connected." and **Unlock
+with Face ID** (the device's own name for it).
 
 ## Connecting
 
@@ -396,33 +443,44 @@ against an older Rift the app hides what needs them.
   keyboard's ctrl/alt combinations that are keys, Escape and F-keys go to the pane as keys, and
   Tab / Shift+Tab too while a program runs or the line holds text (otherwise Tab moves the
   focus). Mapping: `src/keyboard.ts`.
-- **Keys** (Settings › Panes › Choose keys, or Edit keys at the end of the row): a preview, the row
-  (drag the ≡ handle to reorder; screen readers get Move up / Move down), and Add chips from a
-  catalogue (`src/controlKeys.ts`), each key a round cap with its icon or label; the default row
-  is Esc, Tab, Interrupt, ⌃, ↑, ↓, Return (New line is in Choose keys). A saved row matching an old default
-  (Interrupt, Esc, Tab, ⌃, ↑, ↓, or Esc, Tab, Interrupt, ⌃, ←, ↑, ↓, →, or the default with New line) moves to this default; other custom rows stay as set. Under a full-screen program the default row also has ← and → (a phone keyboard has no arrows); a custom row stays as set.
+- **The keys** (the Keys redesign board; `src/ui/ControlRow.tsx`): one strip for the command line
+  (shown by **⌨**) and a full-screen program alike, 88 pt high so the program keeps its size and
+  the screen does not move: the key block, two rows of 41 pt keys with 8 pt corners (three
+  columns for six keys, more when Settings › Keys holds more), the keyboard key always last (Hide
+  keyboard while it is up, else Show keyboard), and beside it the 132 x 88 arrow pad, ↑ above ← ↓
+  →. A held arrow repeats (after 400 ms, then every 80 ms) until the finger lifts, the touch is
+  cancelled, the keys go away or the app leaves the foreground; a screen reader's activation sends it once.
+- **Keys** (Settings › Panes › Choose keys, or **⌨** held on the command line; the New Settings
+  board): the header says how many of the block's 8 places are used (the keyboard key is one), a
+  preview of the key block and arrow pad, the block's keys (drag the ≡ grip to reorder, the shared
+  reorder row; − in red removes; screen readers get Move up / Move down / Remove), and Add a key,
+  a search field over the catalogue (`src/controlKeys.ts`) and a chip for each key not in the
+  block (the arrows are always on the pad and never listed). The default block is Esc, Tab, ⌃,
+  Return, Paste and the keyboard key (New line, Interrupt and the rest are in Add a key). A saved
+  list that is any earlier default (Esc, Tab, Interrupt, ⌃, ↑, ↓, Return; Interrupt, Esc, Tab, ⌃,
+  ↑, ↓; Esc, Tab, Interrupt, ⌃, ←, ↑, ↓, →; that with New line) moves to this default; a custom
+  list keeps every key, its arrows moving to the pad, so nobody loses a key.
   ⌃, ⌥ and ⇧ (Shift) are sticky for the
-  next key, whatever it is (`ctrl+enter`, `alt+left`, `ctrl+[` is esc, `ctrl+@` is ctrl+space);
+  next key, whatever it is (`ctrl+enter`, `alt+left`, `ctrl+[` is esc, `ctrl+@` is ctrl+space),
+  and stay lit (the accent, dark ink) until it, so ⌃ then C is one chord; a screen reader hears
+  them as selected and is told when one is held or let go;
   on a key the protocol has no name for the modifier is dropped and the plain key sent.
   **Paste** types the phone's clipboard: into the command line at the prompt, into the running
   program otherwise (feature `text`); in the message box an image or file on the clipboard waits
   above the field like Attach's (below). Two more catalogue keys are actions, not keys: **+tab** opens a new tab in the pane's window and
   **+pane** opens a pane beside this one (feature `open`; disabled on an older Rift), both starting in the
-  pane's folder; the app then shows the new pane in place of this one. The keys follow the Keys
-  board (KeysNormalized): 52 x 44 pt with 12 pt corners, each its own touch target, an 18 pt icon
-  from the one set for every symbol (arrows, ⌃ ⌥ ⇧, Paste, New pane; ⇧Tab leads with the shift icon)
-  and JetBrains Mono for words and chords (Esc, ⌃D); colour marks a state only (Interrupt's
-  warning, a held modifier's accent tint). On iOS Paste stays the system's paste control, given the
-  key's ground, text colour and corners (its glyph is the system's; it dims while the clipboard holds
-  nothing it takes). The row above the field
-  scrolls sideways (one direction, no bounce: a swipe on the keys never drags the page or the
-  keyboard), with Hide keyboard fixed at its right end; under a full-screen program it wraps.
+  pane's folder; the app then shows the new pane in place of this one. Each key draws an 18 pt icon
+  from the one set for every symbol (arrows, ⌃ ⌥ ⇧, Return, New pane, the keyboard; ⇧Tab leads with
+  the shift icon), JetBrains Mono for keys and chords (Esc, ⌃D) and Inter for the word Paste;
+  colour marks a state only (Interrupt's red, a held modifier lit in the accent). On iOS Paste
+  stays the system's paste control, given the key's ground, text colour and corners (its glyph is
+  the system's; it dims while the clipboard holds nothing it takes). The keys never scroll.
 - **Attach** (a sheet, from **+** in the message box; `attach`, logic in `src/pending.ts`): **Paste
   from clipboard** (text, an image or a file), **Photo library**, **Take a photo** and **File**
   (`src/pickFile.ts`; photos by `expo-image-picker`, `src/pickPhoto.ts`). On iOS the Paste row is
   the system's own paste control (`PasteButton` in modules/rift-keys, `labelled`: its icon and the
   system's word "Paste" across the row), so it reads the clipboard with no "Allow Paste" prompt;
-  elsewhere it is a button that reads the clipboard. Nothing pasted reaches the program before **Send**, by any route (Attach, the key rows' Paste, iOS's
+  elsewhere it is a button that reads the clipboard. Nothing pasted reaches the program before **Send**, by any route (Attach, the key block's Paste, iOS's
   paste control, a keyboard's Paste key). Short text goes into the message box at the cursor. An image, a
   file, or a text of more than 3 lines or over 4 KB goes in as a token at the cursor (`src/draftTokens.ts`):
   `[Image 1]`, `[File note.pdf]`, `[Text 12 lines]`, at most 4 in a box, and the user types around it, as in
@@ -433,11 +491,11 @@ against an older Rift the app hides what needs them.
   `[Image #N]` (15 s at most, 4 s with the pane's screen out of sight): Claude Code places the image where its
   cursor is once it has read it, 0.9 s for 10 MB on an idle computer and 3 s on a busy one. A long text pasted
   through the field itself (the phone's Paste menu, the keyboard's clipboard, a hardware ⌘V) becomes a token too, and
-  a hardware Ctrl+V in the box pastes the phone's clipboard like the row's Paste. A Send once begun
+  a hardware Ctrl+V in the box pastes the phone's clipboard like the key block's Paste. A Send once begun
   finishes without the screen, Return included, and a second one waits for it; during it only words added after
   the draft are taken, for the next message. The first failure stops: what went has left the box, the rest stays
-  in it with its items, and the message names what failed and why. The key row over the message box starts with
-  Paste where the computer takes images and a program runs. A full-screen program with its own key row (vim, htop) has no box of its own: its Paste
+  in it with its items, and the message names what failed and why. The key block has
+  Paste where the computer takes images and a program runs (at its end when Settings › Keys lacks it). A full-screen program with its own keys (vim, htop) has no box of its own: its Paste
   opens the pane's message box under the screen until the box is sent or emptied. The items live in memory, as
   drafts do: neither survives a relaunch.
   The sheet returns to the pane it came from with the draft kept; Close, or the sheet's swipe, adds
@@ -446,7 +504,7 @@ against an older Rift the app hides what needs them.
   camera first (iOS refuses the launch without it) and says how to allow it when refused; the usage text (`NSCameraUsageDescription`, set on the
   `expo-camera` and `expo-image-picker` plugins alike) names both uses, scanning the pairing code
   and taking a photo, and the image-picker plugin no longer blocks the Android `CAMERA`
-  permission the scanner needs. The full-screen program's key row keeps its Paste, which sends an
+  permission the scanner needs. The full-screen program's key block keeps its Paste, which sends an
   image at once.
 - **Block actions** (the block sheet, a tap on a card): Run again (through the
   Confirm sheet when Ask before running is on), Edit (into the command line, asking
@@ -636,13 +694,28 @@ one-day minimum release age by exact version only.
   Settings (`settings`), a computer's page (`computer`), While the app is closed
   (`settings-ntfy`), Paste a pairing link (`add`), Pair a computer (`scan`), pairing confirmation
   (`pair`, also the target of `rift-remote://pair` links), Host (`host/[key]`, a computer's tabs
-  and bell; opened after pairing, not from Portals), Pane with its command line and full-screen view
+  and bell; a cold start can come back to it. Pairing lands on Portals, on the new computer's card), Pane with its command line and full-screen view
   (`host/[key]/pane/[id]`), Answer (`answer`), the Tabs and Panes pages (`tabs`, `panes`: full-screen modals),
   Confirm sheet, block sheet (`block`), chip menus (`chips`, `diff`), Keys (`control-keys`);
-  `src/ui/LockGate.tsx` — the lock screen and privacy cover. On the web a sheet is a plain page: it gets a Close button and
-  Escape (`src/ui/SheetClose.tsx`), and the folder button's choice of menus is a strip above
+  `src/ui/LockGate.tsx` — the lock screen and privacy cover. On the web a sheet is a plain page: its
+  header's ✕ and Escape close it (`src/ui/SheetHeader.tsx`), and the folder button's choice of menus is a strip above
   the command line (react-native-web's `Alert` shows nothing).
-- `src/ui/palette.ts` — the DESIGN.md tokens and the text/background pairs the app uses, each
-  held to 4.5:1 by `test/contrast.test.ts`.
+- Colours come from a theme at runtime. `src/ui/palette.ts` (`paletteFrom`) turns a desktop
+  theme's tokens into the app's palette (the token names one to one, tints and raised greys
+  derived from them) and lifts any text colour that falls short of 4.5:1 on a ground it is drawn
+  on (`TEXT_ON`, `TINTED_TEXT`; `test/contrast.test.ts` runs every builtin theme; Dark Default
+  needs no lift). The root layout provides the palette Settings › Appearance resolves to
+  (`src/appearance.ts`, `src/ui/useAppPalette.ts`): with **Same as the computer**, the theme the
+  computer in view sent (welcome and `theme`, feature `theme`; the pane's or host page's
+  computer, elsewhere the last one opened), else the last one shown, else Dark Default; each
+  computer's theme and the last one are kept in the keychain (`rift.theme.<key>`,
+  `rift.theme.last`). Components read colours with `useColors()` and make their styles with
+  `const useStyles = makeStyles((colors) => ({ … }))` / `const styles = useStyles()`
+  (`src/ui/theme.ts`; `fromPalette` for a map of colours by tone); nothing reads a colour at
+  module load. The camera page and the splash keep Dark Default. `src/themes.data.ts` is the
+  desktop's builtin themes, generated by `RIFT_WRITE_THEMES=1 cargo test -p rift-terminal
+  themes_data` (that test fails when the copy is out of date). `app.json`'s
+  `userInterfaceStyle` is `automatic` so that **Match this phone** can see the system's light or
+  dark (a native build); text fields take the palette's keyboard appearance.
 - The device key, paired desktops and settings live in the iOS keychain / Android keystore
   (expo-secure-store); on web they are kept in memory only.

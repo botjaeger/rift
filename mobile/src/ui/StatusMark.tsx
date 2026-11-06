@@ -1,18 +1,20 @@
 import { useEffect, useState } from "react";
-import { AccessibilityInfo, Animated, Easing, StyleSheet, View, type StyleProp, type ViewStyle } from "react-native";
+import { AccessibilityInfo, Animated, Easing, View, type StyleProp, type ViewStyle } from "react-native";
 import type { TabKind } from "@/now";
-import { colors } from "./theme";
+import type { ColorName } from "./palette";
+import { makeStyles, useColors } from "./theme";
 
 /** A state's colour, as the desktop's tab marks: needs you warning, failed error, working accent, idle success. */
-export const KIND_COLOR: Record<TabKind, string> = {
-  needs: colors.warning,
-  working: colors.accent,
-  failed: colors.error,
-  idle: colors.success,
+export const KIND_COLOR: Record<TabKind, ColorName> = {
+  needs: "warning",
+  working: "accent",
+  failed: "error",
+  idle: "success",
 };
 
 /** An arc turning once a second (still under Reduce Motion): something runs. */
 export function Spinner({ size = 14, style }: { size?: number; style?: StyleProp<ViewStyle> }) {
+  const styles = useStyles();
   const [turn] = useState(() => new Animated.Value(0));
   // made once: a new interpolation on each render re-attaches the native animation
   const [rotate] = useState(() => turn.interpolate({ inputRange: [0, 1], outputRange: ["0deg", "360deg"] }));
@@ -45,19 +47,20 @@ export function Spinner({ size = 14, style }: { size?: number; style?: StyleProp
  * dot in its state's colour, ringed while it needs you. Decorative: rows say the state in words.
  */
 export function StatusMark({ kind, size = 8 }: { kind: TabKind; size?: number }) {
+  const colors = useColors();
   if (kind === "working") return <Spinner size={size + 5} />;
   return (
     <View
       accessibilityElementsHidden
       importantForAccessibility="no-hide-descendants"
       style={[
-        { width: size, height: size, borderRadius: size / 2, backgroundColor: KIND_COLOR[kind] },
+        { width: size, height: size, borderRadius: size / 2, backgroundColor: colors[KIND_COLOR[kind]] },
         kind === "needs" && { borderWidth: 0, shadowColor: colors.warning, shadowOpacity: 0.6, shadowRadius: 3, shadowOffset: { width: 0, height: 0 } },
       ]}
     />
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = makeStyles((colors) => ({
   arc: { borderColor: colors.accent, borderLeftColor: "transparent" },
-});
+}));

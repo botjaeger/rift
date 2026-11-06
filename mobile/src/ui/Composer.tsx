@@ -1,14 +1,13 @@
 import { useActionScope } from "@/ui/useActionScope";
 import * as Clipboard from "expo-clipboard";
 import { useRouter } from "expo-router";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   AccessibilityInfo,
   Keyboard,
   Platform,
   Pressable,
   ScrollView,
-  StyleSheet,
   Text,
   TextInput,
   useWindowDimensions,
@@ -23,11 +22,12 @@ import { authenticate, fleet, useApp } from "@/runtime";
 import { AT_PROMPT } from "@/upload";
 import { cursorOutOfToken, insertedBy, pastesAsToken, spokenLabel, staleField } from "@/draftTokens";
 import { isImageItem, nativeAttached, outHead, outParts, UPLOAD_GAP_MS, waitForImage, pending, PENDING_FULL, plainDraft, readClipboard, sendParts, type AttachRules, type Attached } from "@/pending";
-import { chipRowMode, completionRows, NO_COMPLETIONS, NO_COMPLETIONS_PROGRAM } from "@/chips";
+import { chipRowMode, completionRows, NO_COMPLETIONS, NO_COMPLETIONS_PROGRAM, returnTakes } from "@/chips";
 import { boxImages, commandNote, fieldKey, isOneLineRefusal, MAX_FIELD_PASTE_BYTES, messageLines, messagePlaceholder, partSend, programSend } from "@/paneView";
 import type { ChipItem, ChipOpen } from "@/promptChips";
-import { messageBoxRow } from "@/controlKeys";
+import { rowWithPaste } from "@/controlKeys";
 import { showsKeyRow } from "@/terminal";
+import { Button } from "./Button";
 import { ChipRow } from "./ChipRow";
 import { ControlRow, NO_STICKY, type Sticky } from "./ControlRow";
 import { usePending } from "./usePending";
@@ -35,11 +35,11 @@ import { insertedChar, plainPunctuation } from "./format";
 import { Icon } from "./Icon";
 import { ErrorText } from "./Notice";
 import { useOpenShell } from "./useOpenShell";
-import { colors, mono, TOUCH, ui } from "./theme";
-import { toggleA11y } from "./toggle";
+import { mono, TOUCH, ui, makeStyles, useColors } from "./theme";
 
-/** Suggestions shown above the command line (the P3 Pane board). */
+/** Suggestions shown under the command line's keys (the command line redesign board). */
 const MAX_SUGGESTIONS = 6;
+type Field = TextInput;
 /** How long after a correction the field may still report a key made from its old text (a held Backspace). */
 const STALE_FIELD_MS = 400;
 const clock = () => Date.now();
@@ -49,13 +49,17 @@ const PLACE_HOLD_MS = 150;
 const COMPLETE_DELAY_MS = 200;
 
 /**
- * The pane's command line (operate permission only; the P3 Pane board): one row above the field
- * that is the prompt chips while the field is empty (the desktop's, in its order, as many as fit and
- * "+N" for the rest; each opens its menu) and the completions while the user types (the desktop's, feature `complete`, and this
- * pane's history, typed part bright, the rest dim, with where each comes from); the round field
- * with its run button; and, left of it, + (the Attach sheet: paste, photo, camera, file) and ⌃, which shows the control-key row (Settings › Keys) under the field,
- * so the field stays in sight above it while the keyboard is up (Run runs; through the Confirm sheet only with Settings › Ask before
- * running on). While a program runs (`running`) the field talks to it instead: Send sends the
+ * The pane's command line (operate permission only; the command line redesign board), top to
+ * bottom: the context above the field (the desktop's prompt chips, in its order, as many as fit and
+ * "+N" for the rest; folder and branch are chips that open their menus, a timer is plain text);
+ * one line, one job each side: + (the Attach sheet: paste, photo, camera, file), the round field
+ * with its run button, and ⌨, which shows the keys (the key block and arrow pad, ControlRow.tsx;
+ * held, it opens Settings › Keys) under the field, so the field stays in sight above them while the
+ * keyboard is up; then the completions, closest to the keyboard (the desktop's, feature `complete`,
+ * and this pane's history, typed part bright, the rest dim, with where each comes from), the first
+ * marked: the phone keyboard's Return takes it at a prompt. Run runs; through the Confirm sheet only
+ * with Settings › Ask before running on. While a program runs (`running`) the line changes: Stop ⌃C
+ * comes first and the field says who it types to; Send sends the
  * line as text, then Return as a key (feature `text`), with no Confirm sheet. The phone keyboard's Return is a new line; only Run or Send sends. A hardware
  * keyboard's Return sends and Shift+Return is a new line; its ctrl/alt combinations, Escape, Tab and F-keys in the field go to the pane as keys.
  * What Attach or Paste brings waits in the field: an image, a file or a long text is a token at the cursor
@@ -108,6 +112,8 @@ export function Composer({
   /** The computer is not connected (PaneLoading board): the field is off and says it waits. */
   waiting?: boolean;
 }) {
+  const colors = useColors();
+  const styles = useStyles();
   const router = useRouter();
   const s = useApp();
   const { width: windowWidth } = useWindowDimensions();
@@ -124,7 +130,7 @@ export function Composer({
     error ?? (queued.failure || null) ?? (offlineTried && !online ? running !== null ? "Not connected. The message stays here; Send sends it once the computer is back." : "Not connected. The command stays here; Run runs it once the computer is back." : null);
   // a command on its way: a ref, not state, so a second Return before the re-render sends nothing
   const sending = useRef(false);
-  // ⌃: the key row in place of the suggestions; Settings › Show keys opens it to start with
+  // ⌨: the keys under the field; Settings › Keys on the command line opens them to start with
   const [keys, setKeys] = useState(() => showsKeyRow(s.settings.showKeys, false));
   const [completed, setCompleted] = useState<{ draft: string; msg: CompleteMsg } | null>(null);
   // the row leads with Hide keyboard while the keyboard is up
@@ -176,6 +182,14 @@ export function Composer({
   const corrected = useRef<{ typed: string; to: string; at: number; cursor?: number } | null>(null);
   const onChange = (typed: string) => {
     const text = plainPunctuation(typed);
+    // at a prompt the phone keyboard's Return takes the first completion (marked): a command is one line
+    const taken = running === null && !sticky.ctrl && !sticky.alt && !sticky.shift ? returnTakes(draft, text, rows[0]?.text) : null;
+    if (taken !== null) {
+      setError(null);
+      fleet.setDraft(hostKey, paneId, taken);
+      moveCursor(taken.length);
+      return;
+    }
     if (sticky.ctrl || sticky.alt || sticky.shift) {
       setSticky(NO_STICKY);
       const ch = insertedChar(draft, text);
@@ -513,13 +527,56 @@ export function Composer({
   // the computer's answer for this draft (or the last one, while the next is on its way), then the pane's history
   const typing = chipRowMode(draft) === "completions" && !agent;
   const answer = complete && online ? completed : null;
-  const rows = useMemo(
-    () => (typing ? completionRows(draft, answer?.msg.items ?? [], answer?.msg.history ?? [], recentKey === "" ? [] : recentKey.split("\n"), MAX_SUGGESTIONS) : []),
-    [typing, draft, answer, recentKey],
-  );
+  // (the React Compiler memoizes it; the field's Return reads it too)
+  const rows = typing ? completionRows(draft, answer?.msg.items ?? [], answer?.msg.history ?? [], recentKey === "" ? [] : recentKey.split("\n"), MAX_SUGGESTIONS) : [];
   // "No completions" only once the computer has answered for this very draft
   const settled = !(complete && online) || completed?.draft === draft;
   const hasChips = chips.length > 0;
+  // the field, for the keyboard key that opens the keyboard
+  const input = useRef<Field>(null);
+  const completions = typing ? (
+    <ScrollView
+      // keyed by the first completion: a new list opens at its start, not where the last one was scrolled
+      key={`completions:${rows[0]?.text}`}
+      horizontal
+      showsHorizontalScrollIndicator={false}
+      style={styles.chipStrip}
+      contentContainerStyle={styles.chips}
+      keyboardShouldPersistTaps="always"
+      accessibilityRole="toolbar"
+      accessibilityLabel="Completions"
+    >
+      {rows.length === 0 ? (
+        settled ? (
+          <Text style={styles.none} accessibilityLiveRegion="polite">
+            {running !== null ? NO_COMPLETIONS_PROGRAM : NO_COMPLETIONS}
+          </Text>
+        ) : null
+      ) : (
+        rows.map((r, i) => {
+          // the first is marked: at a prompt the keyboard's Return takes it
+          const first = i === 0 && running === null;
+          return (
+            <Pressable
+              key={r.text}
+              accessibilityRole="button"
+              accessibilityLabel={`${r.text}, ${r.source}${first ? ", Return takes it" : ""}`}
+              accessibilityHint="Puts it in the command line"
+              onPress={() => fleet.setDraft(hostKey, paneId, r.text)}
+              hitSlop={{ top: 6, bottom: 6 }}
+              style={({ pressed }) => [styles.chip, first ? styles.firstSuggestion : styles.suggestion, pressed && styles.pressed]}
+            >
+              <Text style={styles.chipText} numberOfLines={1}>
+                <Text style={styles.typed}>{r.typed}</Text>
+                <Text style={first ? styles.typed : styles.rest}>{r.rest}</Text>
+              </Text>
+              <Text style={styles.source}>{r.source}</Text>
+            </Pressable>
+          );
+        })
+      )}
+    </ScrollView>
+  ) : null;
 
   return (
     <KeyCaptureView
@@ -529,47 +586,7 @@ export function Composer({
       onKey={onShortcut}
       style={styles.wrap}
     >
-      {typing ? (
-        <ScrollView
-          // keyed by the first completion: a new list opens at its start, not where the last one was scrolled
-          key={`completions:${rows[0]?.text}`}
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          style={styles.chipStrip}
-          contentContainerStyle={styles.chips}
-          keyboardShouldPersistTaps="always"
-          accessibilityRole="toolbar"
-          accessibilityLabel="Completions"
-        >
-          {rows.length === 0 ? (
-            settled ? (
-              <Text style={styles.none} accessibilityLiveRegion="polite">
-                {running !== null ? NO_COMPLETIONS_PROGRAM : NO_COMPLETIONS}
-              </Text>
-            ) : null
-          ) : (
-            rows.map((r) => (
-              <Pressable
-                key={r.text}
-                accessibilityRole="button"
-                accessibilityLabel={`${r.text}, ${r.source}`}
-                accessibilityHint="Puts it in the command line"
-                onPress={() => fleet.setDraft(hostKey, paneId, r.text)}
-                hitSlop={{ top: 6, bottom: 6 }}
-                style={({ pressed }) => [styles.chip, styles.suggestion, pressed && styles.pressed]}
-              >
-                <Text style={styles.chipText} numberOfLines={1}>
-                  <Text style={styles.typed}>{r.typed}</Text>
-                  <Text style={styles.rest}>{r.rest}</Text>
-                </Text>
-                <Text style={styles.source}>{r.source}</Text>
-              </Pressable>
-            ))
-          )}
-        </ScrollView>
-      ) : hasChips && !compact && draft === "" ? (
-        <ChipRow items={chips} onOpen={(c) => c.opens && openMenu(c.opens)} onMore={openAll} />
-      ) : null}
+      {hasChips && !compact ? <ChipRow items={chips} onOpen={(c) => c.opens && openMenu(c.opens)} onMore={openAll} /> : null}
       {shownError ? <ErrorText>{shownError}</ErrorText> : null}
       {note && !shownError ? <Text style={styles.none} accessibilityLiveRegion="polite">{note}</Text> : null}
       {queued.walking ? (
@@ -578,6 +595,18 @@ export function Composer({
         </Text>
       ) : null}
       <View style={[styles.inputRow, waiting && styles.waiting]}>
+        {running !== null ? (
+          // a running program changes the line: Stop comes first
+          <Button
+            label="Stop ⌃C"
+            variant="destructive"
+            accessibilityLabel="Stop, sends control C"
+            accessibilityHint={`Stops ${program}`}
+            disabled={waiting || !online}
+            onPress={() => void sendKeys(["ctrl+c"])}
+            style={styles.stop}
+          />
+        ) : null}
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Attach"
@@ -589,18 +618,10 @@ export function Composer({
         >
           <Icon name="add" size={20} color={colors.text} />
         </Pressable>
-        <Pressable
-          {...toggleA11y(keys, waiting)}
-          disabled={waiting}
-          accessibilityLabel="Control keys"
-          accessibilityHint="Shows the control keys above the command line"
-          onPress={() => setKeys((k) => !k)}
-          style={({ pressed }) => [styles.round, keys && styles.roundOn, pressed && styles.pressed]}
-        >
-          <Icon name="control" size={18} weight="medium" color={keys ? colors.accent : colors.text} />
-        </Pressable>
         <View style={styles.field}>
           <TextInput
+            ref={input}
+            keyboardAppearance={colors.dark ? "dark" : "light"}
             value={draft}
             onChangeText={onChange}
             multiline
@@ -624,7 +645,7 @@ export function Composer({
                   ? `Type a letter for ${stickyName}+letter`
                   : running !== null
                     ? messagePlaceholder(program, windowWidth)
-                    : "Command"
+                    : "Run a command"
             }
             placeholderTextColor={colors.textMuted}
             autoCapitalize="none"
@@ -650,13 +671,28 @@ export function Composer({
             hitSlop={4}
             style={({ pressed }) => [styles.send, canRun && styles.sendOn, pressed && styles.pressed]}
           >
-            <Icon name="run" size={18} color={colors.bg} />
+            <Icon name="run" size={18} color={colors.onAccent} />
           </Pressable>
         </View>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Keys"
+          accessibilityHint="Shows the keys under the command line. Hold to choose them in Settings"
+          accessibilityState={{ expanded: keys, disabled: waiting }}
+          disabled={waiting}
+          onPress={() => setKeys((k) => !k)}
+          onLongPress={() => {
+            Keyboard.dismiss();
+            router.push("/control-keys");
+          }}
+          style={({ pressed }) => [styles.round, keys && styles.roundOn, pressed && styles.pressed]}
+        >
+          <Icon name="keyboard" size={20} color={keys ? colors.accent : colors.text} />
+        </Pressable>
       </View>
       {keys ? (
         <ControlRow
-          ids={messageBoxRow(s.settings.controlKeys, canUpload && running !== null)}
+          ids={rowWithPaste(s.settings.controlKeys, canUpload && running !== null)}
           sticky={sticky}
           disabled={!online}
           onSticky={setSticky}
@@ -672,16 +708,17 @@ export function Composer({
                 }
               : undefined
           }
-          onEdit={() => router.push("/control-keys")}
           onHideKeyboard={keyboardUp ? () => Keyboard.dismiss() : undefined}
+          onShowKeyboard={keyboardUp || waiting ? undefined : () => input.current?.focus()}
         />
       ) : null}
+      {completions}
     </KeyCaptureView>
   );
 }
 
 // The Pane board's command line: chrome ground, 8 / 12 pt padding, 8 pt between rows.
-const styles = StyleSheet.create({
+const useStyles = makeStyles((colors) => ({
   wrap: {
     backgroundColor: colors.chrome,
     borderTopWidth: 1,
@@ -692,13 +729,14 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   pressed: { opacity: 0.7 },
-  // the completions' strip reaches 6 pt past the 32 pt chips (a scroll view takes no touch outside it): a 44 pt touch
+  // the completions' strip reaches 6 pt past the 32 pt pills (a scroll view takes no touch outside it): a 44 pt touch
   chipStrip: { marginVertical: -6, flexGrow: 0 },
   chips: { gap: 6, paddingVertical: 6 },
-  // a completion: 32 pt, 8 pt radius, mono 12, outlined
-  chip: { height: 32, paddingHorizontal: 10, borderRadius: 8, flexDirection: "row", alignItems: "center", gap: 5, maxWidth: 260 },
-  suggestion: { borderWidth: 1, borderColor: colors.glassRim },
-  chipText: { fontFamily: mono, color: colors.text, fontSize: 12, flexShrink: 1 },
+  // a completion: a 32 pt pill, mono 13, outlined; the first marked in the accent (Return takes it)
+  chip: { height: 32, paddingHorizontal: 12, borderRadius: 16, flexDirection: "row", alignItems: "center", gap: 6, maxWidth: 260 },
+  suggestion: { borderWidth: 1, borderColor: colors.hairline, backgroundColor: colors.tints.chipFill },
+  firstSuggestion: { borderWidth: 1, borderColor: `${colors.accent}55`, backgroundColor: colors.tints.accentBadge },
+  chipText: { fontFamily: mono, color: colors.text, fontSize: 13, flexShrink: 1 },
   // a completion: what was typed bright, the rest dim, the source small after it
   typed: { color: colors.textBright },
   rest: { color: colors.textMuted },
@@ -718,7 +756,10 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  roundOn: { borderColor: colors.accent },
+  // ⌨ while the keys show: the accent tint and rim
+  roundOn: { borderColor: colors.accent, backgroundColor: colors.tints.accentBadge },
+  // Stop ⌃C: as tall as the field, before it
+  stop: { minHeight: TOUCH, paddingHorizontal: 14 },
   field: {
     flex: 1,
     minWidth: 0,
@@ -735,8 +776,9 @@ const styles = StyleSheet.create({
   },
   // grows with the message, up to five lines, then scrolls
   input: { flex: 1, minWidth: 0, minHeight: 36, maxHeight: 108, paddingTop: 9, paddingBottom: 9, paddingHorizontal: 0, color: colors.textBright, fontFamily: mono, fontSize: 14, lineHeight: 18, textAlignVertical: "top" },
-  inputEmpty: { height: 36 },
+  // empty, the field shows its placeholder: words, so Inter (a command typed in it is mono)
+  inputEmpty: { height: 36, fontFamily: ui(400) },
   // the board dims the run button to 40 % while the field is empty
   send: { width: 36, height: 36, borderRadius: 18, backgroundColor: `${colors.accent}66`, alignItems: "center", justifyContent: "center" },
   sendOn: { backgroundColor: colors.accent },
-});
+}));

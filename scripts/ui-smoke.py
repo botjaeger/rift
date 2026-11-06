@@ -5192,6 +5192,7 @@ cp2.mkdir(parents=True, exist_ok=True)
     "trap 'printf \"\\033[?1049l\"; exit' INT\n"
     "trap '' WINCH\n"
     "printf '\\033[?1049hDEAF'\n"
+    "touch \"$1\"\n"
     "while :; do sleep 0.05; done\n")
 (cp2 / "flood.sh").write_text(
     "trap 'printf \"\\033[?1049l\"; exit' INT\n"
@@ -5232,7 +5233,9 @@ remote_run("capture", cap_config, [
     # a tap has no cell to land on
     *rin("capture", "tap.json", '{"cmd":"remote-mouse","pane":PANE,"col":1,"row":1}'),
     "key ctrl+c", "wait 500",
-    f"type sh {shlex.quote(str(cp2 / 'deaf.sh'))}\\n", "wait 900",
+    # on a loaded machine the last program may still hold the screen: fit once this one draws
+    f"type sh {shlex.quote(str(cp2 / 'deaf.sh'))} {shlex.quote(str(cp2 / 'deaf.ready'))}\\n",
+    f"wait_file {cp2 / 'deaf.ready'} 15000", "wait 300",
     "focus on", *rin("capture", "fit2.json", '{"cmd":"remote-fit","pane":PANE,"cols":40,"rows":12}'),
     f"dump {cp2}/deaf0.txt", "wait 3000", "focus on", f"dump {cp2}/deaf1.txt", *cap_shot("deaf.json"),
     "wait 2500", "focus on", f"dump {cp2}/deaf2.txt",

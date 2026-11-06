@@ -1,66 +1,102 @@
 import type { ReactNode } from "react";
-import { Pressable, StyleSheet, Text, type StyleProp, type ViewStyle } from "react-native";
-import { colors, radius, TOUCH, ui } from "./theme";
+import { Pressable, Text, type StyleProp, type ViewStyle } from "react-native";
+import { radius, TOUCH, ui, makeStyles } from "./theme";
+import { toggleA11y } from "./toggle";
+
+/**
+ * The Standard board's four buttons: `primary` (accent fill, the one action a page or sheet asks
+ * for), `secondary` (outlined), `text` (accent words only: Paste a pairing link) and `destructive`
+ * (outlined in the error red: Close tab, Unpair). Orange is never a button's colour: it means
+ * "needs you".
+ */
+export type ButtonVariant = "primary" | "secondary" | "text" | "destructive";
+
+/** regular: 44 pt (pages, sheets, cards); small: 32 pt with a 44 pt hit area (Copy error, Run again). */
+export type ButtonSize = "regular" | "small";
+
+/** The hit slop that takes a small button's 32 pt to the 44 pt touch target. */
+export const SMALL_SLOP = (TOUCH - 32) / 2;
 
 interface Props {
   label: string;
   onPress: () => void;
-  /** primary: accent fill; secondary: outlined; link: accent text only (Paste a pairing link). */
-  variant?: "primary" | "secondary" | "link";
-  /** large: 50 pt (page actions); medium: 44 pt; small: 40 pt (inside a card). */
-  size?: "large" | "medium" | "small";
+  variant?: ButtonVariant;
+  size?: ButtonSize;
   icon?: ReactNode;
   disabled?: boolean;
+  /** What a screen reader says, when it says more than the label ("Stop, sends control C"). */
+  accessibilityLabel?: string;
   accessibilityHint?: string;
+  /** A toggle (Notify when done): its state is spoken, and on draws the accent tint. */
+  pressed?: boolean;
+  /** Lines the label may take; given, a longer label shrinks to fit (an answer's choices). */
+  numberOfLines?: number;
   style?: StyleProp<ViewStyle>;
 }
 
-export function Button({ label, onPress, variant = "secondary", size = "medium", icon, disabled, accessibilityHint, style }: Props) {
-  const primary = variant === "primary";
-  const link = variant === "link";
+export function Button({
+  label,
+  onPress,
+  variant = "secondary",
+  size = "regular",
+  icon,
+  disabled,
+  accessibilityLabel,
+  accessibilityHint,
+  pressed: toggle,
+  numberOfLines,
+  style,
+}: Props) {
+  const styles = useStyles();
+  const small = size === "small";
   return (
     <Pressable
-      accessibilityRole="button"
-      accessibilityLabel={label}
+      {...(toggle === undefined
+        ? { accessibilityRole: "button" as const, accessibilityState: { disabled: !!disabled } }
+        : toggleA11y(toggle, !!disabled))}
+      accessibilityLabel={accessibilityLabel ?? label}
       accessibilityHint={accessibilityHint}
-      accessibilityState={{ disabled: !!disabled }}
       disabled={disabled}
       onPress={onPress}
+      hitSlop={small ? { top: SMALL_SLOP, bottom: SMALL_SLOP } : undefined}
       style={({ pressed }) => [
         styles.base,
-        styles[size],
-        primary ? styles.primary : link ? null : styles.secondary,
+        small ? styles.small : styles.regular,
+        styles[variant],
+        toggle && styles.on,
         pressed && styles.pressed,
         disabled && styles.disabled,
         style,
       ]}
     >
       {icon}
-      <Text style={[styles.label, styles[`${size}Label`], primary && styles.primaryLabel, primary && size === "large" && styles.largePrimaryLabel, link && styles.linkLabel]}>{label}</Text>
+      <Text
+        style={[styles.label, small && styles.smallLabel, styles[`${variant}Label`]]}
+        numberOfLines={numberOfLines}
+        adjustsFontSizeToFit={numberOfLines !== undefined}
+        minimumFontScale={0.75}
+      >
+        {label}
+      </Text>
     </Pressable>
   );
 }
 
-const styles = StyleSheet.create({
-  base: {
-    paddingHorizontal: 16,
-    flexDirection: "row",
-    gap: 8,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  large: { minHeight: 50, borderRadius: radius.button },
-  medium: { minHeight: TOUCH, borderRadius: radius.button },
-  small: { minHeight: 40, paddingHorizontal: 10, borderRadius: radius.small },
+const useStyles = makeStyles((colors) => ({
+  base: { flexDirection: "row", gap: 8, alignItems: "center", justifyContent: "center", borderRadius: radius.button },
+  regular: { minHeight: TOUCH, paddingHorizontal: 20 },
+  small: { minHeight: 32, paddingHorizontal: 12, gap: 6 },
   primary: { backgroundColor: colors.accent },
   secondary: { borderWidth: 1, borderColor: colors.borderStrong },
+  text: {},
+  destructive: { borderWidth: 1, borderColor: `${colors.error}66` },
+  on: { backgroundColor: colors.tints.accentBadge, borderColor: `${colors.accent}33` },
   pressed: { opacity: 0.75 },
   disabled: { opacity: 0.45 },
-  label: { color: colors.text, textAlign: "center" },
-  largeLabel: { fontFamily: ui(400), fontSize: 15 },
-  mediumLabel: { fontFamily: ui(400), fontSize: 15 },
-  smallLabel: { fontFamily: ui(400), fontSize: 14 },
-  primaryLabel: { fontFamily: ui(600), color: colors.bg },
-  largePrimaryLabel: { fontFamily: ui(400), fontSize: 16 },
-  linkLabel: { color: colors.accent },
-});
+  label: { fontFamily: ui(600), color: colors.text, fontSize: 15, textAlign: "center", flexShrink: 1 },
+  smallLabel: { fontFamily: ui(500), fontSize: 13 },
+  primaryLabel: { color: colors.onAccent },
+  secondaryLabel: {},
+  textLabel: { color: colors.accent },
+  destructiveLabel: { color: colors.error },
+}));

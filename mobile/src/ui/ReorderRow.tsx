@@ -4,7 +4,7 @@ import { Animated, type AccessibilityActionEvent } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { dragLift } from "@/haptics";
 import { shiftOf, slotAt, stepTo } from "@/reorder";
-import { colors } from "./theme";
+import { useColors } from "./theme";
 
 /** How long a press holds before the row lifts (the platform's long press). */
 const LIFT_MS = 400;
@@ -123,6 +123,7 @@ interface Props {
  * once this pan activates (after the long press) it still prevents the scroll view's.
  */
 export function ReorderRow(props: Props) {
+  const colors = useColors();
   const [row] = useState(() => makeRow(props));
   useEffect(() => {
     row.update(props);

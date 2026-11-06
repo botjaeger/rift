@@ -186,7 +186,7 @@ describe("parseTable", () => {
 describe("the block sheet", () => {
   it("names the status in its pill", () => {
     expect(sheetChip(block({ state: "running", exit: null, duration_ms: 134000 }))).toEqual({ text: "● Running 2:14", tone: "running" });
-    expect(sheetChip(block({ exit: 127 }))).toEqual({ text: "✕ Failed · exit 127", tone: "failed" });
+    expect(sheetChip(block({ exit: 127 }))).toEqual({ text: "✕ Failed with 127", tone: "failed" });
     expect(sheetChip(block())).toEqual({ text: "✓ Succeeded", tone: "ok" });
     expect(sheetChip(block({ exit: null }))).toEqual({ text: "Finished", tone: "done" });
   });
@@ -200,7 +200,7 @@ describe("the block sheet", () => {
 describe("the agent's question card", () => {
   const w = waiting(["Yes", "Yes, allow all edits during this session (shift+tab)", "No, and tell Claude what to do differently (esc)"]);
   it("labels the answers as the board does", () => {
-    expect(w.choices.map((_, i) => answerLabel(w, i))).toEqual(["Yes", "Yes, this session", "No…"]);
+    expect(w.choices.map((_, i) => answerLabel(w, i))).toEqual(["Yes", "Yes, this session", "No, explain"]);
     expect(answerLabel(waiting(["Allow once", "Yes, and don't ask again for npm", "No"]), 1)).toBe("Yes, always");
     expect(answerLabel(waiting(["Bash(aws:*)", "Bash(curl:*)"]), 1)).toBe("Bash(curl:*)");
     expect(answerLabel(waiting(["Apply the migration to the production database now"]), 0)).toBe("Apply the migration to…");
@@ -352,10 +352,14 @@ describe("the command line while a program runs", () => {
 });
 
 describe("messagePlaceholder", () => {
-  it("names the program only where it fits on one line", () => {
-    expect(messagePlaceholder("claude", 390)).toBe("Message for claude");
-    expect(messagePlaceholder("claude", 320)).toBe("Message");
-    expect(messagePlaceholder("a-program-with-a-long-name", 402)).toBe("Message");
+  it("says who the field types to, as far as it fits on one line", () => {
+    expect(messagePlaceholder("claude", 393)).toBe("Type to claude");
+    expect(messagePlaceholder("npm", 375)).toBe("Type to npm");
+    // narrower: the program's name alone, then no name
+    expect(messagePlaceholder("claude", 340)).toBe("claude");
+    expect(messagePlaceholder("claude", 300)).toBe("Type here");
+    expect(messagePlaceholder("a-program-with-a-long-name", 402)).toBe("Type here");
+    expect(messagePlaceholder("", 600)).toBe("Type here");
   });
 });
 

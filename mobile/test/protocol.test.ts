@@ -49,11 +49,12 @@ describe("server fixtures", () => {
       "screen",
       "screen_end",
       "snapshot",
+      "theme",
       "topology",
       "update",
       "welcome",
     ]);
-    expect(server).toHaveLength(33);
+    expect(server).toHaveLength(35);
   });
 
   it.each(server.map((f) => [f.name, f.json] as const))("decodes %s", (_name, json) => {
@@ -352,6 +353,35 @@ describe("isKeyName (the key grammar)", () => {
 
 describe("decodeServer Phase 3", () => {
   const screen = server.find((f) => f.name === "screen.json")!.json as Record<string, unknown>;
+
+  it("a welcome carries the computer's theme; a malformed one is left out, the welcome kept", () => {
+    const w = server.find((f) => f.name === "welcome-theme.json")!.json as Record<string, unknown>;
+    const theme = w.theme as Record<string, unknown>;
+    expect(decodeServer(w)).toMatchObject({ theme: { name: "Dark Default", dark: true, bg: "050505" } });
+    for (const bad of [
+      { ...theme, bg: "#050505" },
+      { ...theme, accent: "19aad" },
+      { ...theme, ansi: (theme.ansi as string[]).slice(0, 15) },
+      { ...theme, name: "x".repeat(65) },
+      { ...theme, name: "" },
+      { ...theme, dark: "yes" },
+      "Dracula",
+    ]) {
+      const d = decodeServer({ ...w, theme: bad });
+      expect(d, JSON.stringify(bad).slice(0, 60)).not.toBeNull();
+      expect(d).not.toHaveProperty("theme");
+    }
+    // an older computer: no theme at all
+    expect(decodeServer(server.find((f) => f.name === "welcome.json")!.json)).not.toHaveProperty("theme");
+  });
+
+  it("a theme message needs a whole theme", () => {
+    const t = server.find((f) => f.name === "theme.json")!.json as { theme: Record<string, unknown> };
+    expect(decodeServer(t)).toEqual(t);
+    expect(decodeServer({ t: "theme" })).toBeNull();
+    expect(decodeServer({ t: "theme", theme: { ...t.theme, selection: null } })).toBeNull();
+    expect(decodeServer({ t: "theme", theme: { ...t.theme, ansi: [...(t.theme.ansi as string[]), "000000"] } })).toBeNull();
+  });
 
   it("a welcome without features decodes with none", () => {
     const w = { t: "welcome", v: 2, host: "h", os: "macos", version: "0", device: "d", permission: "operate" };

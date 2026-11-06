@@ -10,7 +10,6 @@ import {
   Pressable,
   StyleSheet,
   Text,
-  TextInput,
   View,
   useWindowDimensions,
   type NativeScrollEvent,
@@ -45,14 +44,16 @@ import { useHostNotifications } from "@/ui/useHostNotifications";
 import { BlockSkeleton, PaneCard, PaneStrip } from "@/ui/PaneLoading";
 import { openingTitle, paneLoad } from "@/ui/paneLoad";
 import { canNewPane, canNewTab } from "@/ui/newTab";
-import { headerTop } from "@/ui/Screen";
+import { Field } from "@/ui/Field";
+import { GlassGroup, headerTop, IconButton } from "@/ui/Screen";
 import { TabBar } from "@/ui/TabBar";
 import { TerminalView } from "@/ui/TerminalView";
-import { toggleA11y } from "@/ui/toggle";
+import { TextSizeMenu } from "@/ui/TextSizeMenu";
 import { useClose } from "@/ui/useClose";
 import { useNow } from "@/ui/useNow";
 import { useSingleFlight } from "@/ui/useSingleFlight";
-import { colors, mono, radius, TOUCH, ui } from "@/ui/theme";
+import { avatarInk } from "@/ui/palette";
+import { mono, radius, ui, makeStyles, useColors } from "@/ui/theme";
 
 /** Within this many points of the end counts as "at the bottom" (stick to new output). */
 const BOTTOM_SLOP = 48;
@@ -76,6 +77,8 @@ const itemKey = (it: PaneItem) => (it.kind === "fold" ? `fold:${it.ids[0]}` : St
  * the pane's screen (the FullScreen board).
  */
 export default function PaneScreen() {
+  const colors = useColors();
+  const styles = useStyles();
   const { key, id, block: blockParam, restored, toast: toastParam } = useLocalSearchParams<{
     key: string;
     id: string;
@@ -290,7 +293,9 @@ export default function PaneScreen() {
     [router, key, paneId, operate, once, say, loc],
   );
   const asked = s.asked;
-  const extraData = useMemo(() => ({ wrap, asked }), [wrap, asked]);
+  // the Search output query, marked in the blocks it shows (undefined: no search)
+  const found = searching?.trim() || undefined;
+  const extraData = useMemo(() => ({ wrap, asked, found }), [wrap, asked, found]);
   const items = useMemo(
     () => (searching === null ? foldBlocks(blocks, unfolded) : foldBlocks(matching(blocks, searching), true)),
     [blocks, searching, unfolded],
@@ -477,7 +482,7 @@ export default function PaneScreen() {
     );
   const footer =
     asking && waiting ? (
-      <AskCard key={questionKey(waiting)} hostKey={key} paneId={paneId} waiting={waiting} program={program} bottomInset={bottomInset} onSay={say} />
+      <AskCard key={questionKey(waiting)} hostKey={key} paneId={paneId} waiting={waiting} program={program} where={loc ? tabTitle(loc.tab) : undefined} bottomInset={bottomInset} onSay={say} />
     ) : (
       composer
     );
@@ -503,22 +508,18 @@ export default function PaneScreen() {
 
   return (
     <KeyboardAvoidingView style={styles.fill} behavior="padding">
-      <Stack.Screen options={{ headerShown: false }} />
+      {/* No Back swipe while text is selected: dragging a handle sideways would take the pane
+          away (iOS starts its Back pan over any touch the app handles itself) */}
+      <Stack.Screen options={{ headerShown: false, gestureEnabled: selBar === null }} />
       <View style={[styles.header, { paddingTop: headerPad }]}>
         <View style={styles.headerRow}>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={"Back from " + hostName + (waitingElsewhere ? ", " + waitingElsewhere + " " + (waitingElsewhere === 1 ? "needs" : "need") + " you" : "")}
+          <IconButton
+            glass
+            icon="back"
+            label={"Back from " + hostName + (waitingElsewhere ? ", " + waitingElsewhere + " " + (waitingElsewhere === 1 ? "needs" : "need") + " you" : "")}
+            badge={waitingElsewhere || undefined}
             onPress={back}
-            style={({ pressed }) => [styles.glass, pressed && styles.pressed]}
-          >
-            <Icon name="back" size={20} color={colors.text} />
-            {waitingElsewhere ? (
-              <View style={styles.badge} importantForAccessibility="no">
-                <Text style={styles.badgeText}>{waitingElsewhere > 99 ? "99+" : waitingElsewhere}</Text>
-              </View>
-            ) : null}
-          </Pressable>
+          />
           {/* the computer: its name opens the computer menu; the tab's name is on the tab row */}
           <Pressable
             accessibilityRole="button"
@@ -526,13 +527,15 @@ export default function PaneScreen() {
             accessibilityState={{ expanded: computers }}
             disabled={!host}
             onPress={() => {
+              // the keys strip rides the keyboard above the page: a menu under it loses its last rows
+              Keyboard.dismiss();
               setMenu(false);
               setComputers((c) => !c);
             }}
             style={({ pressed }) => [styles.titleButton, pressed && styles.pressed]}
           >
             <View style={styles.titleLine}>
-              {host ? <View style={[styles.hostDot, { backgroundColor: hostDot(host) }]} /> : null}
+              {host ? <View style={[styles.hostDot, { backgroundColor: colors[hostDot(host)] }]} /> : null}
               <Text style={styles.title} numberOfLines={1}>
                 {hostName}
               </Text>
@@ -540,22 +543,17 @@ export default function PaneScreen() {
             </View>
           </Pressable>
           {!host || closed ? null : (
-            <View style={styles.actions}>
+            <GlassGroup>
               {fullScreen ? null : (
-                <Pressable
-                  {...toggleA11y(searching !== null)}
-                  accessibilityLabel="Search output"
-                  onPress={() => setSearch(searching === null ? "" : null)}
-                  style={({ pressed }) => [styles.action, pressed && styles.pressed]}
-                >
-                  <Icon name="search" size={19} color={searching !== null ? colors.accent : colors.text} />
-                </Pressable>
+                <IconButton grouped icon="search" label="Search output" pressed={searching !== null} active={searching !== null} onPress={() => setSearch(searching === null ? "" : null)} />
               )}
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel="More"
                 accessibilityState={{ expanded: menu }}
+                hitSlop={3}
                 onPress={() => {
+                  Keyboard.dismiss();
                   setComputers(false);
                   setMenu((m) => !m);
                 }}
@@ -563,7 +561,7 @@ export default function PaneScreen() {
               >
                 <Icon name="more" size={19} color={colors.text} />
               </Pressable>
-            </View>
+            </GlassGroup>
           )}
         </View>
       </View>
@@ -582,7 +580,7 @@ export default function PaneScreen() {
               onPress={() => router.push({ pathname: "/panes", params: { key, pane: String(paneId) } })}
               style={({ pressed }) => [styles.picker, pressed && styles.pressed]}
             >
-              <Text style={[styles.pickMark, { color: mark?.claude ? CLAUDE_COLOR : colors.accent }]}>{mark?.mark}</Text>
+              <Text style={[styles.pickMark, { color: mark?.claude ? avatarInk(CLAUDE_COLOR, colors) : colors.accent }]}>{mark?.mark}</Text>
               <Text style={styles.pickName} numberOfLines={1}>
                 {pickName}
               </Text>
@@ -642,6 +640,7 @@ export default function PaneScreen() {
               canPaste={hasFeature(host, "paste") && operate}
               canMouse={hasFeature(host, "mouse") && operate}
               keepHeight={asking}
+              covered={menu || computers}
             />
             {load?.card ? <PaneCard card={load.card} onRetry={tryAgain} onDetails={details} onLeave={leave} /> : null}
           </View>
@@ -651,21 +650,24 @@ export default function PaneScreen() {
         <>
           {searching !== null ? (
             <View style={styles.search}>
-              <TextInput
+              <Field
+                icon="search"
+                label="Search output"
                 value={searching}
                 onChangeText={setSearch}
                 autoFocus
                 autoCapitalize="none"
                 autoCorrect={false}
                 placeholder="Search commands and output"
-                placeholderTextColor={colors.textMuted}
                 returnKeyType="search"
-                accessibilityLabel="Search output"
-                style={styles.searchInput}
+                trailing={
+                  searching.trim() === "" ? null : (
+                    <Text style={styles.searchCount} accessibilityLiveRegion="polite">
+                      {`${shownBlocks} of ${blocks.length} ${blocks.length === 1 ? "block" : "blocks"}`}
+                    </Text>
+                  )
+                }
               />
-              <Text style={styles.searchCount} accessibilityLiveRegion="polite">
-                {searching.trim() === "" ? "" : shownBlocks + " of " + blocks.length}
-              </Text>
             </View>
           ) : null}
           {!host ? (
@@ -708,6 +710,7 @@ export default function PaneScreen() {
                           notify={isAsked(s, key, paneId, item.block.command)}
                           onBell={onBell}
                           onStop={operate ? onStop : undefined}
+                          mark={found}
                         />
                       </View>
                     </SelectionItem>
@@ -715,13 +718,13 @@ export default function PaneScreen() {
                     <SelectionItem owner={`block:${item.block.id}`}>
                       <View style={styles.cardGap}>
                         {/* keyed: a recycled card must not keep another block's state */}
-                        <FailedCard key={item.block.id} block={item.block} onActions={onActions} onRunAgain={operate ? onRunAgain : undefined} />
+                        <FailedCard key={item.block.id} block={item.block} onActions={onActions} onRunAgain={operate ? onRunAgain : undefined} mark={found} />
                       </View>
                     </SelectionItem>
                   ) : (
                     <SelectionItem owner={`block:${item.block.id}`}>
                       <View style={styles.cardGap}>
-                        <BlockView key={item.block.id} block={item.block} onActions={onActions} wrap={wrap} />
+                        <BlockView key={item.block.id} block={item.block} onActions={onActions} wrap={wrap} mark={found} />
                       </View>
                     </SelectionItem>
                   )
@@ -777,18 +780,23 @@ export default function PaneScreen() {
               hint="Finished, failed and questions here"
               on={notifOn}
               disabled={alerts.saving}
-              last={!closeable && !canSplit && !canOpenTab}
+              last={!fullScreen}
               onPress={() => alerts.change(!notifOn)}
             />
+            {/* over a program's screen: the zoom a pinch changes, from here too (no Wrap there) */}
+            {fullScreen ? <TextSizeMenu last /> : null}
+            {/* grouped: settings above, then new things, then what closes (in red), a gap between */}
+            {canSplit || canOpenTab ? <View style={styles.menuGap} /> : null}
             {/* the New pane / New tab sheets (the program to run), as the Tabs page's header */}
             {canSplit ? (
-              <MenuItem icon="newPane" title="Split pane" hint="Another program beside this one" last={!closeable && !canOpenTab} onPress={() => { setMenu(false); router.push({ pathname: "/new-pane", params: { key, pane: String(paneId) } }); }} />
+              <MenuItem icon="newPane" title="Split pane" hint="Another program beside this one" last={!canOpenTab} onPress={() => { setMenu(false); router.push({ pathname: "/new-pane", params: { key, pane: String(paneId) } }); }} />
             ) : null}
             {canOpenTab ? (
-              <MenuItem icon="add" title="New tab" hint={`On ${hostName}`} last={!closeable} onPress={() => { setMenu(false); router.push({ pathname: "/new-tab", params: { key } }); }} />
+              <MenuItem icon="add" title="New tab" hint={`On ${hostName}`} last onPress={() => { setMenu(false); router.push({ pathname: "/new-tab", params: { key } }); }} />
             ) : null}
             {closeable ? (
               <>
+                <View style={styles.menuGap} />
                 <MenuAction title="Close pane" onPress={() => { setMenu(false); onClose(paneId, "pane"); }} />
                 <MenuAction title="Close tab" last onPress={() => { setMenu(false); onClose(paneId, "tab"); }} />
               </>
@@ -833,6 +841,7 @@ export default function PaneScreen() {
 
 /** One of the ⋯ menu's actions: a destructive word. */
 function MenuAction({ title, last, onPress }: { title: string; last?: boolean; onPress: () => void }) {
+  const styles = useStyles();
   return (
     <Pressable
       accessibilityRole="menuitem"
@@ -847,6 +856,8 @@ function MenuAction({ title, last, onPress }: { title: string; last?: boolean; o
 
 /** One of the ⋯ menu's actions that opens a page: an icon, the label and what it does. */
 function MenuItem({ icon, title, hint, last, onPress }: { icon: "newPane" | "add"; title: string; hint: string; last?: boolean; onPress: () => void }) {
+  const colors = useColors();
+  const styles = useStyles();
   return (
     <Pressable accessibilityRole="menuitem" accessibilityLabel={title} accessibilityHint={hint} onPress={onPress} style={({ pressed }) => [styles.menuRow, !last && styles.menuRule, pressed && styles.pressed]}>
       <Icon name={icon} size={20} color={colors.text} />
@@ -876,12 +887,15 @@ function MenuSwitch({
   disabled?: boolean;
   onPress: () => void;
 }) {
+  const colors = useColors();
+  const styles = useStyles();
   return (
     <Pressable
       accessibilityRole="switch"
       accessibilityLabel={title}
       accessibilityHint={hint}
       accessibilityState={{ checked: on, disabled: !!disabled }}
+      aria-checked={on}
       disabled={disabled}
       onPress={onPress}
       style={({ pressed }) => [styles.menuRow, !last && styles.menuRule, pressed && styles.pressed]}
@@ -898,36 +912,13 @@ function MenuSwitch({
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = makeStyles((colors) => ({
   fill: { flex: 1, backgroundColor: colors.bg },
   flex: { flex: 1 },
   pressed: { opacity: 0.7 },
   // the Pane board's header: chrome, 12 pt gutter, 10 pt between its two rows, a hairline under
   header: { backgroundColor: colors.chrome, paddingHorizontal: 12, paddingBottom: 10, gap: 10, borderBottomWidth: 1, borderBottomColor: colors.hairline },
   headerRow: { flexDirection: "row", alignItems: "center", gap: 8 },
-  glass: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: colors.glass,
-    borderWidth: 1,
-    borderColor: colors.glassRim,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  badge: {
-    position: "absolute",
-    top: -3,
-    right: -3,
-    minWidth: 18,
-    height: 18,
-    paddingHorizontal: 4,
-    borderRadius: 9,
-    backgroundColor: colors.warning,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  badgeText: { fontFamily: ui(600), color: colors.bg, fontSize: 11 },
   titleButton: { flex: 1, minWidth: 0, minHeight: 44, justifyContent: "center", paddingHorizontal: 6 },
   titleLine: { flexDirection: "row", alignItems: "center", gap: 7 },
   hostDot: { width: 8, height: 8, borderRadius: 4 },
@@ -938,8 +929,8 @@ const styles = StyleSheet.create({
   overCard: { backgroundColor: colors.chrome },
   paneRow: { backgroundColor: colors.chrome, paddingHorizontal: 12, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: colors.hairline },
   title: { flexShrink: 1, fontFamily: ui(600), color: colors.textBright, fontSize: 17 },
-  actions: { height: 44, flexDirection: "row", borderRadius: 22, backgroundColor: colors.glass, borderWidth: 1, borderColor: colors.glassRim },
-  action: { width: 44, height: 42, alignItems: "center", justifyContent: "center" },
+  // the ⋯ in the glass pill, as a GlassGroup's 38 pt button (it reports its menu as expanded)
+  action: { width: 38, height: 38, borderRadius: 19, alignItems: "center", justifyContent: "center" },
   pickRow: { flexDirection: "row", alignItems: "center", gap: 6 },
   picker: {
     flex: 1,
@@ -953,7 +944,7 @@ const styles = StyleSheet.create({
     borderRadius: 18,
     borderWidth: 1,
     borderColor: colors.glassRim,
-    backgroundColor: "#ffffff0f",
+    backgroundColor: colors.faint,
   },
   pickMark: { fontFamily: mono, fontSize: 13 },
   pickName: { flexShrink: 1, fontFamily: ui(500), color: colors.textBright, fontSize: 13 },
@@ -969,7 +960,7 @@ const styles = StyleSheet.create({
     right: 12,
     width: 280,
     borderRadius: 14,
-    backgroundColor: "#2b2b2b",
+    backgroundColor: colors.menu,
     borderWidth: 1,
     borderColor: colors.glassRim,
     overflow: "hidden",
@@ -981,10 +972,13 @@ const styles = StyleSheet.create({
   },
   menuRow: { minHeight: 56, flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 14 },
   menuRule: { borderBottomWidth: 1, borderBottomColor: colors.hairline },
+  // between the menu's groups: a band of the page's ground, as iOS menus part theirs
+  menuGap: { height: 6, backgroundColor: colors.bg, borderTopWidth: 1, borderBottomWidth: 1, borderColor: colors.hairline },
   menuNote: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12, lineHeight: 17, paddingHorizontal: 14, paddingVertical: 12 },
   // the text column of the rows with icons (14 + the 20 pt icon + 12)
   menuAction: { minHeight: 48, justifyContent: "center", paddingLeft: 46, paddingRight: 14 },
-  menuDestructive: { fontFamily: ui(400), color: colors.warning, fontSize: 15 },
+  // Close pane, Close tab: the destructive red (orange is for "needs you" only)
+  menuDestructive: { fontFamily: ui(400), color: colors.error, fontSize: 15 },
   menuText: { flex: 1, gap: 2, paddingVertical: 8 },
   menuTitle: { fontFamily: ui(400), color: colors.textBright, fontSize: 15 },
   menuHint: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12 },
@@ -1034,29 +1028,15 @@ const styles = StyleSheet.create({
   closed: { padding: 16, gap: 12, alignItems: "flex-start" },
   closedText: { fontFamily: ui(400), color: colors.textBright, fontSize: 15 },
   notice: { paddingHorizontal: 16, paddingVertical: 6 },
+  // the field across the whole width (the Standard)
   search: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
     paddingHorizontal: 12,
     paddingVertical: 8,
     backgroundColor: colors.chrome,
     borderBottomWidth: 1,
     borderBottomColor: colors.hairline,
   },
-  searchInput: {
-    flex: 1,
-    height: TOUCH - 4,
-    paddingHorizontal: 10,
-    borderRadius: radius.small,
-    borderWidth: 1,
-    borderColor: colors.borderStrong,
-    backgroundColor: colors.bg,
-    color: colors.textBright,
-    fontFamily: mono,
-    fontSize: 13,
-  },
-  searchCount: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12, minWidth: 48, textAlign: "right" },
+  searchCount: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13 },
   viewOnly: {
     fontFamily: ui(400),
     color: colors.textDim,
@@ -1067,4 +1047,4 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: colors.hairline,
   },
-});
+}));

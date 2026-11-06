@@ -20211,6 +20211,8 @@ impl App {
                 ok: true,
                 pid: Some(std::process::id()),
                 version: Some(env!("CARGO_PKG_VERSION").into()),
+                // the theme phones follow (the gateway's `theme`)
+                theme: Some(crate::remote::wire_theme(&self.theme)),
                 tabs: self.tabs_info(),
                 windows: self
                     .windows_in_order()

@@ -29,7 +29,7 @@
 
 use crate::protocol::{
     Block, BlockState, ClientHello, ClientMsg, CloseKind, ClosingReason, ErrorCode, GatewayHello,
-    MoveKind, OpenKind, Permission, Run, ScreenMode, ServerMsg, VERSION,
+    MoveKind, OpenKind, Permission, Run, ScreenMode, ServerMsg, Theme, VERSION,
 };
 use crate::registry::{self, Device, RelayState, RelayStatus, Via};
 use crate::transport::{self, Channel, KEY_LEN, Recv, Socket};
@@ -1179,11 +1179,17 @@ fn poll_loop<S: Source>(shared: &Shared<S>) {
     let mut last_devices = Instant::now();
     let mut copies = None;
     let mut last_copy = Instant::now();
+    let mut theme = None;
+    let mut last_theme = Instant::now();
     while !shared.stop.load(Ordering::Acquire) {
         wait_polling_kicks(shared, Instant::now() + cfg.pane_poll.min(cfg.devices_poll));
         if last_copy.elapsed() >= crate::COPY_POLL {
             last_copy = Instant::now();
             forward_copy(shared, &mut copies);
+        }
+        if last_theme.elapsed() >= crate::THEME_POLL {
+            last_theme = Instant::now();
+            forward_theme(shared, &mut theme);
         }
         if last_devices.elapsed() >= cfg.devices_poll {
             last_devices = Instant::now();
@@ -1334,6 +1340,24 @@ fn forward_copy<S: Source>(shared: &Shared<S>, copies: &mut Option<u64>) {
             c.push(f.clone());
         }
     }
+}
+
+/// A theme that differs from the last one sent goes to every connection.
+/// Nobody here: nothing is asked. A phone that has the theme from its
+/// welcome may get it once more (the first look, or one after a change
+/// while nobody was here), never miss a change made after its welcome.
+fn forward_theme<S: Source>(shared: &Shared<S>, last: &mut Option<Theme>) {
+    if shared.hub.lock().unwrap().clients.is_empty() {
+        return;
+    }
+    let Some(now) = shared.source.theme() else {
+        return;
+    };
+    if last.as_ref() == Some(&now) {
+        return;
+    }
+    *last = Some(now.clone());
+    broadcast(shared, &[ServerMsg::Theme { theme: now }]);
 }
 
 fn broadcast<S>(shared: &Shared<S>, msgs: &[ServerMsg]) {
@@ -1911,6 +1935,7 @@ fn serve_device<S: Source, T: Socket>(
     let cfg = &shared.config;
     let now = SystemTime::now();
     let _ = registry::touch(&cfg.dir, &device.id, now);
+    let theme = shared.source.theme();
     if !send_msg(
         &mut ch,
         &ServerMsg::Welcome {
@@ -1925,8 +1950,10 @@ fn serve_device<S: Source, T: Socket>(
                 .copied()
                 // only where the computer allows shells while Rift is closed
                 .chain(shared.source.can_start().then_some("start"))
+                .chain(theme.is_some().then_some("theme"))
                 .map(String::from)
                 .collect(),
+            theme,
         },
     ) {
         shared.record(Some((&device.id, &device.name)), &peer, now, "error");

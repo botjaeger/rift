@@ -1741,7 +1741,9 @@ one window); a request naming a pane acts in that pane's window,
 `focus --tab N` raises the window of tab N, and `split`, `open` and the rest
 act in the window that last had focus. A drop-down hotkey window is listed
 in `windows` (`{"window": N, "kind": "dropdown"}`); `focus` on one of its
-panes drops it down.
+panes drops it down. `list` and `status` also carry `theme`: the theme in
+use (light or dark as the system is), with the tokens phones get
+(docs/remote-protocol.md, Theme).
 
 - `"navigate"` (default): `list`, `status`, `focus`, `blocks` (a pane's
   last command blocks, read-only: up to 30 per request, each output cut to
@@ -1903,7 +1905,7 @@ on the desktop (also for shells a phone started while no window is open).
   renderer, htop), arrow keys under alternate scroll (less), else the
   phone's own view of the pane: the desktop's view stays where its user
   left it, and the desktop's scrolling never moves the phone's. A
-  view-only phone scrolls a view, never a program. *Paste* (on the key row
+  view-only phone scrolls a view, never a program. *Paste* (in the key block
   wherever images can go, whatever Settings › Keys holds) puts it in the
   phone's message box; *Send* sends an image from the phone's clipboard (an operate phone, a running program, at most
   10 MB; PNG, or JPEG for a photo too large as PNG) saves it under
@@ -1934,20 +1936,26 @@ on the desktop (also for shells a phone started while no window is open).
   (on by default for commands run from the phone). A
   block cut to its last 500 lines loads earlier output 500 lines at a time
   (up to 5,000 more; lines gone from the desktop's scrollback say so). The
-  row of control keys is chosen, ordered (drag) and added to in Settings ›
-  Panes › Choose keys; its *+tab* and *+pane* keys open a new tab in the pane's
+  key block's keys are chosen, ordered (drag ≡) and added to (a search over every key) in
+  Settings › Panes › Keys, at most 8 places with the keyboard key; the arrows are always on
+  the pad. A list saved before the key block keeps its keys, its arrows moving to the pad; a
+  list that was an earlier default becomes the new one. Its *+tab* and *+pane* keys open a new tab in the pane's
   window or split the pane on the desktop (starting in the pane's folder,
   with a toast naming the phone), and the phone goes to the new pane.
-  *New tab* (the pane's ⋯, the Tabs page, a computer's card on Portals) and *New pane* (*Split
-  pane* in the pane's ⋯ and on the Tabs page, a tab's Panes page) open sheets that choose what the new tab or pane starts with: a
-  shell, or Claude Code, Codex or OpenCode. A program is an `open`, then a
+  *New tab* (the pane's ⋯, the Tabs page's **+**, a computer's card on Portals) and *New pane* (*Split
+  pane* in the pane's ⋯, a tab's Panes page's **+**) open sheets that choose what the new tab or pane starts with: a
+  shell, or Claude Code, Codex or OpenCode (*New tab*: "On studio-mac, beside project1", the
+  folder as one row, then *Start with*; *New pane*: "Beside project1 · ~/code/project1", the
+  same rows). A program is an `open`, then a
   `run` of its name in the new pane, once its shell shows a prompt (the
   computer answers `busy` until then; the phone tries again for a few seconds);
   *Ask before running* and Face ID apply as to any run. View-only phones get
   neither button. The *Tabs* page lists the tabs, pinned ones apart (the
   topology's `pinned`); a row's grip lifts the tab at once and dragging it over
   the others reorders the desktop window's tabs (on the whole list only, not a
-  filtered or searched one) (the tab
+  filtered or searched one, which says so under its rows; its caption reads *Tabs · Drag ≡ to
+  reorder*, a filter that holds nothing says so — *Nothing needs you* — and offers *Show all
+  tabs*) (the tab
   bar follows, ⌃⇧← / ⌃⇧→ order; a pinned tab stays among the pinned and a
   grouped one in its group, other windows' places are refused), with a small
   vibration when it lifts; a tab's Panes page does the same for its panes, each pane exchanging its place
@@ -1955,34 +1963,75 @@ on the desktop (also for shells a phone started while no window is open).
   *Move down* on each row. A desktop without the `move` feature, and
   view-only phones, show no drag.
 - **Phone-first app.** *Portals* is the home page (no tab bar); its gear
-  opens *Settings* and its **+** pairs a computer. *Portals* lists each
-  computer in a card (connection line, *New tab*, *Try again* or *Pair again*;
-  swipe the card left for *Unpair*, which asks first) with its tabs, each with the tab's name,
-  what its lead pane does (its program or command, running, idle or waiting for you), and on the
-  right the desktop tab bar's mark (a spinner while it works, a dot in its state's colour) with a
-  short time (*2m*, *3:56*, *✕ 1*); chips (*needs you*, *working*, *idle*) filter the tabs. With
+  opens *Settings* and its **+** pairs a computer. Under the title one line counts the tabs
+  in words (*● 1 needs you · 2 working · 1 failed · 27 idle*; counts, not filters). *Portals*
+  lists each computer in a card: its line says where it is (*This network · 30 tabs*, *Over the
+  relay*, *Can't reach it · last seen 2 h ago*, with *paired 3 Nov* when two pairings share a
+  name), *New tab*; one that cannot be reached offers *Try again* (or *Pair again*) and *Unpair*
+  (in red, asking first) in the card, and any card swipes left for *Unpair*. A card shows five
+  tabs, what needs you first (tinted), then what works, failed and idles, and *Show all N tabs*
+  opens the *Tabs* page for the rest. Each row has the tab's name (cut once at its end; the pane
+  count stays: "project2 · 2 panes") and says what its lead pane does in words (*Waiting for you ·
+  Make this edit?*, *npm run dev · running*, *cargo test · failed with 101*, *Idle · last: echo
+  one*), and on the right the desktop tab bar's mark (a spinner while it works, a dot in its
+  state's colour) with a short time (*2m*, *3:56*, *✕ 1*). With
   one computer paired, an agent's question answers in place on its tab. A cold
   start reopens the pane shown last. The pane's header names the computer: a
-  tap opens the computer menu (every paired computer, *Connection*, *All
-  portals*). Under it a tab row: ‹ and › (or a fling across it) go to the
+  tap opens the computer menu (every paired computer with where it is, the one on screen
+  ticked, *Connection*, *All portals*); *Connection* lists each path and offers *Test again*
+  while connected (it connects again, this network first) or *Try again now*. Under it a tab row: ‹ and › (or a fling across it) go to the
   previous and next tab, which slides in from the side it comes from; the
   middle, the tab's name, its mark and "tab 2 of 30", opens the *Tabs* page:
   a full page of the computer's tabs as rows (grip, name, what the lead pane
   does, mark and time), pinned ones first, with a search field, state
-  filters, *Split pane* and *New tab*; it draws only the rows in view, so a
+  filters and *New tab* (**+**); it draws only the rows in view, so a
   hundred tabs open as fast as ten. A tab of several panes keeps the pane
-  row under the tab row, which opens the tab's *Panes* page in the same rows
-  (a screen reader has *Next pane* / *Previous pane* on the pane row and
-  *Next tab* / *Previous tab* on the tab row). The pane's ⋯ has *Split pane*
-  and *New tab* too.
+  row under the tab row, which opens the tab's *Panes* page in the same rows,
+  with *New pane* (**+**) (a screen reader has *Next pane* / *Previous pane* on the pane row and
+  *Next tab* / *Previous tab* on the tab row). Both pages leave with ‹ *Back*,
+  top left. The pane's ⋯ is grouped, a gap between the groups: settings (*Wrap long lines*,
+  *Notifications*; over a full-screen program *Notifications* and *Text size*, "Pinch the screen,
+  or here", whose − / size / + and *Reset* change the zoom a pinch changes, 60 to 200 %, kept the
+  same way; one adjustable control for a screen reader), new things (*Split pane*, *New tab*),
+  closing (*Close pane*, *Close tab*, in red). *Search output* is a full-width field with its
+  count ("2 of 14 blocks") and clear; every match (any case) in the commands and output it shows
+  is marked on a warning tint, at most 100 per text, and stays selectable.
+- **One standard across the app** (the Standard board). One page header:
+  ‹ *Back* (✕ only on the camera page), the title, an optional line under
+  it, at most two actions; Portals keeps its large title as the root page.
+  One sheet header: a grabber, the title, a line under it and a round ✕
+  (*Close*), on every sheet. One text field (44 pt, radius 10, an icon, a
+  clear button) for Search tabs, Search output, the folder and branch
+  searches and the pairing link; the command line stays its own control.
+  Filters are one chip (the chosen one filled). Buttons are *Primary*,
+  *Secondary*, *Text* and *Small*, one radius for all; destructive actions
+  (*Close pane*, *Close tab*, *Unpair*, removing a key, *Stop*, a new ntfy
+  topic) are in the error red, and orange means "needs you" only. Rows come
+  in two densities (56 pt with a line under the label, 44 pt without; the
+  Tabs and Panes rows are 60 pt), in cards on settings pages and edge to edge
+  for content. JetBrains Mono draws only commands, paths, output and keys:
+  a row's line ("Idle · last: echo one") is Inter with only its command in mono,
+  and placeholders, versions and words are Inter.
   Successes before the newest failure fold away; blocks are cards with a thin
   border in their state's colour (a table as a list, with *Raw*), failed ones
   with *Run again* and *Copy error*, running ones with *Stop* and *Notify when
-  done*; a tap on a card's header opens the block sheet, and selecting its output copies the selection (a read-only field with accent handles) with a small vibration; while text is selected the other blocks dim and a bar docked where the pane's controls are (drawn over them, which stay in place hidden, so the output never moves and never hides the cursor; above a question card, which stays) shows how much is selected (lines and characters), *Copied*, *Line*, *All*, *To prompt* (the selection into the command line, its lines joined by spaces) and ✕; on a full-screen program's screen it offers *Word*, *Line* and *Screen*. On iOS it replaces the system's edit menu (the block sheet keeps that menu). A hold on another block ends the first selection and starts the new one; a tap elsewhere in the output ends the selection. There is no view switch: the pane
+  done*; a tap on a card's header opens the block sheet, and selecting its output copies the selection (a read-only field with accent handles) with a small vibration; while text is selected the other blocks dim and a bar docked where the pane's controls are (drawn over them, which stay in place hidden, so the output never moves and never hides the cursor; above a question card, which stays) shows how much is selected (lines and characters) and *✓ Copied* while the selection is on the clipboard (every change of the selection copies it; a screen reader hears *Copied* once per copy), then the same keys in the same places on block output and a full-screen program's screen: *Word*, *Line*, *All* (the whole block, or the whole screen), *To prompt* (the selection into the command line, its lines joined by spaces; disabled, with the reason under the keys, where nothing can be typed or no message box shows under the screen) and ✕. On iOS it replaces the system's edit menu (the block sheet keeps that menu). A hold on another block ends the first selection and starts the new one; a tap elsewhere in the output, ✕ or Android's Back ends the selection. On a program's screen the handles' knobs are 18 pt, taken within 44 pt. While text is selected a sideways drag moves the handle only: it never goes Back and never pans a wide screen, and a handle follows the finger from where it was taken. There is no view switch: the pane
   shows its screen (the TUI, with pinch-to-zoom) for the alternate screen, a coding agent or a program no
-  block holds, and blocks for everything else. Above the command line: the
-  folder and branch chips opening the chip menus, suggestions, the key row (⌃;
-  sticky ⌃ ⌥ ⇧, Paste) and a round field with a run button; commands run from
+  block holds, and blocks for everything else. On the screen, http(s) addresses are found as the
+  desktop finds them (a long one the program wrapped onto the next rows included) and drawn
+  underlined in the accent; a tap on one opens it in the phone's browser (before a program that
+  tracks the mouse gets the click, and without raising the keyboard), and a screen reader's row with
+  a link opens it on activate. The command line, top to bottom: the
+  context (the folder and branch as chips that open the chip menus, a timer as plain text after
+  them); one line with one job each side (**+** attaches, the round field with its run button
+  runs, **⌨** shows the keys, and held opens Settings › Keys); the keys; then the suggestions,
+  closest to the keyboard, the first marked: at a prompt the phone keyboard's Return takes it
+  (a command is one line). While a program runs the line changes: *Stop ⌃C* comes first and the
+  field says who it types to ("Type to npm"). The keys are one strip for the command line and a
+  full-screen program alike, 88 pt high: the key block (Settings › Keys; Esc, Tab, ⌃, Return,
+  Paste and the keyboard key by default, two rows) beside an arrow pad (↑ above ← ↓ →; a held
+  arrow repeats after 400 ms, every 80 ms, until let go). ⌃ ⌥ ⇧ stay lit until the next key, so
+  ⌃ then C is one chord, and a screen reader hears them as selected. Commands run from
   there, there is no separate Run page. The phone keyboard's Return is a new line in the
   field and only the round *Run* (or *Send*, to a program) button sends; with a hardware
   keyboard Return sends and Shift+Return is a new line. A command is one line, so a field with
@@ -2002,6 +2051,19 @@ on the desktop (also for shells a phone started while no window is open).
   (`git checkout`) and the code review panel's changed files, each with its
   diff; the names are shell-quoted; it shows the folder and branch the
   desktop computes for its own chips (feature `git`).
+- **Themes on the phone.** The phone draws with the computer's theme (feature
+  `theme`: the welcome carries the theme the windows use, and a change in
+  Settings, `config.toml` or the system's light or dark reaches the phone
+  within two seconds). Every text colour is held to 4.5:1 on the grounds
+  the app draws it on; a token that falls short is lifted toward the text
+  colour. *Settings › This phone › Appearance* chooses: *Same as the
+  computer* (the default; with several computers, a pane uses its own
+  computer's theme, Portals and Settings the last one opened), *Match this
+  phone* (Light Default or Dark Default as the phone is), or *Choose a theme*
+  (the 13 builtin themes). The choice stays on the phone; the computer keeps
+  its own. A computer without the feature leaves the app on its last theme,
+  Dark Default the first time. A full-screen program's screen keeps the
+  computer's colours, which its frames carry.
 - **Needs you (answering from the phone).** The desktop tells the phone
   when a pane's running command waits for the user (feature `waiting`): a
   line read without echo (`sudo`, `ssh`, `read -s`: the terminal's echo
@@ -2016,8 +2078,12 @@ on the desktop (also for shells a phone started while no window is open).
   instead, and a password is typed (never shown, logged or kept on either
   side). Each answer is ordinary input: the desktop shows its toast and the
   pane goes on. The phone alerts when a question starts (Yes / No / Open on
-  the lock screen) and docks the question at the bottom of the pane (Yes, the
-  other entries, *No…* with a reply field, and the keys Esc, ⇧Tab, ↑, ↓).
+  the lock screen) and docks the question at the bottom of the pane, where the keys are, never
+  over the screen, under a sheet header: who asks by name (*Claude Code asks*, the tab, since when;
+  its ✕ folds the question), Yes, the other
+  entries, each saying what it does (*No, explain* opens *Tell it why*, a sheet header over a
+  reply field and *Send*; ✕ goes back to the answers), and the keys Esc, ⇧Tab, ↑, ↓. Folded, it
+  is one bar in the same place.
 - **Completion and history from the phone.** A pane's suggestions ask the desktop (feature `complete`) for what its
   command line would complete for the typed line (the same completion
   providers, each result the whole line with its kind) and for the
@@ -2057,19 +2123,26 @@ on the desktop (also for shells a phone started while no window is open).
   there is no network, closes its connections 30 seconds after going to the
   background (3 minutes while a "notify me" command runs; Android 15+ and iOS
   may cut them sooner, and it reconnects on return), and can require
-  Face ID / fingerprint on launch, after 5 minutes away, and (with *Ask
-  before running* on) before running commands. With a push token it hands the computers, they alert through the
+  Face ID / fingerprint on launch, after 5 minutes away (Settings › This phone › *App lock*; the
+  lock screen shows Rift's mark, "Your tabs stay connected" and *Unlock with Face ID*), and (with
+  *Ask before running* on, Settings › Running commands › *Confirm with Face ID*) before running
+  commands. Settings is sorted by what people look for: *Computers* (each with where it is:
+  *This network · can run commands*, *Can't reach it*), *This phone* (*Name*, *Appearance*, *App
+  lock*), *Notifications*, *Running commands*, *Panes* (*Keys* shows the key block's keys),
+  *About*. A computer's page has its system and pairing day under its name ("macOS · paired 3
+  Nov"), *Connection*, *Access*, the *Theme* it sends (opens Appearance), *Notifications* and
+  *Unpair this computer* in red. With a push token it hands the computers, they alert through the
   Expo push service while the app is closed (`mobile/README.md` › Push).
   Settings › Notifications › *While the app is closed* › *Alerts through
   ntfy* also posts them to a random ntfy topic (ntfy.sh
   or self-hosted), which the free ntfy app shows: no push setup needed.
   If saving its server address fails, the typed address stays available to
   correct or retry; the previous saved server remains in use.
-  Settings › Notifications › *My commands* (on by default) asks to be
+  Settings › Notifications › *Commands I ran from here* (on by default) asks to be
   told about every command run from the phone. On the first request, the
   notification permission dialog finishes before confirmation closes;
   declining notifications does not cancel the command. For other commands, *Other
-  commands on your computers* chooses *Nothing*, *Failures* or *Everything*
+  commands* chooses *Nothing*, *Failures* or *Everything*
   and *Only if it ran longer than* how long a command must run (10 s – 5
   min); each computer's page (Settings › Computers) and the pane's ⋯ menu
   have a *Notifications* switch that turns its notifications off. "Notify

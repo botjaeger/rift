@@ -2,19 +2,22 @@ import Constants from "expo-constants";
 import * as Updates from "expo-updates";
 import { useRouter } from "expo-router";
 import { useEffect, useState } from "react";
-import { Platform, StyleSheet, Text, TextInput, View } from "react-native";
+import { Platform, Text, TextInput, View } from "react-native";
 import { controlKey } from "@/controlKeys";
 import { canOperate } from "@/fleet";
 import { authenticate, biometricSupport, fleet, updateChecks, useApp, useUpdateChecks, type BiometricSupport } from "@/runtime";
 import { MAX_DEVICE_NAME, NOTIFY_AFTER_CHOICES, type NotifyPolicy } from "@/stores";
 import { APP_UPDATE } from "@/release";
+import { appearanceLabel } from "@/appearance";
 import { appVersionText } from "@/ui/format";
+import { hostDot } from "@/ui/hostDot";
 import { Icon } from "@/ui/Icon";
 import { ErrorText } from "@/ui/Notice";
-import { CardBox, ChoiceRow, Group, NavRow, Pill, Row, Segmented, SettingsPage, SwitchRow, ValueRow } from "@/ui/Rows";
+import { Button } from "@/ui/Button";
+import { CardBox, ChoiceRow, Group, NavRow, Row, Segmented, SettingsPage, SwitchRow, ValueRow } from "@/ui/Rows";
 import { SaveError } from "@/ui/SaveError";
 import { hostMeta, notifyExample, ntfySummary, shortAfter, updateLine } from "@/ui/settingsText";
-import { colors, ui } from "@/ui/theme";
+import { ui, makeStyles, useColors } from "@/ui/theme";
 import { useNow } from "@/ui/useNow";
 import { useActionScope } from "@/ui/useActionScope";
 
@@ -24,10 +27,16 @@ const POLICIES: { value: NotifyPolicy; label: string }[] = [
   { value: "all", label: "Everything" },
 ];
 
-/** "This phone's name": the field sits right-aligned in its row; saved when it loses focus or on done. */
+const NAME_START = { start: 0, end: 0 };
+
+/** This phone's Name: the field sits right-aligned in its row; saved when it loses focus or on done. */
 function DeviceName({ name }: { name: string }) {
+  const colors = useColors();
+  const styles = useStyles();
   // The text being edited; null shows the saved name (which a load or another rename may change).
   const [draft, setDraft] = useState<string | null>(null);
+  // a name wider than the field shows its start, not its scrolled end, until it is edited
+  const [editing, setEditing] = useState(false);
   const save = async () => {
     if (draft === null) return;
     if (await fleet.updateSettings({ deviceName: draft })) {
@@ -37,14 +46,22 @@ function DeviceName({ name }: { name: string }) {
   return (
     <Row first>
       <View style={styles.text}>
-        <Text style={styles.label}>This phone&apos;s name</Text>
+        <Text style={styles.label}>Name</Text>
         <Text style={styles.detail}>Computers show it in toasts and logs</Text>
       </View>
       <TextInput
+        keyboardAppearance={colors.dark ? "dark" : "light"}
         value={draft ?? name}
         onChangeText={setDraft}
-        onFocus={() => setDraft((current) => current ?? name)}
-        onBlur={save}
+        selection={editing ? undefined : NAME_START}
+        onFocus={() => {
+          setEditing(true);
+          setDraft((current) => current ?? name);
+        }}
+        onBlur={() => {
+          setEditing(false);
+          void save();
+        }}
         onSubmitEditing={save}
         maxLength={MAX_DEVICE_NAME}
         returnKeyType="done"
@@ -89,13 +106,9 @@ function LongerThan({ value, onChange }: { value: number; onChange: (ms: number)
   );
 }
 
-/** Security: the app lock (hidden without biometrics while off, with the reason) and "Confirm commands". */
-function Security() {
-  const s = useApp();
-  const scope = useActionScope();
-  const st = s.settings;
+/** What the phone can unlock with: its words ("Face ID"), and whether the lock rows show. */
+function useBiometrics(locked: boolean) {
   const [support, setSupport] = useState<BiometricSupport | null>(null);
-  const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     let live = true;
     void biometricSupport().then((r) => live && setSupport(r));
@@ -103,6 +116,26 @@ function Security() {
       live = false;
     };
   }, []);
+  const available = support?.label != null;
+  return {
+    support,
+    // a lock that is on stays switchable when the biometrics went away, so it can be turned off
+    shown: available || locked,
+    // the reason, once known, when there is no lock to offer
+    reason: support && !available ? support.reason : null,
+    // "Require Face ID" → "Face ID"
+    bio: support?.label?.replace(/^Require /, "") ?? (Platform.OS === "ios" ? "Face ID or Touch ID" : "face unlock or fingerprint"),
+  };
+}
+
+/** This phone's App lock row (hidden without biometrics while off, with the reason). */
+function AppLock() {
+  const styles = useStyles();
+  const s = useApp();
+  const scope = useActionScope();
+  const st = s.settings;
+  const { shown, reason, bio } = useBiometrics(st.biometricLock);
+  const [error, setError] = useState<string | null>(null);
 
   const setLock = async (on: boolean) => {
     const current = scope.capture();
@@ -119,49 +152,46 @@ function Security() {
     await fleet.updateSettings({ biometricLock: on });
   };
 
-  const lockAvailable = support?.label != null;
-  const lockShown = lockAvailable || st.biometricLock;
-  // "Require Face ID" → "Face ID"
-  const bio = support?.label?.replace(/^Require /, "") ?? (Platform.OS === "ios" ? "Face ID or Touch ID" : "face unlock or fingerprint");
+  return (
+    <>
+      {shown ? (
+        <SwitchRow label="App lock" detail={`${bio}, on opening and after 5 minutes away`} value={st.biometricLock} onChange={(v) => void setLock(v)} />
+      ) : reason ? (
+        <Row>
+          <View style={styles.text}>
+            <Text style={styles.label}>App lock</Text>
+            <Text style={styles.reason}>{reason}</Text>
+          </View>
+        </Row>
+      ) : null}
+      {error ? (
+        <Row>
+          <ErrorText style={styles.flex1}>{error}</ErrorText>
+        </Row>
+      ) : null}
+    </>
+  );
+}
+
+/**
+ * Running commands › Confirm with Face ID: needs the lock (without biometrics there is nothing to
+ * confirm with). Off while it cannot apply, which is what runs (needsAuthBeforeRun).
+ */
+function ConfirmWithLock() {
+  const s = useApp();
+  const st = s.settings;
+  const { shown, bio } = useBiometrics(st.biometricLock);
   // Only where a command is shown before it runs: with the lock and Ask before running on.
   const runReady = st.biometricLock && st.askBeforeRun;
-  const reason = support && !lockAvailable;
+  if (!shown) return null;
   return (
-    <Group title="Security">
-      <CardBox>
-        {/* A lock that is on stays switchable when the biometrics went away, so it can be turned off. */}
-        {lockShown ? (
-          <SwitchRow
-            first
-            label={`Lock with ${bio}`}
-            detail="On opening, and after 5 minutes away"
-            value={st.biometricLock}
-            onChange={(v) => void setLock(v)}
-          />
-        ) : null}
-        {/* Needs the lock: without biometrics there is nothing to confirm with. Off while it
-            cannot apply, which is what runs (needsAuthBeforeRun). */}
-        {lockShown ? (
-          <SwitchRow
-            label={`Confirm commands with ${bio}`}
-            detail={runReady ? "Before a confirmed command runs" : `Needs Lock with ${bio} and Ask before running`}
-            value={runReady && st.authBeforeRun}
-            disabled={!runReady}
-            onChange={(v) => void fleet.updateSettings({ authBeforeRun: v })}
-          />
-        ) : null}
-        {reason ? (
-          <Row first={!lockShown}>
-            <Text style={styles.reason}>{support.reason}</Text>
-          </Row>
-        ) : null}
-        {error ? (
-          <Row>
-            <ErrorText style={styles.flex1}>{error}</ErrorText>
-          </Row>
-        ) : null}
-      </CardBox>
-    </Group>
+    <SwitchRow
+      label={`Confirm with ${bio}`}
+      detail={runReady ? "Before a confirmed command runs" : "Needs App lock and Ask before running"}
+      value={runReady && st.authBeforeRun}
+      disabled={!runReady}
+      onChange={(v) => void fleet.updateSettings({ authBeforeRun: v })}
+    />
   );
 }
 
@@ -170,6 +200,7 @@ function Security() {
  * Check now) and the release notes; a downloaded update applies on restart.
  */
 function About({ autoUpdate }: { autoUpdate: boolean }) {
+  const styles = useStyles();
   const router = useRouter();
   const { currentlyRunning, isUpdatePending } = Updates.useUpdates();
   const check = useUpdateChecks();
@@ -185,7 +216,7 @@ function About({ autoUpdate }: { autoUpdate: boolean }) {
   return (
     <Group title="About">
       <CardBox>
-        <ValueRow first label="Version" value={text} mono />
+        <ValueRow first label="Version" value={text} />
         {updateChecks.enabled ? (
           <>
             <Row>
@@ -196,13 +227,13 @@ function About({ autoUpdate }: { autoUpdate: boolean }) {
                 </Text>
               </View>
               {isUpdatePending ? (
-                <Pill label="Restart now" height={34} hint="Restarts the app on the downloaded update" onPress={() => void Updates.reloadAsync()} />
+                <Button label="Restart now" size="small" accessibilityHint="Restarts the app on the downloaded update" onPress={() => void Updates.reloadAsync()} />
               ) : (
-                <Pill
+                <Button
                   label={checking ? "Checking…" : "Check now"}
-                  height={34}
+                  size="small"
                   disabled={checking}
-                  hint="Looks for an update and downloads it"
+                  accessibilityHint="Looks for an update and downloads it"
                   onPress={() => void updateChecks.run()}
                 />
               )}
@@ -215,14 +246,19 @@ function About({ autoUpdate }: { autoUpdate: boolean }) {
             />
           </>
         ) : null}
-        <NavRow label="What’s New" accessibilityLabel="What's New" hint="The changes in each version of the app" onPress={() => router.push("/changelog")} />
+        <NavRow label="What’s new" accessibilityLabel="What's new" hint="The changes in each version of the app" onPress={() => router.push("/changelog")} />
       </CardBox>
     </Group>
   );
 }
 
-/** Settings (the Settings board). */
+/**
+ * Settings (the Settings board), sorted by what people look for: the computers, this phone (its
+ * name, Appearance, App lock), notifications, running commands, panes, about.
+ */
 export default function SettingsScreen() {
+  const colors = useColors();
+  const styles = useStyles();
   const router = useRouter();
   const s = useApp();
   const st = s.settings;
@@ -231,20 +267,18 @@ export default function SettingsScreen() {
     <SettingsPage title="Settings" notice={<SaveError />}>
       <Group title="Computers">
         <CardBox>
-          {s.hosts.map((h, i) => {
-            const os = h.welcome?.os ?? h.record.os ?? null;
-            return (
-              <NavRow
-                key={h.record.key}
-                first={i === 0}
-                label={h.record.name}
-                detail={hostMeta({ os, conn: h.conn, viewOnly: !canOperate(h) })}
-                hint="Opens its settings"
-                leading={<View style={[styles.dot, { backgroundColor: h.conn.status === "open" ? colors.success : colors.textMuted }]} />}
-                onPress={() => router.push({ pathname: "/computer", params: { key: h.record.key } })}
-              />
-            );
-          })}
+          {s.hosts.map((h, i) => (
+            <NavRow
+              key={h.record.key}
+              first={i === 0}
+              label={h.record.name}
+              detail={hostMeta({ conn: h.conn, viewOnly: !canOperate(h) })}
+              hint="Opens its settings"
+              // the Portals card's dot
+              leading={<View style={[styles.dot, { backgroundColor: colors[hostDot(h)] }]} />}
+              onPress={() => router.push({ pathname: "/computer", params: { key: h.record.key } })}
+            />
+          ))}
           <NavRow
             first={s.hosts.length === 0}
             label="Pair a computer"
@@ -255,8 +289,18 @@ export default function SettingsScreen() {
             onPress={() => router.push("/scan")}
           />
         </CardBox>
+      </Group>
+
+      <Group title="This phone">
         <CardBox>
           <DeviceName name={s.deviceName} />
+          <NavRow
+            label="Appearance"
+            value={appearanceLabel(st.appearance)}
+            hint="Opens the theme choices"
+            onPress={() => router.push("/appearance")}
+          />
+          <AppLock />
         </CardBox>
       </Group>
 
@@ -264,13 +308,13 @@ export default function SettingsScreen() {
         <CardBox>
           <SwitchRow
             first
-            label="My commands"
+            label="Commands I ran from here"
             detail="When a command you ran from this phone finishes"
             value={st.notifyMyCommands}
             onChange={(v) => void fleet.updateSettings({ notifyMyCommands: v })}
           />
           <View style={styles.policy}>
-            <Text style={styles.label}>Other commands on your computers</Text>
+            <Text style={styles.label}>Other commands</Text>
             <Segmented
               label="Notify for other commands"
               options={POLICIES}
@@ -305,10 +349,9 @@ export default function SettingsScreen() {
             value={st.askBeforeRun}
             onChange={(v) => void fleet.updateSettings({ askBeforeRun: v })}
           />
+          <ConfirmWithLock />
         </CardBox>
       </Group>
-
-      <Security />
 
       <Group title="Panes">
         <CardBox>
@@ -320,16 +363,16 @@ export default function SettingsScreen() {
             onChange={(v) => void fleet.updateSettings({ wrapLines: v })}
           />
           <SwitchRow
-            label="Keys above the command line"
-            detail="Off: only while a program has the full screen"
+            label="Keys under the command line"
+            detail="Off: ⌨ shows them; a full-screen program always has them"
             value={st.showKeys}
             onChange={(v) => void fleet.updateSettings({ showKeys: v })}
           />
           <NavRow
-            label="Choose keys"
+            label="Keys"
             detail={st.controlKeys.map((id) => controlKey(id)?.label ?? id).join(" ") || "None"}
             mono
-            hint="Choose and order the keys above the command line"
+            hint="Choose and order the keys in the key block"
             onPress={() => router.push("/control-keys")}
           />
         </CardBox>
@@ -340,17 +383,18 @@ export default function SettingsScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = makeStyles((colors) => ({
   flex1: { flex: 1 },
   text: { flex: 1, gap: 2 },
-  label: { fontFamily: ui(400), color: colors.textBright, fontSize: 15 },
-  detail: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12, lineHeight: 16 },
+  // the list row's label and line (Rows.tsx)
+  label: { fontFamily: ui(400), color: colors.textBright, fontSize: 16, lineHeight: 21 },
+  detail: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13, lineHeight: 17 },
   fresh: { color: colors.success },
   reason: { fontFamily: ui(400), flex: 1, color: colors.textMuted, fontSize: 13, lineHeight: 19 },
   dot: { width: 8, height: 8, borderRadius: 4 },
   policy: {
     gap: 10,
-    paddingHorizontal: 14,
+    paddingHorizontal: 16,
     paddingVertical: 12,
     borderTopWidth: 1,
     borderTopColor: colors.hairline,
@@ -361,7 +405,7 @@ const styles = StyleSheet.create({
     minHeight: 44,
     paddingVertical: 0,
     color: colors.textMuted,
-    fontSize: 15,
+    fontSize: 16,
     textAlign: "right",
   },
-});
+}));

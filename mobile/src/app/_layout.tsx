@@ -1,9 +1,10 @@
 import * as Notifications from "expo-notifications";
 import * as SplashScreen from "expo-splash-screen";
-import { DarkTheme, Stack, ThemeProvider, useRouter } from "expo-router";
+import { DarkTheme, DefaultTheme, Stack, ThemeProvider, useRouter } from "expo-router";
 import { StatusBar } from "expo-status-bar";
+import * as SystemUI from "expo-system-ui";
 import * as Updates from "expo-updates";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Alert, LogBox, Platform } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { SafeAreaProvider } from "react-native-safe-area-context";
@@ -19,7 +20,9 @@ import { loadSeenRelease, saveSeenRelease } from "@/stores";
 import { paneAnimation } from "@/paneAnimation";
 import { LockGate } from "@/ui/LockGate";
 import { Splash } from "@/ui/Splash";
-import { colors } from "@/ui/theme";
+import { DARK_DEFAULT } from "@/ui/palette";
+import { PaletteProvider, paletteOf, type Palette } from "@/ui/theme";
+import { useAppPalette } from "@/ui/useAppPalette";
 
 // expo-router builds its links from the first scheme ("rift"); "rift-remote" is the pairing
 // link's scheme, kept on purpose, so the dev notice about several schemes is expected.
@@ -32,19 +35,23 @@ void SplashScreen.preventAutoHideAsync().catch(() => undefined);
 // it, so Back leads to Portals instead of out of the app.
 export const unstable_settings = { initialRouteName: "index" };
 
-/** The navigators' own grounds (containers, cards, the tab bar's), dark like every page: the
- *  default theme is light, and its white showed around a page while it slid in or out. */
-const navTheme = {
-  ...DarkTheme,
-  colors: {
-    ...DarkTheme.colors,
-    background: colors.bg,
-    card: colors.chrome,
-    border: colors.chrome,
-    text: colors.textBright,
-    primary: colors.accent,
-  },
-};
+/** The navigators' own grounds (containers, cards, the tab bar's) in the palette's colours: the
+ *  navigator's own white showed around a page while it slid in or out. */
+function navTheme(colors: Palette) {
+  const base = colors.dark ? DarkTheme : DefaultTheme;
+  return {
+    ...base,
+    dark: colors.dark,
+    colors: {
+      ...base.colors,
+      background: colors.bg,
+      card: colors.chrome,
+      border: colors.chrome,
+      text: colors.textBright,
+      primary: colors.accent,
+    },
+  };
+}
 
 /** Notifications already opened in this app run (kept across root remounts). */
 const openedTaps = new Set<string>();
@@ -143,6 +150,13 @@ let whatsNewChecked = false;
 let splashPlayed = false;
 
 export default function RootLayout() {
+  // Settings › Appearance: the computer's theme, the phone's light or dark, or a chosen one
+  const colors = useAppPalette();
+  const nav = useMemo(() => navTheme(colors), [colors]);
+  // the native ground behind the pages (a sheet's corners, a page sliding in)
+  useEffect(() => {
+    void SystemUI.setBackgroundColorAsync(colors.bg).catch(() => undefined);
+  }, [colors.bg]);
   useEffect(() => {
     void fleet.init();
     return startPlatformWatchers();
@@ -161,8 +175,9 @@ export default function RootLayout() {
     // its pan (ui/ReorderRow.tsx), the tab bar swipes with its fling (ui/TabBar.tsx)
     <GestureHandlerRootView style={{ flex: 1 }}>
     <SafeAreaProvider>
-      <StatusBar style="light" />
-      <ThemeProvider value={navTheme}>
+    <PaletteProvider palette={colors}>
+      <StatusBar style={colors.dark ? "light" : "dark"} />
+      <ThemeProvider value={nav}>
         <LockGate>
           <Stack
             screenOptions={{
@@ -177,6 +192,7 @@ export default function RootLayout() {
             <Stack.Screen name="index" options={{ headerShown: false, title: "Portals" }} />
             <Stack.Screen name="settings" options={{ headerShown: false, title: "Settings" }} />
             <Stack.Screen name="settings-ntfy" options={{ headerShown: false, title: "While the app is closed" }} />
+            <Stack.Screen name="appearance" options={{ headerShown: false, title: "Appearance" }} />
             <Stack.Screen name="computer" options={{ headerShown: false, title: "Computer" }} />
             <Stack.Screen
               name="tabs"
@@ -242,7 +258,7 @@ export default function RootLayout() {
             />
             <Stack.Screen name="control-keys" options={{ headerShown: false, title: "Keys" }} />
             <Stack.Screen name="answer" options={{ headerShown: false, title: "Answer" }} />
-            <Stack.Screen name="diagnostics" options={{ title: "Diagnostics" }} />
+            <Stack.Screen name="diagnostics" options={{ headerShown: false, title: "Diagnostics" }} />
             <Stack.Screen name="changelog" options={{ headerShown: false, title: "What's New" }} />
             <Stack.Screen
               name="whats-new"
@@ -251,7 +267,7 @@ export default function RootLayout() {
                 presentation: "formSheet",
                 sheetAllowedDetents: [0.75, 1],
                 sheetGrabberVisible: true,
-                sheetCornerRadius: 16,
+                sheetCornerRadius: 20,
                 headerShown: false,
                 contentStyle: { backgroundColor: colors.surface },
               }}
@@ -263,7 +279,7 @@ export default function RootLayout() {
                 presentation: "formSheet",
                 sheetAllowedDetents: "fitToContents",
                 sheetGrabberVisible: true,
-                sheetCornerRadius: 16,
+                sheetCornerRadius: 20,
                 headerShown: false,
                 contentStyle: { backgroundColor: colors.surface },
               }}
@@ -279,7 +295,7 @@ export default function RootLayout() {
                     ? "fitToContents"
                     : [0.75, 1],
                 sheetGrabberVisible: true,
-                sheetCornerRadius: 16,
+                sheetCornerRadius: 20,
                 headerShown: false,
                 contentStyle: { backgroundColor: colors.surface },
               })}
@@ -291,7 +307,7 @@ export default function RootLayout() {
                 presentation: "formSheet",
                 sheetAllowedDetents: "fitToContents",
                 sheetGrabberVisible: true,
-                sheetCornerRadius: 16,
+                sheetCornerRadius: 20,
                 headerShown: false,
                 contentStyle: { backgroundColor: colors.surface },
               }}
@@ -303,7 +319,7 @@ export default function RootLayout() {
                 presentation: "formSheet",
                 sheetAllowedDetents: [1],
                 sheetGrabberVisible: true,
-                sheetCornerRadius: 16,
+                sheetCornerRadius: 20,
                 headerShown: false,
                 contentStyle: { backgroundColor: colors.surface },
               }}
@@ -327,7 +343,7 @@ export default function RootLayout() {
                 presentation: "formSheet",
                 sheetAllowedDetents: "fitToContents",
                 sheetGrabberVisible: true,
-                sheetCornerRadius: 16,
+                sheetCornerRadius: 20,
                 headerShown: false,
                 contentStyle: { backgroundColor: colors.surface },
               }}
@@ -335,7 +351,13 @@ export default function RootLayout() {
           </Stack>
         </LockGate>
       </ThemeProvider>
-      {splash ? <Splash onDone={splashDone} /> : null}
+      {/* the splash continues the native one (app.json's #050505 ground): Dark Default always */}
+      {splash ? (
+        <PaletteProvider palette={paletteOf(DARK_DEFAULT)}>
+          <Splash onDone={splashDone} />
+        </PaletteProvider>
+      ) : null}
+    </PaletteProvider>
     </SafeAreaProvider>
     </GestureHandlerRootView>
   );

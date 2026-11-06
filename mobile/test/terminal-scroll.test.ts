@@ -7,6 +7,7 @@ import * as terminal from "../src/terminal";
 import * as paneView from "../src/paneView";
 import * as controlKeys from "../src/controlKeys";
 import * as selection from "../src/selection";
+import { themeStub } from "./helpers/themeStub";
 
 type Node = { type: unknown; props: Record<string, unknown> & { children: unknown[] } };
 type Touch = (event: { nativeEvent: { touches: { pageX: number; pageY: number }[] } }) => void;
@@ -54,7 +55,7 @@ function harness(typing = false) {
     "./Icon": { Icon: "Icon" },
     "./SelectionBar": { SelectionBar: "SelectionBar" },
     "./ControlRow": { NO_STICKY: {}, ControlRow: "ControlRow" },
-    "./theme": { colors: {}, ui: () => "ui" },
+    "./theme": themeStub,
     "../../modules/rift-keys": { KeyCaptureView: "KeyCaptureView" },
     "@/protocol/types": {}, "@/controlKeys": controlKeys, "./PaneLoading": {}, "./Notice": {}, "expo-clipboard": {},
   };
@@ -81,7 +82,8 @@ function harness(typing = false) {
   const touch = (name: string, y?: number, x = 100) => (node.props[name] as Touch)({ nativeEvent: { touches: y === undefined ? [] : [{ pageX: x, pageY: y }] } });
   return {
     send, touch, tree, focus,
-    press: () => (find(tree, (n) => n.type === "Pressable" && n.props.accessible === false)!.props.onPress as () => void)(),
+    // a press event as React Native gives one: where the finger lifted (no link on this test's screen)
+    press: () => (find(tree, (n) => n.type === "Pressable" && n.props.accessible === false)!.props.onPress as (e: unknown) => void)({ nativeEvent: { pageX: 0, pageY: 0 } }),
     background: () => appListeners.forEach((fn) => fn("background")),
     blur: () => focusCleanups.forEach((fn) => fn()),
     unmount: () => { focusCleanups.forEach((fn) => fn()); cleanups.forEach((fn) => fn()); },

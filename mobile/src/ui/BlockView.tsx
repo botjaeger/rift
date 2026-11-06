@@ -1,11 +1,13 @@
 import { memo, useMemo, useState } from "react";
-import { ScrollView, StyleSheet, Text, View, type LayoutChangeEvent } from "react-native";
+import { ScrollView, Text, View, type LayoutChangeEvent } from "react-native";
 import { firstLine, parseTable } from "@/paneView";
 import type { Block } from "@/protocol/types";
-import { CardFrame, CardHead, Pill } from "./BlockCards";
+import { CardFrame, CardHead } from "./BlockCards";
+import { Button } from "./Button";
 import { formatDuration } from "./format";
+import { Marked } from "./Marked";
 import { SelectableText } from "./SelectableText";
-import { colors, mono, ui } from "./theme";
+import { mono, ui, makeStyles, useColors } from "./theme";
 
 /**
  * Output text: wrapped to the width, or (wrap off) as printed, scrolling sideways with a fade
@@ -17,17 +19,21 @@ export function Output({
   ground,
   size = 12,
   lineHeight = 17.4,
+  mark,
 }: {
   text: string;
   wrap: boolean;
   ground: string;
   size?: number;
   lineHeight?: number;
+  /** The Search output query: its matches are marked. */
+  mark?: string;
 }) {
+  const styles = useStyles();
   const [view, setView] = useState({ width: 0, content: 0, x: 0 });
   if (wrap) {
     return (
-      <SelectableText text={text} style={{ ...styles.output, fontSize: size }} lineHeight={lineHeight} />
+      <SelectableText text={text} style={{ ...styles.output, fontSize: size }} lineHeight={lineHeight} mark={mark} />
     );
   }
   const scrolls = view.content > view.width + 1;
@@ -50,7 +56,7 @@ export function Output({
           }}
           scrollEventThrottle={32}
         >
-          <SelectableText text={text} style={{ ...styles.output, fontSize: size }} lineHeight={lineHeight} />
+          <SelectableText text={text} style={{ ...styles.output, fontSize: size }} lineHeight={lineHeight} mark={mark} />
         </ScrollView>
         {scrolls && at < 1 ? (
           <View pointerEvents="none" style={styles.fade}>
@@ -75,6 +81,8 @@ interface Props {
   onActions: (id: number) => void;
   /** Wrap long lines; off: the raw output scrolls sideways. */
   wrap: boolean;
+  /** The Search output query: its matches in the command and output are marked. */
+  mark?: string;
 }
 
 /**
@@ -82,7 +90,9 @@ interface Props {
  * command, "✓ 1.2s" at the right. Output that is a table (`docker ps`) is a list with a
  * "Raw" / "As list" pill. The whole output is in the block sheet.
  */
-export const BlockView = memo(function BlockView({ block, onActions, wrap }: Props) {
+export const BlockView = memo(function BlockView({ block, onActions, wrap, mark }: Props) {
+  const colors = useColors();
+  const styles = useStyles();
   const [raw, setRaw] = useState(false);
   // the tail of a long output may have lost its header: only whole output is a table
   const rows = useMemo(() => (block.dropped === 0 ? parseTable(block.output) : null), [block.dropped, block.output]);
@@ -95,8 +105,8 @@ export const BlockView = memo(function BlockView({ block, onActions, wrap }: Pro
       border={block.exit === null ? colors.hairline : `${colors.success}55`}
       label={`${block.command || "Command"}, ${state}${block.restored ? ", restored from an earlier session" : ""}`}
       onOpen={() => onActions(block.id)}
-      head={<CardHead command={block.command} status={status} color={block.exit === null ? colors.textMuted : colors.success} />}
-      pills={rows ? <Pill label={raw ? "As list" : "Raw"} color={colors.textMuted} onPress={() => setRaw((r) => !r)} /> : undefined}
+      head={<CardHead command={block.command} status={status} color={block.exit === null ? colors.textMuted : colors.success} mark={mark} />}
+      pills={rows ? <Button label={raw ? "As list" : "Raw"} size="small" onPress={() => setRaw((r) => !r)} /> : undefined}
     >
       {rows && !raw ? (
         <View accessibilityRole="list" style={styles.list}>
@@ -104,23 +114,33 @@ export const BlockView = memo(function BlockView({ block, onActions, wrap }: Pro
             <View key={i} accessible accessibilityLabel={[r.name, r.meta, r.state].filter(Boolean).join(", ")} style={styles.row}>
               <View style={styles.dot} />
               <View style={styles.rowText}>
-                <Text style={styles.rowName}>{r.name}</Text>
-                {r.meta ? <Text style={styles.rowMeta}>{r.meta}</Text> : null}
+                <Text style={styles.rowName}>
+                  <Marked text={r.name} query={mark} />
+                </Text>
+                {r.meta ? (
+                  <Text style={styles.rowMeta}>
+                    <Marked text={r.meta} query={mark} />
+                  </Text>
+                ) : null}
               </View>
-              {r.state ? <Text style={styles.rowState}>{r.state}</Text> : null}
+              {r.state ? (
+                <Text style={styles.rowState}>
+                  <Marked text={r.state} query={mark} />
+                </Text>
+              ) : null}
             </View>
           ))}
         </View>
       ) : rows ? (
-        <Output text={block.output.trimEnd()} wrap={wrap} ground={colors.surface} size={11.5} lineHeight={17} />
+        <Output text={block.output.trimEnd()} wrap={wrap} ground={colors.surface} size={11.5} lineHeight={17} mark={mark} />
       ) : line ? (
-        <SelectableText text={line} style={styles.line} lineHeight={19} lines={2} />
+        <SelectableText text={line} style={styles.line} lineHeight={19} lines={2} mark={mark} />
       ) : null}
     </CardFrame>
   );
 });
 
-const styles = StyleSheet.create({
+const useStyles = makeStyles((colors) => ({
   output: { color: colors.fg, fontFamily: mono },
   sideways: { gap: 5 },
   fade: { position: "absolute", top: 0, bottom: 0, right: 0, width: 28, flexDirection: "row" },
@@ -145,4 +165,4 @@ const styles = StyleSheet.create({
   // textMuted: the mockup's textDim is 4.49:1 on a surface (palette.ts)
   rowMeta: { fontFamily: mono, color: colors.textMuted, fontSize: 12 },
   rowState: { fontFamily: ui(400), color: colors.success, fontSize: 12 },
-});
+}));

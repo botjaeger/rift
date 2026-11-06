@@ -88,6 +88,9 @@ pub struct ControlSource {
     screens: Mutex<HashMap<u64, Held>>,
     /// Shells phones started while no window is open (`remote_access`).
     background: crate::background::Background,
+    /// The theme the windows reported at the last topology (`None`: no
+    /// window answered; the config's theme is used).
+    theme: Mutex<Option<rift_remote::protocol::Theme>>,
 }
 
 /// A pane's last screen read ([`ControlSource::screens`]).
@@ -126,6 +129,57 @@ fn background_theme() -> rift_core::Theme {
         .flatten()
         .unwrap_or_else(rift_core::Config::fallback)
         .resolve_theme_for(false)
+}
+
+/// The desktop theme `t` as phones get it (`theme` of the welcome and the
+/// `theme` message): its name, whether its ground is dark, and its tokens
+/// as `rrggbb` / `rrggbbaa`. A theme file's name is cut to
+/// [`rift_remote::MAX_THEME_NAME`], ending in "…" (an empty one is "Custom"), so a phone
+/// never drops the theme over its name.
+pub fn wire_theme(t: &rift_core::Theme) -> rift_remote::protocol::Theme {
+    let hex = |c: rift_core::Color| c.to_hex().trim_start_matches('#').to_string();
+    rift_remote::protocol::Theme {
+        name: wire_theme_name(&t.name),
+        dark: !t.is_light(),
+        bg: hex(t.bg),
+        bg_chrome: hex(t.bg_chrome),
+        surface: hex(t.surface),
+        border: hex(t.border),
+        fg: hex(t.fg),
+        text_bright: hex(t.text_bright),
+        text_ui: hex(t.text_ui),
+        text_dim: hex(t.text_dim),
+        text_muted: hex(t.text_muted),
+        accent: hex(t.accent),
+        success: hex(t.success),
+        error: hex(t.error),
+        warning: hex(t.warning),
+        selection: hex(t.selection),
+        ansi: t.ansi.iter().map(|c| hex(*c)).collect(),
+    }
+}
+
+/// `name` trimmed; one longer than [`rift_remote::MAX_THEME_NAME`] UTF-16
+/// code units is cut at a character boundary and ends in "…" (within the
+/// bound), so the phone shows it was cut; "Custom" when empty.
+fn wire_theme_name(name: &str) -> String {
+    let name = name.trim();
+    if name.is_empty() {
+        return "Custom".into();
+    }
+    if name.encode_utf16().count() <= rift_remote::MAX_THEME_NAME {
+        return name.into();
+    }
+    // the ellipsis takes one unit
+    let mut units = 0;
+    let cut: String = name
+        .chars()
+        .take_while(|c| {
+            units += c.len_utf16();
+            units < rift_remote::MAX_THEME_NAME
+        })
+        .collect();
+    format!("{}\u{2026}", cut.trim_end())
 }
 
 /// Tell the computer's user that a phone started a shell.
@@ -239,6 +293,7 @@ impl Source for ControlSource {
     fn topology(&self) -> Vec<Window> {
         let mut owner = HashMap::new();
         let mut windows = Vec::new();
+        let mut theme = None;
         for path in control::sockets() {
             let Ok(r) = control::request(&path, &Request::Status) else {
                 continue;
@@ -246,6 +301,7 @@ impl Source for ControlSource {
             let Some(pid) = r.pid.filter(|_| r.ok) else {
                 continue;
             };
+            theme = theme.or(r.theme);
             let tabs = r
                 .tabs
                 .into_iter()
@@ -295,7 +351,14 @@ impl Source for ControlSource {
             .unwrap()
             .retain(|pane, _| owner.contains_key(pane) || is_background(*pane));
         *self.owner.lock().unwrap() = owner;
+        *self.theme.lock().unwrap() = theme;
         windows
+    }
+
+    fn theme(&self) -> Option<rift_remote::protocol::Theme> {
+        let held = self.theme.lock().unwrap().clone();
+        // no window (or none asked yet): the theme the config names
+        Some(held.unwrap_or_else(|| wire_theme(&background_theme())))
     }
 
     fn blocks(&self, pane: u64, before: Option<u64>, limit: usize) -> Result<Page, SourceError> {
@@ -1790,6 +1853,78 @@ mod tests {
     }
 
     use super::*;
+
+    /// The phone's copy of the builtin themes (`mobile/src/themes.data.ts`),
+    /// as [`wire_theme`] sends them.
+    fn themes_data() -> String {
+        let all: Vec<_> = rift_core::theme::builtin::all()
+            .iter()
+            .map(wire_theme)
+            .collect();
+        format!(
+            "// Generated from crates/rift-core/src/theme/*.toml by\n\
+             // `RIFT_WRITE_THEMES=1 cargo test -p rift-terminal themes_data`; do not edit.\n\
+             import type {{ Theme }} from \"./protocol/types\";\n\n\
+             /** The desktop's builtin themes, in its picker's order, as a computer sends them. */\n\
+             export const BUILTIN_THEMES: readonly Theme[] = {};\n",
+            serde_json::to_string_pretty(&all).unwrap()
+        )
+    }
+
+    #[test]
+    fn themes_data_is_the_phones_copy_of_the_builtin_themes() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../mobile/src/themes.data.ts");
+        let want = themes_data();
+        if std::env::var_os("RIFT_WRITE_THEMES").is_some() {
+            std::fs::write(&path, &want).unwrap();
+        }
+        let have = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            have == want,
+            "mobile/src/themes.data.ts is out of date: RIFT_WRITE_THEMES=1 cargo test -p rift-terminal themes_data"
+        );
+    }
+
+    #[test]
+    fn the_wire_theme_is_the_desktops_with_its_tokens() {
+        // the shared fixture is Dark Default as the gateway sends it
+        let text = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../rift-remote/fixtures/server/welcome-theme.json"),
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let t = wire_theme(&rift_core::theme::builtin::dark_default());
+        assert_eq!(serde_json::to_value(&t).unwrap(), v["theme"]);
+        let light = wire_theme(&rift_core::theme::builtin::light_default());
+        assert!(!light.dark);
+        assert_eq!((light.bg.as_str(), light.ansi.len()), ("ffffff", 16));
+    }
+
+    #[test]
+    fn a_theme_files_name_fits_the_phones_bound() {
+        let mut t = rift_core::theme::builtin::dark_default();
+        // 70 two-unit emoji: 31 of them whole (62 UTF-16 units), then "…"
+        t.name = "\u{1F600}".repeat(70);
+        let name = wire_theme(&t).name;
+        assert_eq!(name.encode_utf16().count(), 63);
+        assert_eq!(name.chars().count(), 32);
+        assert!(name.ends_with("\u{1F600}\u{2026}"));
+        t.name = "a".repeat(65);
+        let name = wire_theme(&t).name;
+        assert_eq!(name.encode_utf16().count(), rift_remote::MAX_THEME_NAME);
+        assert_eq!(name, format!("{}\u{2026}", "a".repeat(63)));
+        // at the bound: whole, no ellipsis
+        t.name = "a".repeat(64);
+        assert_eq!(wire_theme(&t).name, "a".repeat(64));
+        // a cut at a space drops it before the ellipsis
+        t.name = format!("{} {}", "a".repeat(62), "b".repeat(10));
+        assert_eq!(wire_theme(&t).name, format!("{}\u{2026}", "a".repeat(62)));
+        t.name = "  ".into();
+        assert_eq!(wire_theme(&t).name, "Custom");
+        t.name = "My Dracula".into();
+        assert_eq!(wire_theme(&t).name, "My Dracula");
+    }
 
     #[test]
     fn completions_are_whole_lines_and_history_is_newest_first_once() {

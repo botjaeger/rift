@@ -42,6 +42,7 @@ import {
   type MoveKind,
   type OpenKind,
   type ScreenMode,
+  type Theme,
   type Waiting,
   type WelcomeMsg,
   type Window,
@@ -50,10 +51,14 @@ import {
   DEFAULT_SETTINGS,
   HostsStore,
   MAX_DEVICE_NAME,
+  loadHostTheme,
+  loadLastTheme,
   loadLastView,
   loadOrCreateIdentity,
   loadPaneTitles,
   loadSettings,
+  saveHostTheme,
+  saveLastTheme,
   saveLastView,
   savePaneTitles,
   saveSettings,
@@ -65,6 +70,11 @@ import {
 } from "./stores";
 
 export const MAX_ACTIVITY = 100;
+
+/** Whether two themes are the same (name and every token). */
+export function sameTheme(a: Theme, b: Theme): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
 /** An `ack` that has not arrived by then is reported as unanswered. */
 export const ACK_TIMEOUT_MS = 10_000;
 /** "Notify me" requests waiting for their `done`. */
@@ -132,6 +142,8 @@ export interface HostView {
   copiedAt?: number;
   /** Epoch milliseconds the connection was last open, this app run (null: not yet). */
   lastSeen: number | null;
+  /** The theme the computer last sent (this run, or stored from an earlier one); absent: none yet. */
+  theme?: Theme;
 }
 
 /** A "Notify me" waiting for its command (the bell on a running block). */
@@ -201,6 +213,8 @@ export interface AppState {
   paneTitles: PaneTitles;
   /** The last settings change could not be saved (it was put back); shown in Settings until one saves. */
   settingsError: string | null;
+  /** The computer's theme the app last showed (stored): what a computer that sends none keeps. */
+  lastTheme: Theme | null;
 }
 
 /** Whether the computers must hear of a settings change (what they alert about, and where). */
@@ -450,6 +464,7 @@ export class Fleet {
       lastView: null,
       paneTitles: {},
       settingsError: null,
+      lastTheme: null,
     });
   }
 
@@ -464,10 +479,17 @@ export class Fleet {
       const records = await this.hostsStore.load();
       const lastView = await loadLastView(this.deps.kv);
       const paneTitles = await loadPaneTitles(this.deps.kv);
+      const lastTheme = await loadLastTheme(this.deps.kv);
+      const themes = new Map<string, Theme>();
+      for (const r of records) {
+        const t = await loadHostTheme(this.deps.kv, r.key);
+        if (t) themes.set(r.key, t);
+      }
       this.store.update((s) => ({
         ...s,
         lastView,
         paneTitles,
+        lastTheme,
         settings,
         deviceName: settings.deviceName ?? this.deps.systemDeviceName,
         hosts: records.map((record) => ({
@@ -479,6 +501,7 @@ export class Fleet {
           topology: false,
           notice: null,
           lastSeen: null,
+          ...(themes.has(record.key) ? { theme: themes.get(record.key)! } : {}),
         })),
       }));
       for (const r of records) this.connect(r);
@@ -545,7 +568,10 @@ export class Fleet {
           this.sendVisible(key, client, true);
           this.sendPush(key, client);
           void this.refreshRecord(key, welcome, client);
+          // a computer without a theme keeps the one it last sent (none: the app's last)
+          if (welcome.theme) this.setHostTheme(key, welcome.theme);
         },
+        onTheme: (theme) => this.setHostTheme(key, theme),
         onTopology: (msg) => {
           this.patchHost(key, { windows: msg.windows, topology: true });
           this.rememberTitles(key, msg.windows);
@@ -840,14 +866,15 @@ export class Fleet {
   /**
    * Retries a host that stopped (auth or key failure shown to the user), or waits less. While
    * connections are paused (offline, background), a stopped host is set up again but held
-   * until they resume, and a waiting one is left alone.
+   * until they resume, and a waiting one is left alone. `lanFirst`: a connected one (Connection's
+   * Test again) starts over at this network's addresses, not the last path that worked.
    */
-  retry(key: string): void {
+  retry(key: string, opts: { lanFirst?: boolean } = {}): void {
     const view = this.host(key);
     if (!view) return;
     const c = this.clients.get(key);
     if (c && c.connState.status !== "failed") {
-      if (!this.paused) c.restart();
+      if (!this.paused) c.restart(opts);
     } else {
       this.connect(view.record);
     }
@@ -995,6 +1022,24 @@ export class Fleet {
     this.store.flush();
   }
 
+  /** Computer `key`'s theme, kept for the next cold start (saved only when it changed). */
+  private setHostTheme(key: string, theme: Theme): void {
+    const was = this.host(key)?.theme;
+    if (!this.host(key) || (was && sameTheme(was, theme))) return;
+    this.patchHost(key, { theme });
+    void this.saveNavigation(() => saveHostTheme(this.deps.kv, key, theme)).catch(() => undefined);
+    this.noteShownTheme();
+  }
+
+  /** The theme of the computer in view becomes the app's last (what a computer without one keeps). */
+  private noteShownTheme(): void {
+    const s = this.store.peek();
+    const theme = s.lastView ? this.host(s.lastView.host)?.theme : undefined;
+    if (!theme || (s.lastTheme && sameTheme(s.lastTheme, theme))) return;
+    this.store.update((st) => ({ ...st, lastTheme: theme }));
+    void this.saveNavigation(() => saveLastTheme(this.deps.kv, theme)).catch(() => undefined);
+  }
+
   /**
    * The host (and pane) on screen, kept for the next cold start; null when Hosts (or another
    * tab) shows. Saved only when it changes.
@@ -1003,6 +1048,7 @@ export class Fleet {
     const cur = this.store.peek().lastView;
     if (cur?.host === view?.host && cur?.pane === view?.pane) return;
     this.store.update((s) => ({ ...s, lastView: view }));
+    this.noteShownTheme();
     try {
       await this.saveNavigation(() => saveLastView(this.deps.kv, view));
     } catch {

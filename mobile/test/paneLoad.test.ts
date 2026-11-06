@@ -118,6 +118,11 @@ describe("paneLoad: the PaneLoading board's states", () => {
     expect(paneLoad(input({ conn: reaching, now: T0 + SLOW_MS - 1 })).card!.title).toBe("Opening “3.16.0 updates pull”");
   });
 
+  it("a wait past an hour reads as a clock with hours, as a running block's", () => {
+    expect(paneLoad(input({ conn: reaching, now: T0 + 3_600_000 })).strip!.elapsed).toBe("1:00:00");
+    expect(paneLoad(input({ conn: reaching, now: T0 + 3_723_000 })).strip!.elapsed).toBe("1:02:03");
+  });
+
   it("counts the wait from the later of the page opening and the connection starting", () => {
     // connecting since T0, the page opened 20 s later: 3 s in, not slow
     const l = paneLoad(input({ conn: reaching, waitingSince: T0 + 20_000, now: T0 + 23_000 }));

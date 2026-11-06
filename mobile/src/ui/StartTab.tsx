@@ -1,12 +1,12 @@
 import { useActionScope } from "@/ui/useActionScope";
 import { useRouter } from "expo-router";
 import { useRef, useState } from "react";
-import { AccessibilityInfo, StyleSheet, Text, View } from "react-native";
+import { AccessibilityInfo, Text, View } from "react-native";
 import { canOperate, hasFeature, type HostView } from "@/fleet";
 import { authenticate, fleet } from "@/runtime";
 import { Button } from "./Button";
 import { ErrorText } from "./Notice";
-import { colors, ui } from "./theme";
+import { ui, makeStyles } from "./theme";
 
 /** Whether `host` takes a shell from this phone while no Rift window is open (feature `start`). */
 export function canStartTab(host: HostView): boolean {
@@ -25,6 +25,7 @@ export function canStartTab(host: HostView): boolean {
  * out under the button.
  */
 export function StartTab({ host, onOpened }: { host: HostView; onOpened?: (pane: number | undefined) => void }) {
+  const styles = useStyles();
   const router = useRouter();
   const scope = useActionScope(host.record.key);
   const [error, setError] = useState<string | null>(null);
@@ -78,7 +79,7 @@ export function StartTab({ host, onOpened }: { host: HostView; onOpened?: (pane:
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = makeStyles((colors) => ({
   box: { gap: 10, paddingHorizontal: 20, paddingTop: 14 },
   note: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13, lineHeight: 18 },
-});
+}));

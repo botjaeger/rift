@@ -236,10 +236,15 @@ describe("settings", () => {
 
   it("control keys: the board's row by default; unknown and repeated ids dropped, order kept", async () => {
     const kv = new MemoryStore();
-    expect(DEFAULT_SETTINGS.controlKeys).toEqual(["esc", "tab", "ctrl+c", "ctrl", "up", "down", "enter"]);
-    // a row stored as the old default moves to the new one
+    expect(DEFAULT_SETTINGS.controlKeys).toEqual(["esc", "tab", "ctrl", "enter", "paste"]);
+    // a row stored as an old default moves to the key block's
     kv.data.set("rift.settings", JSON.stringify({ controlKeys: ["ctrl+c", "esc", "tab", "ctrl", "up", "down"] }));
     expect((await loadSettings(kv)).controlKeys).toEqual(DEFAULT_SETTINGS.controlKeys);
+    kv.data.set("rift.settings", JSON.stringify({ controlKeys: ["esc", "tab", "ctrl+c", "ctrl", "up", "down", "enter"] }));
+    expect((await loadSettings(kv)).controlKeys).toEqual(DEFAULT_SETTINGS.controlKeys);
+    // a chosen row keeps its keys; its arrows are on the pad
+    kv.data.set("rift.settings", JSON.stringify({ controlKeys: ["f5", "left", "ctrl+r", "up"] }));
+    expect((await loadSettings(kv)).controlKeys).toEqual(["f5", "ctrl+r"]);
     kv.data.set("rift.settings", JSON.stringify({ controlKeys: ["f5", "alt", "rm -rf", "f5", 7, "ctrl+z"] }));
     expect((await loadSettings(kv)).controlKeys).toEqual(["f5", "alt", "ctrl+z"]);
     kv.data.set("rift.settings", JSON.stringify({ controlKeys: [] }));

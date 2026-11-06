@@ -17,6 +17,7 @@ const ICONS = {
   settings: { ios: "gearshape", android: "settings", web: "settings" },
   wrapOn: { ios: "return", android: "wrap_text", web: "wrap_text" },
   wrapOff: { ios: "text.alignleft", android: "format_align_left", web: "format_align_left" },
+  textSize: { ios: "textformat.size", android: "format_size", web: "format_size" },
   search: { ios: "magnifyingglass", android: "search", web: "search" },
   folder: { ios: "folder", android: "folder", web: "folder" },
   branch: { ios: "arrow.triangle.branch", android: "fork_right", web: "fork_right" },

@@ -1,5 +1,6 @@
-// The control-key row above the command line and under the terminal screen: which keys it
-// holds and in what order (Settings › Control keys). Pure; the ids are stored in settings.
+// The key block under the command line and under the terminal screen: which keys it holds and
+// in what order (Settings › Keys), the arrow pad beside it, and a held arrow's repeat. Pure; the
+// ids are stored in settings.
 
 import type { OpenKind } from "./protocol/types";
 import type { IconName } from "./ui/Icon";
@@ -47,12 +48,12 @@ export const CONTROL_KEYS: readonly ControlKey[] = [
   { id: "ctrl+c", tip: "Sends Ctrl+C: stops the running command", label: "⌃C", icon: "interrupt", spoken: "Control C, interrupt", name: "Interrupt", danger: true },
   { id: "esc", tip: "Sends Escape: leaves a mode, cancels a prompt, closes a menu", label: "Esc", spoken: "Escape" },
   { id: "tab", tip: "Sends Tab: completes what you typed, or moves to the next field", label: "Tab", spoken: "Tab" },
-  { id: "shift+tab", tip: "Sends Shift+Tab: moves back, or to the previous option", label: "⇧Tab", lead: "shift", spoken: "Shift Tab", short: "Shift Tab" },
+  { id: "shift+tab", tip: "Sends Shift+Tab: moves back, or to the previous option", label: "⇧Tab", lead: "shift", spoken: "Shift Tab", short: "Back tab" },
   { id: "enter", tip: "Sends Return: confirms a menu or a picker in the program. With text in the message box, a new line there", label: "↵", icon: "enter", spoken: "Return", name: "Return", short: "Return" },
   { id: "ctrl+j", tip: "Starts a new line in the message, without sending it", label: "New line", icon: "newLine", spoken: "New line", name: "New line", short: "New line" },
-  { id: "ctrl", tip: "Holds Control for the next key you type or press: Ctrl, then R is Ctrl+R", label: "⌃", icon: "control", spoken: "Control, applies to the next key", name: "Control the next key", short: "Control", sticky: true },
-  { id: "alt", tip: "Holds Alt for the next key you type or press: Alt, then B moves back a word", label: "⌥", icon: "option", spoken: "Alt, applies to the next key", name: "Alt the next key", short: "Alt", sticky: true },
-  { id: "shift", tip: "Holds Shift for the next key you type or press", label: "⇧", icon: "shift", spoken: "Shift, applies to the next key", name: "Shift the next key", short: "Shift", sticky: true },
+  { id: "ctrl", tip: "Holds Control for the next key you type or press: Ctrl, then R is Ctrl+R", label: "⌃", icon: "control", spoken: "Control, held for the next key", short: "Control", sticky: true },
+  { id: "alt", tip: "Holds Alt for the next key you type or press: Alt, then B moves back a word", label: "⌥", icon: "option", spoken: "Alt, held for the next key", short: "Alt", sticky: true },
+  { id: "shift", tip: "Holds Shift for the next key you type or press", label: "⇧", icon: "shift", spoken: "Shift, held for the next key", short: "Shift", sticky: true },
   { id: "up", tip: "Sends the up arrow: the previous command, or up in a menu", label: "↑", icon: "up", spoken: "Up arrow", short: "Up" },
   { id: "down", tip: "Sends the down arrow: the next command, or down in a menu", label: "↓", icon: "down", spoken: "Down arrow", short: "Down" },
   { id: "left", tip: "Sends the left arrow: moves the cursor one character left", label: "←", icon: "left", spoken: "Left arrow", short: "Left" },
@@ -87,21 +88,33 @@ export function controlKey(id: string): ControlKey | undefined {
   return BY_ID.get(id);
 }
 
-/** The default row: Esc Tab ⌃C ⌃ ↑ ↓ Return (Settings › Keys). New line is in Choose keys, not here: the phone keyboard's Return is a new line. */
-export const DEFAULT_CONTROL_KEYS: readonly string[] = ["esc", "tab", "ctrl+c", "ctrl", "up", "down", "enter"];
+/** The arrow pad's keys, in its order (↑ above ← ↓ →): beside the key block, never in it. */
+export const ARROW_KEYS: readonly string[] = ["up", "left", "down", "right"];
+const isArrow = (id: string) => ARROW_KEYS.includes(id);
+
+/**
+ * The default key block (the Keys redesign board): Esc Tab ⌃ Return Paste, then the keyboard key,
+ * which is always the block's last. ⌃C is ⌃ then C, and Stop ⌃C leads the command line while a
+ * program runs; New line is in Settings › Keys, not here: the phone keyboard's Return is a new line.
+ */
+export const DEFAULT_CONTROL_KEYS: readonly string[] = ["esc", "tab", "ctrl", "enter", "paste"];
 /** The default before the arrows joined: a row stored as exactly this moves to the new default. */
 export const OLD_DEFAULT_CONTROL_KEYS: readonly string[] = ["ctrl+c", "esc", "tab", "ctrl", "up", "down"];
 /** The default before Return and New line joined: a row stored as exactly this moves too. */
 const ARROWS_DEFAULT_CONTROL_KEYS: readonly string[] = ["esc", "tab", "ctrl+c", "ctrl", "left", "up", "down", "right"];
 /** The default with New line after Return: a row stored as exactly this moves too. */
 const NEWLINE_DEFAULT_CONTROL_KEYS: readonly string[] = ["esc", "tab", "ctrl+c", "ctrl", "up", "down", "enter", "ctrl+j"];
-/** Keys the row holds at most (the hide-keyboard key comes besides). */
-export const MAX_ROW_KEYS = 8;
+/** The one-line row's default, before the key block and arrow pad: a row stored as exactly this moves too. */
+export const ROW_DEFAULT_CONTROL_KEYS: readonly string[] = ["esc", "tab", "ctrl+c", "ctrl", "up", "down", "enter"];
+/** Places in the key block, the keyboard key's included (Settings › Keys: "6 of 8 in the key block"). */
+export const BLOCK_SLOTS = 8;
+/** Keys Settings › Keys can put in the block: every place but the keyboard key's. */
+export const MAX_ROW_KEYS = BLOCK_SLOTS - 1;
 
 /**
- * The row as shown: `ids`, with Paste at the end where an image can be pasted (`images`: the
- * computer takes uploads and this device operates) and the row lacks it. A screenshot for Claude
- * Code or vim starts with Paste, so it is never left to Settings › Keys to add (the stored row
+ * The block as shown: `ids`, with Paste at the end where an image can be pasted (`images`: the
+ * computer takes uploads and this device operates) and the block lacks it. A screenshot for Claude
+ * Code or vim starts with Paste, so it is never left to Settings › Keys to add (the stored list
  * stays as the user set it).
  */
 export function rowWithPaste(ids: readonly string[], images: boolean): readonly string[] {
@@ -109,31 +122,20 @@ export function rowWithPaste(ids: readonly string[], images: boolean): readonly 
 }
 
 /**
- * The row over a message box: Paste first where an image can be pasted and the row lacks it. The row
- * scrolls, and a key at its end starts out of sight on a phone (the stored row stays as the user set it).
+ * The key block's columns for `count` keys (the keyboard key included): 3 x 2 as the board draws
+ * six, wider when Settings › Keys holds more, so the block keeps its two rows and its 88 pt.
  */
-export function messageBoxRow(ids: readonly string[], images: boolean): readonly string[] {
-  return images && !ids.includes("paste") ? ["paste", ...ids] : ids;
-}
+export const blockColumns = (count: number): number => Math.max(3, Math.ceil(count / 2));
 
-/**
- * The row under a full-screen program: the default row gains ← and → (vim, lazygit and a phone
- * keyboard without arrows have no other way sideways); a row the user chose stays theirs.
- */
-export function fullScreenRow(ids: readonly string[]): readonly string[] {
-  if (!sameIds(ids, DEFAULT_CONTROL_KEYS)) return ids;
-  const at = ids.indexOf("down") + 1;
-  return [...ids.slice(0, at), "left", "right", ...ids.slice(at)];
-}
-
-/** Whether the row has room for another key. */
+/** Whether the block has room for another key. */
 export const canAddKey = (ids: readonly string[]) => ids.length < MAX_ROW_KEYS;
 
 const sameIds = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every((id, i) => id === b[i]);
 
 /**
- * A stored row: known ids, each once, in order; anything else (not an array) is the default, and
- * so is the previous default. A customised row is kept as stored, even longer than the maximum.
+ * A stored list: known ids, each once, in order; anything else (not an array) is the default, and
+ * so is any earlier default. The arrows leave the list: the arrow pad always has them, so a key
+ * nobody chose to drop is never lost. A customised list is kept otherwise, even longer than the maximum.
  */
 export function validControlKeys(v: unknown): string[] {
   if (!Array.isArray(v)) return [...DEFAULT_CONTROL_KEYS];
@@ -144,7 +146,8 @@ export function validControlKeys(v: unknown): string[] {
     seen.add(id);
     out.push(id);
   }
-  return sameIds(out, OLD_DEFAULT_CONTROL_KEYS) || sameIds(out, ARROWS_DEFAULT_CONTROL_KEYS) || sameIds(out, NEWLINE_DEFAULT_CONTROL_KEYS) ? [...DEFAULT_CONTROL_KEYS] : out;
+  const earlier = [OLD_DEFAULT_CONTROL_KEYS, ARROWS_DEFAULT_CONTROL_KEYS, NEWLINE_DEFAULT_CONTROL_KEYS, ROW_DEFAULT_CONTROL_KEYS];
+  return earlier.some((d) => sameIds(out, d)) ? [...DEFAULT_CONTROL_KEYS] : out.filter((id) => !isArrow(id));
 }
 
 /** `ids` with the key at `index` moved one place up (-1) or down (+1); unchanged at an end. */
@@ -166,16 +169,23 @@ export function moveKeyTo(ids: readonly string[], from: number, to: number): str
   return next;
 }
 
-/** The Add chips of Settings › Keys: every unused key (the row holds 8, so no F1–F12 group). */
-export function addChoices(ids: readonly string[]): { label: string; ids: string[] }[] {
-  return CONTROL_KEYS.filter((k) => !ids.includes(k.id)).map((k) => ({ label: k.label, ids: [k.id] }));
+/** What a search in Settings › Keys matches a key by: its label, its names, its id ("pgup", "page", "f5"). */
+const searchText = (k: ControlKey) => [k.label, k.name, k.short, k.spoken, k.id].filter(Boolean).join(" ").toLowerCase();
+
+/**
+ * Settings › Keys' Add a key: every key not in the block and not on the arrow pad, matching
+ * `query` (any word of its label or names; empty: all of them).
+ */
+export function addChoices(ids: readonly string[], query = ""): { label: string; ids: string[] }[] {
+  const q = query.trim().toLowerCase();
+  return CONTROL_KEYS.filter((k) => !ids.includes(k.id) && !isArrow(k.id) && (q === "" || searchText(k).includes(q))).map((k) => ({ label: k.label, ids: [k.id] }));
 }
 
 /** `ids` with `id` added at the end (on; unchanged when the row is full) or removed (off). */
 export function toggleKey(ids: readonly string[], id: string, on: boolean): string[] {
   if (on && (ids.includes(id) || !canAddKey(ids))) return [...ids];
   const without = ids.filter((k) => k !== id);
-  return on && BY_ID.has(id) ? [...without, id] : without;
+  return on && BY_ID.has(id) && !isArrow(id) ? [...without, id] : without;
 }
 
 /** What a key is called in its long-press tip: "⌃C · Interrupt". */
@@ -199,5 +209,61 @@ export class PressGate {
     const sent = this.long ? "none" : "send";
     this.long = false;
     return sent;
+  }
+}
+
+/** A held arrow repeats after this long (milliseconds), as a hardware keyboard's does. */
+export const REPEAT_DELAY_MS = 400;
+/** Then once every this long. */
+export const REPEAT_EVERY_MS = 80;
+
+/**
+ * A held arrow on the pad: the key goes once when the finger goes down (`start`), again after
+ * `REPEAT_DELAY_MS`, then every `REPEAT_EVERY_MS` until `stop` (the finger lifts, the touch is
+ * cancelled, the key is disabled, the view goes away or the app leaves the foreground). `tap` is
+ * the press that follows: it sends nothing after a touch (the touch sent already) and once for a
+ * screen reader's activation, which has no touch.
+ */
+export class KeyRepeat {
+  private delay: ReturnType<typeof setTimeout> | null = null;
+  private every: ReturnType<typeof setInterval> | null = null;
+  private touched = false;
+  // a touch that ends without a press (the finger slid off) forgets itself once the release
+  // handler has run, so the next screen reader activation still goes
+  private forget: ReturnType<typeof setTimeout> | null = null;
+  start(fire: () => void): void {
+    this.stop();
+    this.cancelForget();
+    this.touched = true;
+    fire();
+    this.delay = setTimeout(() => {
+      this.delay = null;
+      this.every = setInterval(fire, REPEAT_EVERY_MS);
+    }, REPEAT_DELAY_MS);
+  }
+  stop(): void {
+    if (this.delay !== null) clearTimeout(this.delay);
+    if (this.every !== null) clearInterval(this.every);
+    this.delay = null;
+    this.every = null;
+    if (this.touched && this.forget === null) {
+      this.forget = setTimeout(() => {
+        this.forget = null;
+        this.touched = false;
+      }, 0);
+    }
+  }
+  tap(fire: () => void): void {
+    this.cancelForget();
+    if (!this.touched) fire();
+    this.touched = false;
+  }
+  private cancelForget(): void {
+    if (this.forget !== null) clearTimeout(this.forget);
+    this.forget = null;
+  }
+  /** Whether a repeat is running (tests). */
+  get held(): boolean {
+    return this.delay !== null || this.every !== null;
   }
 }

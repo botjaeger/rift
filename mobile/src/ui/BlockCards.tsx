@@ -1,54 +1,20 @@
 import * as Clipboard from "expo-clipboard";
 import { memo, useEffect, useState, type ReactNode } from "react";
-import { AccessibilityInfo, Pressable, StyleSheet, Text, View, type StyleProp, type ViewStyle } from "react-native";
+import { AccessibilityInfo, Pressable, Text, View, type StyleProp, type ViewStyle } from "react-native";
 import { failureMessage, lastLines, parseLogLines } from "@/paneView";
 import type { Block } from "@/protocol/types";
+import { Button } from "./Button";
 import { formatClock } from "./format";
 import { Icon } from "./Icon";
+import { Marked } from "./Marked";
 import { SelectableText } from "./SelectableText";
 import { Spinner } from "./StatusMark";
-import { colors, mono, radius, tints, ui } from "./theme";
-import { toggleA11y } from "./toggle";
-
-/** A small action under a card (the boards' 32 pt pill): an outline, the caution colour, or (`on`) the accent tint. */
-export function Pill({
-  label,
-  spoken,
-  icon,
-  color = colors.text,
-  border = colors.borderStrong,
-  on,
-  pressed: toggle,
-  onPress,
-}: {
-  label: string;
-  spoken?: string;
-  /** Drawn before the label. */
-  icon?: ReactNode;
-  color?: string;
-  border?: string;
-  /** The accent tint ground (a bell that is on). */
-  on?: boolean;
-  /** A toggle's state (aria-pressed). */
-  pressed?: boolean;
-  onPress: () => void;
-}) {
-  return (
-    <Pressable
-      {...(toggle === undefined ? { accessibilityRole: "button" as const } : toggleA11y(toggle))}
-      accessibilityLabel={spoken ?? label}
-      onPress={onPress}
-      hitSlop={{ top: 6, bottom: 6, left: 2, right: 2 }}
-      style={({ pressed }) => [styles.pill, { borderColor: border }, on && styles.pillOn, pressed && styles.pressed]}
-    >
-      {icon}
-      <Text style={[styles.pillText, { color }]}>{label}</Text>
-    </Pressable>
-  );
-}
+import { mono, radius, ui, makeStyles, useColors } from "./theme";
 
 /** "✓ 3 earlier commands succeeded … Show": the folded successes (now.ts `foldBlocks`), the board's 36 pt pill. */
 export function FoldRow({ count, onShow }: { count: number; onShow: () => void }) {
+  const colors = useColors();
+  const styles = useStyles();
   return (
     <Pressable
       accessibilityRole="button"
@@ -67,6 +33,8 @@ export function FoldRow({ count, onShow }: { count: number; onShow: () => void }
 
 /** A running block's clock "4:12", ticking locally between gateway updates. */
 export function Elapsed({ ms }: { ms: number }) {
+  const colors = useColors();
+  const styles = useStyles();
   const [base, setBase] = useState(ms);
   const [extra, setExtra] = useState(0);
   if (base !== ms) {
@@ -104,6 +72,7 @@ export function CardFrame({
   children?: ReactNode;
   pills?: ReactNode;
 }) {
+  const styles = useStyles();
   const frame: StyleProp<ViewStyle> = [styles.card, { backgroundColor: ground, borderColor: border }];
   return (
     <View style={frame}>
@@ -122,10 +91,13 @@ export function CardFrame({
 }
 
 /** The command, wrapping, and its status badge (the board's `cmd` and `status`). */
-export function CardHead({ command, status, badge, color }: { command: string; status: string; badge?: string; color: string }) {
+export function CardHead({ command, status, badge, color, mark }: { command: string; status: string; badge?: string; color: string; mark?: string }) {
+  const styles = useStyles();
   return (
     <>
-      <Text style={styles.command}>{command || " "}</Text>
+      <Text style={styles.command}>
+        <Marked text={command || " "} query={mark} />
+      </Text>
       {status ? (
         <Text style={[styles.status, { color }, badge ? { backgroundColor: badge } : null]}>{status}</Text>
       ) : null}
@@ -137,10 +109,14 @@ interface CardProps {
   block: Block;
   /** Opens the block sheet. */
   onActions: (id: number) => void;
+  /** The Search output query: its matches in the command and output are marked. */
+  mark?: string;
 }
 
 /** A failed command: `✕ 127`, its message and path, Run again (not for a view-only device: no `onRunAgain`), Copy error. */
-export const FailedCard = memo(function FailedCard({ block, onActions, onRunAgain }: CardProps & { onRunAgain?: (b: Block) => void }) {
+export const FailedCard = memo(function FailedCard({ block, onActions, onRunAgain, mark }: CardProps & { onRunAgain?: (b: Block) => void }) {
+  const colors = useColors();
+  const styles = useStyles();
   const fail = failureMessage(block.output);
   return (
     <CardFrame
@@ -148,21 +124,23 @@ export const FailedCard = memo(function FailedCard({ block, onActions, onRunAgai
       border={`${colors.error}55`}
       label={`${block.command || "Command"}, failed, exit ${block.exit}${fail ? `, ${fail.text}` : ""}`}
       onOpen={() => onActions(block.id)}
-      head={<CardHead command={block.command} status={`✕ ${block.exit}`} badge={tints.errorBadge} color={colors.textBright} />}
+      head={<CardHead command={block.command} status={`✕ ${block.exit}`} badge={colors.tints.errorBadge} color={colors.textBright} mark={mark} />}
       pills={
         <>
           {onRunAgain ? (
-            <Pill
+            <Button
               label="Run again"
+              size="small"
               icon={<Icon name="rerun" size={14} color={colors.text} />}
               onPress={() => onRunAgain(block)}
             />
           ) : null}
           {/* nothing to copy from a command that printed nothing (`false`) */}
           {block.output !== "" ? (
-            <Pill
+            <Button
               label="Copy error"
-              spoken="Copy error: copies the output"
+              size="small"
+              accessibilityLabel="Copy error: copies the output"
               onPress={() =>
                 void Clipboard.setStringAsync(block.output).then(
                   () => AccessibilityInfo.announceForAccessibility("Error copied"),
@@ -174,8 +152,8 @@ export const FailedCard = memo(function FailedCard({ block, onActions, onRunAgai
         </>
       }
     >
-      {fail ? <SelectableText text={fail.text} style={styles.failText} lineHeight={19} /> : null}
-      {fail?.path ? <SelectableText text={fail.path} style={styles.sub} lineHeight={16} /> : null}
+      {fail ? <SelectableText text={fail.text} style={styles.failText} lineHeight={19} mark={mark} /> : null}
+      {fail?.path ? <SelectableText text={fail.path} style={styles.sub} lineHeight={16} mark={mark} /> : null}
     </CardFrame>
   );
 });
@@ -187,42 +165,45 @@ export const RunningCard = memo(function RunningCard({
   notify,
   onBell,
   onStop,
+  mark,
 }: CardProps & { notify: boolean; onBell: (b: Block, on: boolean) => void; onStop?: () => void }) {
+  const colors = useColors();
+  const styles = useStyles();
   const latest = lastLines(block.output, 2);
   const logs = parseLogLines(latest);
   return (
     <CardFrame
-      ground={tints.running}
+      ground={colors.tints.running}
       border={`${colors.accent}55`}
       label={`${block.command || "Command"}, running`}
       onOpen={() => onActions(block.id)}
       head={
         <>
           <Spinner style={styles.spinner} />
-          <Text style={styles.command}>{block.command || " "}</Text>
+          <Text style={styles.command}>
+            <Marked text={block.command || " "} query={mark} />
+          </Text>
           <Elapsed ms={block.duration_ms} />
         </>
       }
       pills={
         <>
           {onStop ? (
-            <Pill
+            <Button
               label="Stop"
-              spoken="Stop, sends control C"
-              color={colors.warning}
-              border={`${colors.warning}66`}
-              icon={<Icon name="stop" size={12} color={colors.warning} />}
+              accessibilityLabel="Stop, sends control C"
+              variant="destructive"
+              size="small"
+              icon={<Icon name="stop" size={12} color={colors.error} />}
               onPress={onStop}
             />
           ) : null}
-          <Pill
+          {/* the accent's text on the tint over the running ground is 4.3:1, so the label stays in the text colour */}
+          <Button
             label={notify ? "Notifies when done" : "Notify when done"}
-            spoken="Notify when done"
+            accessibilityLabel="Notify when done"
+            size="small"
             pressed={notify}
-            on={notify}
-            // the accent's text on the tint over the running ground is 4.3:1, so the label stays bright
-            color={colors.textBright}
-            border={notify ? `${colors.accent}33` : colors.borderStrong}
             icon={<Icon name={notify ? "bellFill" : "bell"} size={14} color={notify ? colors.accent : colors.text} />}
             onPress={() => onBell(block, !notify)}
           />
@@ -238,7 +219,7 @@ export const RunningCard = memo(function RunningCard({
                 {r.level}
               </Text>
               <View style={styles.logMessage}>
-                <SelectableText text={r.message} style={styles.logMessageText} lineHeight={18} lines={1} />
+                <SelectableText text={r.message} style={styles.logMessageText} lineHeight={18} lines={1} mark={mark} />
               </View>
               {r.time ? <Text style={styles.logTime}>{r.time}</Text> : null}
             </View>
@@ -246,14 +227,14 @@ export const RunningCard = memo(function RunningCard({
         </>
       ) : (
         latest.map((l, i) => (
-          <SelectableText key={i} text={l} style={styles.latest} lineHeight={18} lines={1} />
+          <SelectableText key={i} text={l} style={styles.latest} lineHeight={18} lines={1} mark={mark} />
         ))
       )}
     </CardFrame>
   );
 });
 
-const styles = StyleSheet.create({
+const useStyles = makeStyles((colors) => ({
   pressed: { opacity: 0.7 },
   fold: {
     height: 36,
@@ -294,15 +275,4 @@ const styles = StyleSheet.create({
   logMessage: { flex: 1, minWidth: 0 },
   logMessageText: { fontFamily: mono, color: colors.textBright, fontSize: 13 },
   logTime: { fontFamily: mono, color: colors.fg, fontSize: 12 },
-  pill: {
-    height: 32,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    paddingHorizontal: 12,
-    borderRadius: 16,
-    borderWidth: 1,
-  },
-  pillOn: { backgroundColor: tints.accentBadge },
-  pillText: { fontFamily: ui(500), fontSize: 13 },
-});
+}));

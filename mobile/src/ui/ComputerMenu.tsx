@@ -1,10 +1,10 @@
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Pressable, Text, View } from "react-native";
 import type { HostView } from "@/fleet";
 import { tabPane } from "@/now";
-import { hostLine } from "./connStatus";
+import { hostLine, lastSeenAt } from "./connStatus";
 import { hostDot } from "./hostDot";
 import { Icon } from "./Icon";
-import { colors, ui } from "./theme";
+import { ui, makeStyles, useColors } from "./theme";
 
 /** The pane another computer opens on: its active tab's (the first window's), else its first tab's. */
 export function landingPane(host: HostView): number | null {
@@ -38,6 +38,8 @@ export function ComputerMenu({
   /** The computer on screen was picked: the menu closes. */
   onDismiss: () => void;
 }) {
+  const colors = useColors();
+  const styles = useStyles();
   const here = hosts.find((h) => h.record.key === current);
   return (
     <View accessibilityRole="menu" accessibilityLabel="Computers" style={[styles.menu, { top }]}>
@@ -47,13 +49,15 @@ export function ComputerMenu({
         const tabs = h.windows.reduce((n, w) => n + w.tabs.length, 0);
         const open = h.conn.status === "open";
         const pane = open ? landingPane(h) : null;
-        const line = hostLine(h.conn, now, open ? tabs : null).text;
+        // where it is: "This network · 30 tabs", "Over the relay", "Can’t reach it · last seen 2 h ago"
+        const line = hostLine(h.conn, now, open ? tabs : null, lastSeenAt(h)).text;
         const usable = on || pane !== null;
         return (
           <Pressable
             key={h.record.key}
             accessibilityRole="menuitem"
             accessibilityState={{ checked: on }}
+            aria-checked={on}
             accessibilityLabel={`${h.record.name}, ${line}`}
             // one it cannot open: Portals, where its card says why and has Try again
             accessibilityHint={usable ? undefined : "Opens Portals"}
@@ -61,7 +65,7 @@ export function ComputerMenu({
             style={({ pressed }) => [styles.row, styles.rule, pressed && styles.pressed]}
           >
             <View style={styles.dotBox}>
-              <View style={[styles.dot, { backgroundColor: hostDot(h) }]} />
+              <View style={[styles.dot, { backgroundColor: colors[hostDot(h)] }]} />
             </View>
             <View style={styles.text}>
               <Text style={[styles.title, !usable && { color: colors.textMuted }]} numberOfLines={1}>
@@ -98,14 +102,14 @@ export function ComputerMenu({
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = makeStyles((colors) => ({
   // the ⋯ menu's look, under the header's name
   menu: {
     position: "absolute",
     left: 12,
     width: 300,
     borderRadius: 14,
-    backgroundColor: "#2b2b2b",
+    backgroundColor: colors.menu,
     borderWidth: 1,
     borderColor: colors.glassRim,
     overflow: "hidden",
@@ -115,7 +119,8 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 16 },
     elevation: 16,
   },
-  cap: { fontFamily: ui(600), color: colors.textMuted, fontSize: 12, letterSpacing: 0.6, textTransform: "uppercase", paddingHorizontal: 14, paddingTop: 12, paddingBottom: 4 },
+  // the Standard's caption: Inter 500 12/16, uppercase
+  cap: { fontFamily: ui(500), color: colors.textMuted, fontSize: 12, lineHeight: 16, letterSpacing: 0.5, textTransform: "uppercase", paddingHorizontal: 14, paddingTop: 12, paddingBottom: 4 },
   row: { minHeight: 56, flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 14 },
   rule: { borderBottomWidth: 1, borderBottomColor: colors.hairline },
   first: { borderTopWidth: 1, borderTopColor: colors.borderStrong },
@@ -125,4 +130,4 @@ const styles = StyleSheet.create({
   text: { flex: 1, minWidth: 0, gap: 2, paddingVertical: 8 },
   title: { fontFamily: ui(400), color: colors.textBright, fontSize: 15 },
   hint: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12 },
-});
+}));

@@ -42,6 +42,7 @@ import {
   type DiffMsg,
   type DiffRequestMsg,
   type ScreenEndMsg,
+  type Theme,
   type ScreenMode,
   type ScreenMsg,
   type ServerMsg,
@@ -194,6 +195,8 @@ export interface ClientEvents {
   onDone?(msg: DoneMsg): void;
   /** A program on the computer copied this (feature `clipboard`). */
   onClipboard?(text: string): void;
+  /** The desktop's theme changed (feature `theme`); the welcome carries the first one. */
+  onTheme?(theme: Theme): void;
   onError?(msg: ErrorMsg): void;
   /**
    * The subscribed pane's screen, or its end. A `screen_end` is also reported (with nothing
@@ -1112,6 +1115,9 @@ export class RiftClient {
         return;
       case "clipboard":
         this.events.onClipboard?.(msg.text);
+        return;
+      case "theme":
+        this.events.onTheme?.(msg.theme);
         return;
       case "closing":
         this.setState({ closing: { reason: msg.reason, backInS: msg.back_in_s ?? null, at: Date.now() } });

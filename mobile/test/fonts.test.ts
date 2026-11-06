@@ -17,10 +17,10 @@ function sources(dir: string): string[] {
 const theme = readFileSync(join(src, "ui/theme.ts"), "utf8");
 const faces = [...(/FONT_FACES = \{([^}]*)\}/.exec(theme)?.[1] ?? "").matchAll(/"([^"]+)"/g)].map((m) => m[1]!);
 
-/** `name: { … }` entries of a file's StyleSheet.create blocks. */
+/** `name: { … }` entries of a file's style sheets (`makeStyles((colors) => ({ … }))`, or `StyleSheet.create`). */
 function styleEntries(text: string): Map<string, string> {
   const out = new Map<string, string>();
-  for (const block of text.matchAll(/StyleSheet\.create\(\{([\s\S]*?)\n\}\);/g))
+  for (const block of text.matchAll(/(?:StyleSheet\.create\(\{|makeStyles\(\(\w+\) => \(\{)([\s\S]*?)\n\}\)\)?;/g))
     for (const m of block[1]!.matchAll(/^\s{2}(\w+):\s*(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})/gm)) out.set(m[1]!, m[2]!);
   return out;
 }
@@ -55,13 +55,19 @@ describe("fonts (the mockups' Inter and JetBrains Mono, embedded)", () => {
 
   it("every outermost Text and TextInput gets a family from its styles (nested Text inherits)", () => {
     const missing: string[] = [];
-    for (const f of sources(src).filter((p) => p.endsWith(".tsx"))) {
+    // ui/Marked.tsx draws only spans its callers nest in their Text (checked below: every <Marked
+    // sits inside a Text) or in a field (SelectableText's children)
+    for (const f of sources(src).filter((p) => p.endsWith(".tsx") && !p.endsWith("/ui/Marked.tsx"))) {
       const text = readFileSync(f, "utf8");
       const entries = styleEntries(text);
       // walk the Text tags in order, tracking how deep inside a Text each one is
       let depth = 0;
-      for (const m of text.matchAll(/<(\/?)(Text|TextInput)\b/g)) {
+      for (const m of text.matchAll(/<(\/?)(Text|TextInput|Marked)\b/g)) {
         const [, close, tag] = m;
+        if (tag === "Marked") {
+          if (!close && depth === 0) missing.push(`${f.slice(src.length)}:${text.slice(0, m.index).split("\n").length} <Marked> outside a Text`);
+          continue;
+        }
         if (close) {
           if (tag === "Text") depth--;
           continue;

@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
+import { themeStub } from "./helpers/themeStub";
 
 type Element = { type: string; props: Record<string, unknown> & { children: unknown[] } };
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
@@ -43,14 +44,14 @@ function harness() {
     "@/protocol/relay": { addressHost: (s: string) => s },
     "@/ui/Icon": { Icon: "Icon" }, "@/ui/Notice": { ErrorText: "ErrorText", WarningText: "WarningText" },
     "@/ui/PromptText": { PromptText: "PromptText" }, "@/ui/Screen": { PageHeader: "PageHeader" }, "@/ui/Button": { Button: "Button" },
-    "@/ui/theme": { colors: {}, mono: "mono", radius: {}, tints: {}, ui: () => "ui" },
+    "@/ui/theme": themeStub,
     "@/closing": { afterClose: () => 13, closedText: () => "Closed", closeConfirm: () => null, closesCurrent: () => true, runningCount: () => 0 },
     "./confirm": { confirmDestructive: () => Promise.resolve(true) },
     "@/ui/Rows": { Group: "Group", CardBox: "CardBox", SwitchRow: "SwitchRow" },
   };
   function load(path: string): Record<string, unknown> {
     let source = readFileSync(new URL(`../src/${path}`, import.meta.url), "utf8");
-    if (path === "app/settings.tsx") source += "\nexport { Security };\n";
+    if (path === "app/settings.tsx") source += "\nexport { AppLock };\n";
     if (process.env.RIFT_ACTION_SCOPE_NEGATIVE_CONTROL && path === "ui/useActionScope.ts") source = source.replace("active && at === generation", () => "true");
     const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React, target: ts.ScriptTarget.ES2022 } }).outputText;
     const module = { exports: {} as Record<string, unknown> };
@@ -79,7 +80,7 @@ function harness() {
 
 describe("mobile action visit lifecycle", () => {
   it("Settings cannot enable the app lock after leaving during authentication", async () => {
-    const h = harness(); const tree = (h.load("app/settings.tsx").Security as () => Element)();
+    const h = harness(); const tree = (h.load("app/settings.tsx").AppLock as () => Element)();
     (h.find(tree, "SwitchRow").props.onChange as (on: boolean) => void)(true);
     h.blur(); h.refocus(); h.auth.resolve({ ok: true }); await flush();
     expect(h.fleet.updateSettings).not.toHaveBeenCalled();

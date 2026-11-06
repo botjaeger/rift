@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { useState } from "react";
 import { Animated, PanResponder, Pressable, StyleSheet, Text, View } from "react-native";
 import { ACTION_W, settle } from "./swipe";
-import { colors, ui } from "./theme";
+import { ui, makeStyles } from "./theme";
 
 /** The row's position and its drag, made once: no ref is read while rendering. */
 function makeRow(onOpen: (open: boolean) => void) {
@@ -44,6 +44,7 @@ export function SwipeAction({
   /** The row's corner radius: the action's ground is clipped to it. */
   radius: number;
 }) {
+  const styles = useStyles();
   const [open, setOpen] = useState(false);
   const [row] = useState(() => makeRow(setOpen));
   // the red ground shows only once the row has moved: a closed row has no red at its rounded corners
@@ -71,11 +72,11 @@ export function SwipeAction({
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = makeStyles((colors) => ({
   wrap: { overflow: "hidden" },
   ground: { position: "absolute", right: 0, top: 0, bottom: 0, width: ACTION_W, backgroundColor: colors.error },
   action: { flex: 1, alignItems: "center", justifyContent: "center" },
   pressed: { opacity: 0.8 },
   // the error color is light: dark text keeps the contrast
-  actionText: { fontFamily: ui(600), color: colors.bg, fontSize: 14 },
-});
+  actionText: { fontFamily: ui(600), color: colors.onAccent, fontSize: 14 },
+}));

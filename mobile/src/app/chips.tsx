@@ -1,7 +1,7 @@
 import { useActionScope } from "@/ui/useActionScope";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useEffect, useState } from "react";
-import { AccessibilityInfo, ActivityIndicator, Linking, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { AccessibilityInfo, ActivityIndicator, Linking, Pressable, ScrollView, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { branchRows, chipCommand, dirRows, splitPath, tildePath, type ChipAction } from "@/chips";
 import { canOperate } from "@/fleet";
@@ -10,23 +10,25 @@ import type { BranchesMsg, ChangedFile, ChangesMsg, ChipMsg, DirsMsg } from "@/p
 import { fleet, useApp, useLock } from "@/runtime";
 import { findPane, paneTitle } from "@/topology";
 import { Icon } from "@/ui/Icon";
+import { Field } from "@/ui/Field";
 import { ErrorText } from "@/ui/Notice";
-import { SheetClose } from "@/ui/SheetClose";
-import { colors, mono, monoMedium, radius, ui } from "@/ui/theme";
+import type { ColorName } from "@/ui/palette";
+import { SheetHeader } from "@/ui/SheetHeader";
+import { mono, radius, ui, makeStyles, useColors } from "@/ui/theme";
 
 type Menu = ChipOpen;
 type Answer = DirsMsg | BranchesMsg | ChangesMsg | ChipMsg;
 const MENUS: readonly Menu[] = ["dirs", "branches", "changes", "pr", "python", "php", "docker", "elapsed"];
 
-const STATUS: Record<string, { word: string; color: string }> = {
-  M: { word: "modified", color: colors.warning },
-  A: { word: "added", color: colors.success },
-  D: { word: "deleted", color: colors.textBright },
-  R: { word: "renamed", color: colors.accent },
-  C: { word: "copied", color: colors.accent },
-  T: { word: "type changed", color: colors.warning },
-  "?": { word: "untracked", color: colors.textMuted },
-  U: { word: "conflicted", color: colors.textBright },
+const STATUS: Record<string, { word: string; color: ColorName }> = {
+  M: { word: "modified", color: "warning" },
+  A: { word: "added", color: "success" },
+  D: { word: "deleted", color: "textBright" },
+  R: { word: "renamed", color: "accent" },
+  C: { word: "copied", color: "accent" },
+  T: { word: "type changed", color: "warning" },
+  "?": { word: "untracked", color: "textMuted" },
+  U: { word: "conflicted", color: "textBright" },
 };
 
 /** One row of a menu card (the FolderSheet / BranchSheet boards). */
@@ -43,6 +45,7 @@ function Row({
   detail,
   health,
   dimLabel,
+  words,
 }: {
   icon: React.ReactNode;
   label: string;
@@ -58,10 +61,14 @@ function Row({
   /** Muted text after the label: a version's source, a container's ports and uptime. */
   detail?: string;
   /** A container's health check verdict, in its colour. */
-  health?: { word: string; color: string } | null;
+  health?: { word: string; color: ColorName } | null;
   /** The label is dimmed (a stopped container). */
   dimLabel?: boolean;
+  /** The label is words, not a command or name (Parent folder, a folder: the Change folder board): Inter. */
+  words?: boolean;
 }) {
+  const colors = useColors();
+  const styles = useStyles();
   const dim = disabled && !mark;
   return (
     <Pressable
@@ -73,7 +80,7 @@ function Row({
       style={({ pressed }) => [styles.row, !first && styles.divider, pressed && styles.pressed, dim && styles.disabled]}
     >
       <View style={styles.icon}>{icon}</View>
-      <Text style={[styles.label, accent ? styles.accentLabel : null, danger ? styles.dangerLabel : null, dimLabel && styles.dimLabel]} numberOfLines={1}>
+      <Text style={[styles.label, words && styles.wordsLabel, accent ? styles.accentLabel : null, danger ? styles.dangerLabel : null, dimLabel && styles.dimLabel]} numberOfLines={1}>
         {label}
       </Text>
       {detail ? (
@@ -81,7 +88,7 @@ function Row({
           {detail}
         </Text>
       ) : null}
-      {health ? <Text style={[styles.detail, { color: health.color }]}>{health.word}</Text> : null}
+      {health ? <Text style={[styles.detail, { color: colors[health.color] }]}>{health.word}</Text> : null}
       {mark ? <Text style={styles.mark}>{mark}</Text> : null}
     </Pressable>
   );
@@ -93,6 +100,8 @@ function Row({
  * sheet first with Ask before running on); a changed file opens its diff.
  */
 export default function ChipsScreen() {
+  const colors = useColors();
+  const styles = useStyles();
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { key, pane: paneParam, menu: menuParam } = useLocalSearchParams<{ key: string; pane: string; menu: string }>();
@@ -160,15 +169,13 @@ export default function ChipsScreen() {
   };
 
   const detail = answer?.t === "chip" ? answer : null;
+  // a folder or branch menu names its task; the folder or branch it is in now is the subtitle
+  const current = menu === "dirs" ? (answer?.t === "dirs" && answer.cwd ? tildePath(answer.cwd) : null) : answer?.t === "branches" ? answer.current : null;
   const title =
     menu === "dirs"
-      ? answer?.t === "dirs" && answer.cwd
-        ? tildePath(answer.cwd)
-        : "Folder"
+      ? "Change folder"
       : menu === "branches"
-        ? answer?.t === "branches" && answer.current
-          ? answer.current
-          : "Branch"
+        ? "Change branch"
         : menu === "changes"
           ? "Changes"
           : detail?.kind === "pr"
@@ -187,12 +194,12 @@ export default function ChipsScreen() {
   const changes = answer?.t === "changes" ? answer : null;
   const added = changes?.files.reduce((n, f) => n + f.added, 0) ?? 0;
   const removed = changes?.files.reduce((n, f) => n + f.removed, 0) ?? 0;
+  // what a pick runs, under the field
+  const runs = menu === "dirs" ? `A folder runs cd in ${where}.` : menu === "branches" ? `A branch runs git checkout in ${where}.` : null;
   const subtitle =
-    menu === "dirs"
-      ? `Change folder · runs cd in ${where}`
-      : menu === "branches"
-        ? `Change branch · runs git checkout in ${where}`
-        : menu === "python" || menu === "php"
+    menu === "dirs" || menu === "branches"
+      ? current
+      : menu === "python" || menu === "php"
           ? `Pick a version for this shell · runs rift-use in ${where}`
           : menu === "docker"
             ? `Tap a service to follow its logs · runs docker compose logs in ${where}`
@@ -308,7 +315,8 @@ export default function ChipsScreen() {
               key={d}
               first={i === 0}
               icon={d === ".." ? <Text style={styles.glyph}>↑</Text> : <Icon name="folder" size={14} color={colors.textMuted} />}
-              label={d === ".." ? ".. (Parent folder)" : d}
+              label={d === ".." ? "Parent folder" : d}
+              words
               spoken={d === ".." ? "cd .. (parent folder)" : `cd into ${d}`}
               disabled={!operate || sending}
               onPress={() => void act({ kind: "cd", name: d })}
@@ -379,7 +387,7 @@ export default function ChipsScreen() {
                   }
                   style={({ pressed }) => [styles.file, i > 0 && styles.divider, pressed && styles.pressed]}
                 >
-                  <Text style={[styles.status, { color: st.color }]}>{f.status}</Text>
+                  <Text style={[styles.status, { color: colors[st.color] }]}>{f.status}</Text>
                   <View style={styles.fileText}>
                     <Text style={styles.fileName} numberOfLines={1}>
                       {name}
@@ -413,78 +421,67 @@ export default function ChipsScreen() {
     // the sheet's own, so the header must scroll with the list rather than sit above it.
     <ScrollView
       style={[styles.fill, hidden && styles.hidden]}
-      contentContainerStyle={[styles.content, { paddingBottom: Math.max(36, insets.bottom + 2) }]}
+      contentContainerStyle={{ paddingBottom: Math.max(36, insets.bottom + 2) }}
       keyboardShouldPersistTaps="handled"
       accessibilityElementsHidden={hidden}
       importantForAccessibility={hidden ? "no-hide-descendants" : "auto"}
     >
-      <SheetClose onClose={() => { if (scope.leave()) router.back(); }} />
-      <View style={styles.head}>
-        <Text
-          style={menu === "dirs" || menu === "branches" ? styles.monoTitle : styles.title}
-          accessibilityRole="header"
-          numberOfLines={1}
-          ellipsizeMode={menu === "dirs" ? "head" : "tail"}
-        >
-          {title}
-        </Text>
-        {subtitle ? <Text style={styles.subtitle}>{subtitle}</Text> : null}
-        {changes && changes.branch !== null ? (
-          <Text style={styles.subtitle}>
-            {changes.branch} · {changes.files.length} {changes.files.length === 1 ? "file" : "files"} ·{" "}
-            <Text style={{ color: colors.success }}>+{added}</Text> <Text style={{ color: colors.textBright }}>−{removed}</Text>
-          </Text>
+      <SheetHeader
+        title={title}
+        subtitle={
+          changes && changes.branch !== null ? (
+            <>
+              {changes.branch} · {changes.files.length} {changes.files.length === 1 ? "file" : "files"} ·{" "}
+              <Text style={styles.added}>+{added}</Text> <Text style={styles.removed}>−{removed}</Text>
+            </>
+          ) : (
+            subtitle
+          )
+        }
+        subtitleMono={menu === "dirs" || menu === "branches"}
+        onClose={() => {
+          if (scope.leave()) router.back();
+        }}
+      />
+      <View style={styles.content}>
+        {(menu === "dirs" || menu === "branches") && answer ? (
+          <Field
+            icon="search"
+            value={query}
+            onChangeText={setQuery}
+            autoCapitalize="none"
+            autoCorrect={false}
+            spellCheck={false}
+            placeholder={menu === "dirs" ? "Search folders" : "Search or name a new branch"}
+            label={menu === "dirs" ? "Search folders" : "Search branches"}
+          />
         ) : null}
+        {runs && operate ? <Text style={styles.note}>{runs}</Text> : null}
+        {!operate && host && menu !== "changes" && menu !== "pr" ? <Text style={styles.note}>View only: this device cannot run commands here.</Text> : null}
+        {error ? <ErrorText>{error}</ErrorText> : null}
+        {!answer && !error ? (
+          <View style={styles.loading} accessible accessibilityLabel="Loading">
+            <ActivityIndicator color={colors.accent} />
+          </View>
+        ) : null}
+        {list()}
+        {answer && "more" in answer && answer.more ? <Text style={styles.note}>Some were left out: the list holds 500 at most.</Text> : null}
       </View>
-      {(menu === "dirs" || menu === "branches") && answer ? (
-        <TextInput
-          value={query}
-          onChangeText={setQuery}
-          autoCapitalize="none"
-          autoCorrect={false}
-          spellCheck={false}
-          placeholder={menu === "dirs" ? "Search folders" : "Search or name a new branch"}
-          placeholderTextColor={colors.textMuted}
-          accessibilityLabel={menu === "dirs" ? "Search folders" : "Search branches"}
-          style={styles.search}
-        />
-      ) : null}
-      {!operate && host && menu !== "changes" && menu !== "pr" ? <Text style={styles.note}>View only: this device cannot run commands here.</Text> : null}
-      {error ? <ErrorText>{error}</ErrorText> : null}
-      {!answer && !error ? (
-        <View style={styles.loading} accessible accessibilityLabel="Loading">
-          <ActivityIndicator color={colors.accent} />
-        </View>
-      ) : null}
-      {list()}
-      {answer && "more" in answer && answer.more ? <Text style={styles.note}>Some were left out: the list holds 500 at most.</Text> : null}
     </ScrollView>
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = makeStyles((colors) => ({
   fill: { flex: 1, backgroundColor: colors.surface },
-  content: { paddingTop: 24, paddingHorizontal: 12, gap: 14 },
+  content: { paddingHorizontal: 16, gap: 14 },
   hidden: { opacity: 0 },
-  head: { paddingHorizontal: 6, gap: 4 },
-  title: { fontFamily: ui(600), color: colors.textBright, fontSize: 17 },
-  monoTitle: { fontFamily: monoMedium, color: colors.textBright, fontSize: 15 },
-  subtitle: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12 },
-  search: {
-    fontFamily: mono,
-    height: 40,
-    paddingHorizontal: 10,
-    borderRadius: radius.small,
-    borderWidth: 1,
-    borderColor: colors.borderStrong,
-    backgroundColor: colors.bg,
-    color: colors.textBright,
-    fontSize: 14,
-  },
-  note: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12, paddingHorizontal: 6 },
+  note: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13, lineHeight: 18, paddingHorizontal: 4 },
+  // the header's line counts (its subtitle's runs)
+  added: { fontFamily: ui(400), color: colors.success },
+  removed: { fontFamily: ui(400), color: colors.textBright },
   loading: { paddingVertical: 24 },
   empty: { fontFamily: ui(400), color: colors.textMuted, fontSize: 14, paddingHorizontal: 6, paddingVertical: 12 },
-  card: { backgroundColor: colors.bg, borderRadius: radius.card, borderWidth: 1, borderColor: colors.hairline, overflow: "hidden" },
+  card: { backgroundColor: colors.surface, borderRadius: radius.card, borderWidth: 1, borderColor: colors.hairline, overflow: "hidden" },
   row: { minHeight: 48, flexDirection: "row", alignItems: "center", gap: 14, paddingHorizontal: 14 },
   divider: { borderTopWidth: 1, borderTopColor: colors.hairline },
   pressed: { opacity: 0.6 },
@@ -492,6 +489,7 @@ const styles = StyleSheet.create({
   icon: { width: 20, alignItems: "center" },
   glyph: { fontFamily: mono, color: colors.textMuted, fontSize: 14 },
   label: { fontFamily: mono, flex: 1, color: colors.text, fontSize: 14 },
+  wordsLabel: { fontFamily: ui(400), fontSize: 15 },
   accentLabel: { fontFamily: ui(400), color: colors.accent },
   dangerLabel: { fontFamily: ui(400), color: colors.error },
   dimLabel: { color: colors.textMuted },
@@ -512,4 +510,4 @@ const styles = StyleSheet.create({
   fileName: { fontFamily: mono, color: colors.textBright, fontSize: 13 },
   folder: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12 },
   counts: { fontFamily: mono, fontSize: 12 },
-});
+}));

@@ -4,7 +4,8 @@
 
 import { MAX_RETRIES, type ConnState } from "../protocol/client";
 import { failureLabel } from "./connLabel";
-import { agoText, backInText, elapsedText, failNote, QUIT_HINT, retryRound, stoppedText, UPDATE_HINT, updating } from "./connStatus";
+import { agoText, backInText, failNote, QUIT_HINT, retryRound, stoppedText, UPDATE_HINT, updating } from "./connStatus";
+import { formatClock } from "./format";
 
 /** After this long without the pane the card says "Taking longer than usual". */
 export const SLOW_MS = 15_000;
@@ -154,13 +155,13 @@ export function paneLoad(i: PaneLoadInput): PaneLoad {
       const via = conn.path?.kind === "relay" ? " through the relay" : conn.path ? " on this network" : "";
       if (hasHeld) {
         return {
-          strip: { text: `Reconnecting · showing ${what} from ${heldAgo}`, tone: "busy", busy: true, elapsed: elapsedText(wait) },
+          strip: { text: `Reconnecting · showing ${what} from ${heldAgo}`, tone: "busy", busy: true, elapsed: formatClock(wait) },
           card: null,
           held: true,
         };
       }
       return {
-        strip: { text: `${slow ? "Still connecting" : "Connecting"}${via}`, tone: "busy", busy: true, elapsed: elapsedText(wait) },
+        strip: { text: `${slow ? "Still connecting" : "Connecting"}${via}`, tone: "busy", busy: true, elapsed: formatClock(wait) },
         card: slow
           ? {
               title: "Taking longer than usual",

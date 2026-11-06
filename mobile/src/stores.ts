@@ -6,6 +6,8 @@
 //   rift.host.<key>   one paired desktop (HostRecord)
 //   rift.settings     Settings
 //   rift.last         LastView: the host (and pane) on screen when the app last showed one
+//   rift.theme.<key>  the theme a paired desktop last sent (Theme)
+//   rift.theme.last   the computer's theme the app last showed (Theme)
 //
 // Hosts live one per entry so no single keychain item grows with the number of desktops.
 
@@ -14,7 +16,8 @@ import { keyPairFromPrivate, type KeyPair, type RandomBytes } from "./noise/nois
 import { DEFAULT_CONTROL_KEYS, validControlKeys } from "./controlKeys";
 import { isNtfyTopic, normalizeNtfyServer, NTFY_SERVER } from "./notify";
 import { isAddress, normalizeRelayUrl } from "./pairing";
-import type { Permission } from "./protocol/types";
+import { isTheme, type Permission, type Theme } from "./protocol/types";
+import { BUILTIN_THEMES } from "./themes.data";
 
 export interface KeyValueStore {
   /** null when absent; throws when the store cannot be read (e.g. a locked keychain). */
@@ -178,6 +181,7 @@ export class HostsStore {
       const index = await this.index();
       await this.kv.set(HOSTS_INDEX, JSON.stringify(index.filter((k) => k !== key)));
       await this.kv.delete(hostEntry(key));
+      await this.kv.delete(themeEntry(key));
     });
   }
 }
@@ -217,9 +221,30 @@ export interface Settings {
   ntfyTopic: string | null;
   /** "Check for updates automatically": at launch, every 15 minutes and on coming back (ota.ts). */
   autoUpdate: boolean;
+  /** Settings › Appearance. */
+  appearance: Appearance;
 }
 
 export type NotifyPolicy = "off" | "failures" | "all";
+
+/**
+ * Settings › Appearance: the paired computer's theme (`computer`, the default), the phone's light
+ * or dark (`phone`: Light Default / Dark Default), or one of the builtin themes by name (`theme`).
+ * It stays on the phone and never changes a computer.
+ */
+export type Appearance = { mode: "computer" } | { mode: "phone" } | { mode: "theme"; theme: string };
+
+export const DEFAULT_APPEARANCE: Appearance = { mode: "computer" };
+
+/** A stored appearance as it can be used: `theme` only with a builtin theme's name, else the default. */
+export function validAppearance(v: unknown): Appearance {
+  if (typeof v !== "object" || v === null) return DEFAULT_APPEARANCE;
+  const a = v as Record<string, unknown>;
+  if (a.mode === "phone") return { mode: "phone" };
+  if (a.mode === "theme" && typeof a.theme === "string" && BUILTIN_THEMES.some((t) => t.name === a.theme))
+    return { mode: "theme", theme: a.theme };
+  return DEFAULT_APPEARANCE;
+}
 
 /** The "Notify after" choices: 10 s, 30 s, 1 min, 5 min. */
 export const NOTIFY_AFTER_CHOICES: readonly number[] = [10_000, 30_000, 60_000, 300_000];
@@ -241,6 +266,7 @@ export const DEFAULT_SETTINGS: Settings = {
   ntfyEnabled: false,
   ntfyTopic: null,
   autoUpdate: true,
+  appearance: DEFAULT_APPEARANCE,
 };
 
 const SETTINGS_KEY = "rift.settings";
@@ -289,6 +315,8 @@ export async function loadSettings(kv: KeyValueStore): Promise<Settings> {
       ntfyTopic: typeof v.ntfyTopic === "string" && isNtfyTopic(v.ntfyTopic) ? v.ntfyTopic : null,
       // absent before the switch: on, as updates always were
       autoUpdate: bool("autoUpdate"),
+      // absent before Appearance: the computer's theme
+      appearance: validAppearance(v.appearance),
     };
   } catch {
     return DEFAULT_SETTINGS;
@@ -297,6 +325,36 @@ export async function loadSettings(kv: KeyValueStore): Promise<Settings> {
 
 export async function saveSettings(kv: KeyValueStore, settings: Settings): Promise<void> {
   await kv.set(SETTINGS_KEY, JSON.stringify(settings));
+}
+
+// --- themes ----------------------------------------------------------------------------------
+
+const themeEntry = (key: string) => `rift.theme.${key}`;
+const LAST_THEME_KEY = "rift.theme.last";
+
+async function loadTheme(kv: KeyValueStore, entry: string): Promise<Theme | null> {
+  try {
+    const raw = await kv.get(entry);
+    if (raw === null) return null;
+    const v: unknown = JSON.parse(raw);
+    return isTheme(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The theme computer `key` last sent; null when none was (an older Rift) or it cannot be read. */
+export const loadHostTheme = (kv: KeyValueStore, key: string) => loadTheme(kv, themeEntry(key));
+
+export async function saveHostTheme(kv: KeyValueStore, key: string, theme: Theme): Promise<void> {
+  await kv.set(themeEntry(key), JSON.stringify(theme));
+}
+
+/** The computer's theme the app last showed: what a computer without one keeps showing. */
+export const loadLastTheme = (kv: KeyValueStore) => loadTheme(kv, LAST_THEME_KEY);
+
+export async function saveLastTheme(kv: KeyValueStore, theme: Theme): Promise<void> {
+  await kv.set(LAST_THEME_KEY, JSON.stringify(theme));
 }
 
 // --- what's new ------------------------------------------------------------------------------

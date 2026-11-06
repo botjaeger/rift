@@ -17,6 +17,9 @@ interface PasteButtonProps {
   onFile: (file: PastedFile) => void;
   /** The control draws its icon and the system's word "Paste" (a row of the Attach sheet), not the icon alone. */
   labelled?: boolean;
+  /** The theme's ground and ink for the control (`#rrggbb` or `#rrggbbaa`). */
+  ground?: string;
+  ink?: string;
   style?: StyleProp<ViewStyle>;
 }
 
@@ -25,6 +28,8 @@ interface NativeProps {
   onPasteImage: (e: NativeSyntheticEvent<{ data: string }>) => void;
   onPasteFile: (e: NativeSyntheticEvent<PastedFile>) => void;
   labelled?: boolean;
+  ground?: string;
+  ink?: string;
   style?: StyleProp<ViewStyle>;
 }
 
@@ -33,7 +38,7 @@ const NativeButton = Platform.OS === "ios" ? requireNativeView<NativeProps>("Rif
 /** iOS's own paste button: reads the clipboard with no prompt (ios/RiftPasteButton.swift). */
 export const hasSystemPasteButton = NativeButton !== null;
 
-export function SystemPasteButton({ onText, onImage, onFile, labelled, style }: PasteButtonProps) {
+export function SystemPasteButton({ onText, onImage, onFile, labelled, ground, ink, style }: PasteButtonProps) {
   if (!NativeButton) return null;
   return (
     <NativeButton
@@ -41,6 +46,8 @@ export function SystemPasteButton({ onText, onImage, onFile, labelled, style }: 
       onPasteImage={(e) => onImage(e.nativeEvent.data)}
       onPasteFile={(e) => onFile(e.nativeEvent)}
       labelled={labelled}
+      ground={ground}
+      ink={ink}
       style={style}
     />
   );

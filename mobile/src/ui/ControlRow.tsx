@@ -1,16 +1,19 @@
-import { useState } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { useEffect, useRef, useState } from "react";
+import { AccessibilityInfo, AppState, Pressable, Text, View, type StyleProp, type ViewStyle } from "react-native";
 import { hasSystemPasteButton, SystemPasteButton, type PastedFile } from "../../modules/rift-keys";
-import { controlKey, keyTipTitle, PressGate, type ControlKey } from "@/controlKeys";
+import { ARROW_KEYS, blockColumns, controlKey, KeyRepeat, keyTipTitle, PressGate, type ControlKey } from "@/controlKeys";
 import type { OpenKind } from "@/protocol/types";
 import { Icon, type IconName } from "./Icon";
-import { colors, monoMedium, tints, TOUCH, ui } from "./theme";
+import { monoMedium, ui, makeStyles, useColors } from "./theme";
 import { toggleA11y } from "./toggle";
 
-/** A key's width (the Keys board: 52 x 44 pt). */
-export const KEY_W = 52;
+/** The key block's key height: two rows and their 6 pt gap are the 88 pt of the arrow pad. */
+export const KEY_H = 41;
+/** The arrow pad: 132 x 88 pt, three columns and two rows 4 pt apart (the Keys redesign board). */
+export const PAD_W = 132;
+export const BLOCK_H = 88;
 
-/** Sticky modifiers from the row, applied to the next key or letter. */
+/** Sticky modifiers from the block, applied to the next key or letter. */
 export interface Sticky {
   ctrl: boolean;
   alt: boolean;
@@ -23,35 +26,45 @@ export const NO_STICKY: Sticky = { ctrl: false, alt: false, shift: false };
 const modOf = (id: string): keyof Sticky => (id === "alt" ? "alt" : id === "shift" ? "shift" : "ctrl");
 
 /**
- * The Keys board's key (KeysNormalized): 52 x 44 pt with 12 pt corners, the surface ground and a
- * glass rim; an 18 pt icon from the one set (arrows, ⌃ ⌥ ⇧, Paste, New pane), or its label in
- * JetBrains Mono 13 ("Esc", "⌃D", "F5"), a word as wide as it needs. A modifier before a word
- * (⇧Tab) is its icon at 13 pt. Colour means a state only: the accent tint marks a held modifier.
+ * A key's face (the Keys redesign board): the surface ground, a glass rim and 8 pt corners; an
+ * 18 pt icon from the one set (arrows, ⌃ ⌥ ⇧, Return, the keyboard), its label in JetBrains Mono
+ * 13 ("Esc", "⌃D", "F5"), or a word in Inter 12 (Paste). A modifier before a word (⇧Tab) is its
+ * icon at 13 pt. Colour means a state only: a held modifier is lit, the accent with dark ink.
+ * `style` sizes it (the block's cells fill their place; Settings › Keys' list draws 44 x 34).
  */
 export function KeyCap({
   def,
-  color = colors.text,
+  color: colorProp,
   active,
-  ground = colors.surface,
+  ground: groundProp,
+  style,
 }: {
-  def: Pick<ControlKey, "label" | "icon" | "lead">;
+  def: Pick<ControlKey, "label" | "icon" | "lead" | "paste">;
   color?: string;
   active?: boolean;
-  /** The key's ground (Settings › Keys draws its rows' keys on the page). */
+  /** The key's ground (Settings › Keys draws its list's keys on the page). */
   ground?: string;
+  style?: StyleProp<ViewStyle>;
 }) {
-  const fg = active ? colors.accent : color;
+  const colors = useColors();
+  const styles = useStyles();
+  const color = colorProp ?? colors.text;
+  const ground = groundProp ?? colors.surface;
+  const fg = active ? colors.onAccent : color;
   // the lead icon stands for the label's first character (the ⇧ of ⇧Tab)
   const text = def.lead ? [...def.label].slice(1).join("") : def.label;
-  const word = !def.icon && [...def.label].length > 2;
   return (
-    <View style={[styles.key, { backgroundColor: ground }, word && styles.keyWord, active && styles.keyActive]}>
-      {def.icon ? (
+    <View style={[styles.key, { backgroundColor: ground }, style, active && styles.keyActive]}>
+      {def.paste ? (
+        <Text style={[styles.word, { color: fg }]}>{def.label}</Text>
+      ) : def.icon ? (
         <Icon name={def.icon} size={18} weight="medium" color={fg} />
       ) : (
         <>
           {def.lead ? <Icon name={def.lead} size={13} weight="medium" color={fg} /> : null}
-          <Text style={[styles.label, { color: fg }]}>{text}</Text>
+          <Text style={[styles.label, { color: fg }]} numberOfLines={1}>
+            {text}
+          </Text>
         </>
       )}
     </View>
@@ -71,8 +84,9 @@ export const tipOf = (k: ControlKey): Tip => ({ title: keyTipTitle(k), text: k.t
 const HIDE_TIP: Tip = { title: "Hide keyboard", text: "Closes the keyboard; tap the command field to bring it back" };
 const SHOW_TIP: Tip = { title: "Show keyboard", text: "Opens the keyboard for this pane" };
 
-/** The tip card: the key's name in bold, what it sends under it. Not touchable; the row positions it above itself. */
+/** The tip card: the key's name in bold, what it sends under it. Not touchable; the block positions it above itself. */
 export function KeyTip({ tip, below }: { tip: Tip; below?: boolean }) {
+  const styles = useStyles();
   return (
     <View pointerEvents="none" style={[styles.tip, below && styles.tipBelow]} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
       <Text style={styles.tipTitle}>{tip.title}</Text>
@@ -82,8 +96,9 @@ export function KeyTip({ tip, below }: { tip: Tip; below?: boolean }) {
 }
 
 /**
- * A key: a tap sends it; holding it for 450 ms shows its tip (`onTip`) and lifting the finger hides
- * the tip without sending anything. The tip is also the screen reader's hint.
+ * A key of the block: a tap sends it; holding it for 450 ms shows its tip (`onTip`) and lifting the
+ * finger hides the tip without sending anything. The tip is also the screen reader's hint. A held
+ * modifier (`active` given) is a toggle, announced as selected while it is lit.
  */
 export function Key({
   def,
@@ -96,7 +111,7 @@ export function Key({
   tip,
   onTip,
 }: {
-  def: Pick<ControlKey, "label" | "icon" | "lead">;
+  def: Pick<ControlKey, "label" | "icon" | "lead" | "paste">;
   spoken: string;
   onPress: () => void;
   active?: boolean;
@@ -106,11 +121,15 @@ export function Key({
   tip?: Tip;
   onTip?: (tip: Tip | null) => void;
 }) {
+  const styles = useStyles();
   const [gate] = useState(() => new PressGate());
+  const toggle = active === undefined ? null : toggleA11y(active, disabled);
   return (
     <Pressable
-      // the modifiers stay on for the next key: toggle buttons, announced as on or off
-      {...(active === undefined ? { accessibilityRole: "button" as const, accessibilityState: { disabled } } : toggleA11y(active, disabled))}
+      // the modifiers stay on for the next key: toggle buttons, announced as selected while lit
+      {...(toggle
+        ? { ...toggle, accessibilityState: { ...toggle.accessibilityState, selected: active } }
+        : { accessibilityRole: "button" as const, accessibilityState: { disabled } })}
       accessibilityLabel={spoken}
       accessibilityHint={hint ?? tip?.text}
       disabled={disabled}
@@ -128,9 +147,54 @@ export function Key({
       onPress={() => {
         if (gate.release() === "send") onPress();
       }}
-      style={({ pressed }) => [styles.slot, disabled && styles.disabled, pressed && styles.pressed]}
+      style={({ pressed }) => [styles.cell, disabled && styles.disabled, pressed && styles.pressed]}
     >
-      <KeyCap def={def} color={color} active={active} />
+      <KeyCap def={def} color={color} active={active} style={styles.fill} />
+    </Pressable>
+  );
+}
+
+/**
+ * An arrow of the pad: it goes when the finger goes down and repeats while held (controlKeys.ts
+ * `KeyRepeat`); lifting, a cancelled touch, disabling it, leaving the view or the app leaving the
+ * foreground stops it. A screen reader's activation sends it once.
+ */
+function ArrowKey({ id, disabled, onKey }: { id: string; disabled: boolean; onKey: (id: string) => void }) {
+  const colors = useColors();
+  const styles = useStyles();
+  const def = controlKey(id)!;
+  const [repeat] = useState(() => new KeyRepeat());
+  // the latest handler: a repeat calls the render's after a held modifier was used up
+  const send = useRef(onKey);
+  useEffect(() => {
+    send.current = onKey;
+  });
+  useEffect(() => {
+    if (disabled) repeat.stop();
+  }, [disabled, repeat]);
+  useEffect(() => {
+    const sub = AppState.addEventListener("change", (state) => {
+      if (state !== "active") repeat.stop();
+    });
+    return () => {
+      sub.remove();
+      repeat.stop();
+    };
+  }, [repeat]);
+  const fire = () => send.current(id);
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={def.spoken}
+      accessibilityHint={`${def.tip}. Hold to repeat`}
+      accessibilityState={{ disabled }}
+      disabled={disabled}
+      onPressIn={() => repeat.start(fire)}
+      onPressOut={() => repeat.stop()}
+      onPress={() => repeat.tap(fire)}
+      style={({ pressed }) => [styles.arrow, disabled && styles.disabled, pressed && styles.pressed]}
+    >
+      <KeyCap def={def} color={colors.text} style={styles.fill} />
     </Pressable>
   );
 }
@@ -138,14 +202,13 @@ export function Key({
 const icon = (name: IconName, label: string) => ({ icon: name, label });
 
 /**
- * The control-key row (Settings › Keys): `onKey` gets a key's protocol name, the sticky ctrl /
- * alt / shift toggle `sticky`, the new tab / new pane keys `onOpen` (disabled without it: the
- * computer's Rift cannot open them), Paste `onPaste` (disabled without it: the computer's Rift
- * takes no text). Above the command line it is one line that scrolls, led by Hide keyboard
- * (`onHideKeyboard`, while the keyboard is up) and ending in Edit keys (`onEdit`, Settings ›
- * Keys); under a full-screen program it wraps (`wrap`). Its keys are 52 pt wide in 44 pt
- * touch targets, so the row scrolls sideways; that scroll never moves the screen (one
- * direction only, no bounce). Nothing when the row is empty and there is no edit key.
+ * The keys (the Keys redesign board), one strip for the command line and a full-screen program
+ * alike: the key block (Settings › Keys, `ids`, in two rows; the keyboard key always last) beside
+ * the arrow pad (↑ above ← ↓ →; a held arrow repeats), 88 pt high, so the screen above keeps its
+ * size. `onKey` gets a key's protocol name, the sticky ctrl / alt / shift toggle `sticky` (lit
+ * until the next key), the new tab / new pane keys `onOpen` (disabled without it: the computer's
+ * Rift cannot open them), Paste `onPaste` (disabled without it: the computer's Rift takes no
+ * text). The keyboard key hides the keyboard (`onHideKeyboard`) or opens it (`onShowKeyboard`).
  */
 export function ControlRow({
   ids,
@@ -156,10 +219,9 @@ export function ControlRow({
   onOpen,
   onPaste,
   systemPaste,
-  onEdit,
   onHideKeyboard,
   onShowKeyboard,
-  wrap,
+  tipBelow,
 }: {
   ids: readonly string[];
   sticky: Sticky;
@@ -170,22 +232,24 @@ export function ControlRow({
   onPaste?: () => void;
   /** Where iOS's own paste button takes the key's place: it reads with no prompt. */
   systemPaste?: { onText: (text: string) => void; onImage: (b64: string) => void; onFile: (file: PastedFile) => void };
-  onEdit?: () => void;
   onHideKeyboard?: () => void;
-  /** The keyboard is down: the last key opens it (the terminal view; the command line has its own field). */
+  /** The keyboard is down: the keyboard key opens it. */
   onShowKeyboard?: () => void;
-  wrap?: boolean;
+  /** The tip card under the keys (Settings › Keys, under its header). */
+  tipBelow?: boolean;
 }) {
+  const colors = useColors();
+  const styles = useStyles();
   const [tip, setTip] = useState<Tip | null>(null);
-  if (ids.length === 0 && !onEdit && !onHideKeyboard && !onShowKeyboard) return null;
-  const keys = ids.map((id) => {
+  const keys = ids.flatMap((id) => {
     const def: ControlKey | undefined = controlKey(id);
-    if (!def) return null;
-    // Interrupt in the caution colour (red is below 4.5:1 on a surface, palette.ts)
-    const color = def.danger ? colors.warning : colors.text;
+    // the arrows are the pad's
+    if (!def || ARROW_KEYS.includes(id)) return [];
+    // Interrupt ends a program: the destructive red (palette.ts holds it to 4.5:1 on a surface)
+    const color = def.danger ? colors.error : colors.text;
     if (def.sticky) {
       const mod = modOf(id);
-      return (
+      return [
         <Key
           key={id}
           tip={tipOf(def)}
@@ -195,13 +259,17 @@ export function ControlRow({
           color={color}
           disabled={disabled}
           active={sticky[mod]}
-          onPress={() => onSticky({ ...sticky, [mod]: !sticky[mod] })}
-        />
-      );
+          onPress={() => {
+            const on = !sticky[mod];
+            onSticky({ ...sticky, [mod]: on });
+            AccessibilityInfo.announceForAccessibility(on ? `${def.short ?? def.spoken} held for the next key` : `${def.short ?? def.spoken} let go`);
+          }}
+        />,
+      ];
     }
     if (def.open) {
       const kind = def.open;
-      return (
+      return [
         <Key
           key={id}
           tip={tipOf(def)}
@@ -212,14 +280,18 @@ export function ControlRow({
           color={color}
           disabled={disabled || !onOpen}
           onPress={() => onOpen?.(kind)}
-        />
-      );
+        />,
+      ];
     }
     if (def.paste) {
       if (hasSystemPasteButton && systemPaste && onPaste && !disabled) {
-        return <SystemPasteButton key={id} {...systemPaste} style={[styles.key, styles.slot, { backgroundColor: colors.surface }]} />;
+        return [
+          <View key={id} style={styles.cell}>
+            <SystemPasteButton {...systemPaste} ground={colors.surface} ink={colors.text} style={[styles.key, styles.fill, { backgroundColor: colors.surface }]} />
+          </View>,
+        ];
       }
-      return (
+      return [
         <Key
           key={id}
           tip={tipOf(def)}
@@ -230,81 +302,78 @@ export function ControlRow({
           color={color}
           disabled={disabled || !onPaste}
           onPress={() => onPaste?.()}
-        />
-      );
+        />,
+      ];
     }
-    return (
-      <Key key={id} def={def} spoken={def.spoken} tip={tipOf(def)} onTip={setTip} color={color} disabled={disabled} onPress={() => onKey(id)} />
-    );
+    return [<Key key={id} def={def} spoken={def.spoken} tip={tipOf(def)} onTip={setTip} color={color} disabled={disabled} onPress={() => onKey(id)} />];
   });
-  // the last key, outside the scrolling keys so it never scrolls away: muted
-  const hide = onHideKeyboard ? (
-    <Key key="hide" def={icon("hideKeyboard", "⌨")} spoken="Hide keyboard" tip={HIDE_TIP} onTip={setTip} color={colors.textMuted} disabled={false} onPress={onHideKeyboard} />
-  ) : onShowKeyboard ? (
-    <Key key="show" def={icon("keyboard", "⌨")} spoken="Show keyboard" tip={SHOW_TIP} onTip={setTip} color={colors.textMuted} disabled={disabled} onPress={onShowKeyboard} />
-  ) : null;
-  const edit = onEdit ? (
-    <Key
-      key="edit"
-      def={icon("editKeys", "⌨")}
-      spoken="Edit keys"
-      hint="Settings › Keys: choose and order these keys"
-      color={colors.textMuted}
-      disabled={false}
-      onPress={onEdit}
-      tip={{ title: "Edit keys", text: "Settings › Keys: choose and order these keys" }}
-      onTip={setTip}
-    />
-  ) : null;
-  const card = tip ? <KeyTip tip={tip} /> : null;
-  if (wrap) {
-    return (
-      <View style={styles.host}>
-        {card}
-        <View style={[styles.keys, styles.wrap]} accessibilityRole="toolbar" accessibilityLabel="Keys">
-          {keys}
-          {edit}
-          {hide}
-        </View>
-      </View>
-    );
-  }
+  // the keyboard key, always the block's last
+  keys.push(
+    onHideKeyboard ? (
+      <Key key="keyboard" def={icon("hideKeyboard", "⌨")} spoken="Hide keyboard" tip={HIDE_TIP} onTip={setTip} disabled={false} onPress={onHideKeyboard} />
+    ) : (
+      <Key
+        key="keyboard"
+        def={icon("keyboard", "⌨")}
+        spoken="Show keyboard"
+        hint={onShowKeyboard ? undefined : "This computer's Rift takes keys only; update it to type here"}
+        tip={SHOW_TIP}
+        onTip={setTip}
+        disabled={disabled || !onShowKeyboard}
+        onPress={() => onShowKeyboard?.()}
+      />
+    ),
+  );
+  // two rows, as many columns as the keys need (three for the default six); a short last row keeps the columns
+  const cols = blockColumns(keys.length);
+  const rows = [keys.slice(0, cols), keys.slice(cols)].map((row, r) => (
+    <View key={r} style={styles.row}>
+      {row}
+      {Array.from({ length: cols - row.length }, (_, i) => (
+        <View key={`gap${i}`} style={styles.cell} />
+      ))}
+    </View>
+  ));
+  const arrow = (id: string) => <ArrowKey key={id} id={id} disabled={disabled} onKey={onKey} />;
   return (
     <View style={styles.host}>
-      {card}
-      <View style={styles.line}>
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          style={styles.scroll}
-          contentContainerStyle={styles.keys}
-          // sideways only: a swipe on the keys never drags the page or the keyboard with it
-          directionalLockEnabled
-          alwaysBounceVertical={false}
-          bounces={false}
-          overScrollMode="never"
-          nestedScrollEnabled
-          keyboardShouldPersistTaps="always"
-          accessibilityRole="toolbar"
-          accessibilityLabel="Keys"
-        >
-          {keys}
-          {edit}
-        </ScrollView>
-        {hide}
+      {tip ? <KeyTip tip={tip} below={tipBelow} /> : null}
+      <View style={styles.block}>
+        <View style={styles.keys} accessibilityRole="toolbar" accessibilityLabel="Keys">
+          {rows}
+        </View>
+        <View style={styles.pad} accessibilityRole="toolbar" accessibilityLabel="Arrow keys">
+          <View style={styles.padRow}>
+            <View style={styles.arrowGap} />
+            {arrow("up")}
+            <View style={styles.arrowGap} />
+          </View>
+          <View style={styles.padRow}>
+            {arrow("left")}
+            {arrow("down")}
+            {arrow("right")}
+          </View>
+        </View>
       </View>
     </View>
   );
 }
 
-// The Keys board's keys (KeysNormalized): 52 x 44 with a 12 pt radius, the key itself the 44 pt slot (the row takes
-// 4 pt back above and below, as the boards do), a word key as wide as its word, on the surface
-// with a glass rim; the accent tint and rim for a modifier that is on.
-const styles = StyleSheet.create({
+// The Keys redesign board: the key block (3 columns, 41 pt keys 6 pt apart) and, 10 pt beside it,
+// the 132 x 88 arrow pad (4 pt gaps); every key 8 pt corners on the surface with a glass rim, a lit
+// modifier the accent with dark ink.
+const useStyles = makeStyles((colors) => ({
   host: { zIndex: 2 },
-  line: { flexDirection: "row", alignItems: "center", gap: 6, marginVertical: -4 },
-  scroll: { flex: 1, flexGrow: 1 },
-  // the tip floats above the row, over what is there: a card on the raised ground
+  block: { flexDirection: "row", gap: 10, height: BLOCK_H },
+  keys: { flex: 1, minWidth: 0, gap: 6 },
+  row: { flex: 1, flexDirection: "row", gap: 6 },
+  cell: { flex: 1, minWidth: 0, height: KEY_H },
+  pad: { width: PAD_W, height: BLOCK_H, gap: 4 },
+  padRow: { flex: 1, flexDirection: "row", gap: 4 },
+  arrow: { flex: 1 },
+  arrowGap: { flex: 1 },
+  fill: { flex: 1, width: "100%" },
+  // the tip floats above the keys, over what is there: a card on the raised ground
   tip: {
     position: "absolute",
     left: 0,
@@ -315,7 +384,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     gap: 2,
     borderRadius: 12,
-    backgroundColor: "#2b2b2b",
+    backgroundColor: colors.menu,
     borderWidth: 1,
     borderColor: colors.glassRim,
     elevation: 12,
@@ -325,14 +394,8 @@ const styles = StyleSheet.create({
   tipBelow: { bottom: undefined, top: "100%", marginBottom: 0, marginTop: 8 },
   tipTitle: { fontFamily: ui(600), color: colors.textBright, fontSize: 14 },
   tipText: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12, lineHeight: 17 },
-  keys: { gap: 6 },
-  wrap: { flexDirection: "row", flexWrap: "wrap", marginVertical: -4 },
-  // the 44 x 44 touch target around a key
-  slot: { minWidth: TOUCH, minHeight: TOUCH, alignItems: "center", justifyContent: "center" },
   key: {
-    width: KEY_W,
-    height: TOUCH,
-    borderRadius: 12,
+    borderRadius: 8,
     flexDirection: "row",
     gap: 3,
     alignItems: "center",
@@ -340,10 +403,10 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.glassRim,
   },
-  keyWord: { width: undefined, minWidth: KEY_W, paddingHorizontal: 12 },
-  // a held modifier: the accent tint and rim, its icon in the accent
-  keyActive: { backgroundColor: tints.accentBadge, borderColor: colors.accent },
+  // a held modifier: lit, the accent ground and rim, its icon in the accent's ink
+  keyActive: { backgroundColor: colors.accent, borderColor: colors.accent },
   label: { fontFamily: monoMedium, fontSize: 13, letterSpacing: 0.2 },
+  word: { fontFamily: ui(500), fontSize: 12 },
   disabled: { opacity: 0.45 },
   pressed: { opacity: 0.7 },
-});
+}));

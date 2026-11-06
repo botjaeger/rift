@@ -18,7 +18,7 @@
       }
     },
     "orientation": "default",
-    "userInterfaceStyle": "dark",
+    "userInterfaceStyle": "automatic",
     "backgroundColor": "#050505",
     "icon": "./assets/icon.png",
     "ios": {

@@ -1,10 +1,12 @@
 import * as Clipboard from "expo-clipboard";
-import { useEffect, useId, useRef, useState } from "react";
-import { AccessibilityInfo, Platform, StyleSheet, Text, TextInput, View, type TextInputSelectionChangeEvent, type TextStyle } from "react-native";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { AccessibilityInfo, Platform, Text, TextInput, View, type TextInputSelectionChangeEvent, type TextStyle } from "react-native";
 import * as haptics from "@/haptics";
-import { COPY_SETTLE_MS, lineRange, selectedText, showsOwnCopied, textToCopy } from "@/selection";
+import { markParts } from "@/paneView";
+import { COPY_SETTLE_MS, lineRange, selectedText, showsOwnCopied, textToCopy, wordRange } from "@/selection";
+import { markChildren, useMarkStyle } from "./Marked";
 import { useSelectionOwner, useSelectionScope } from "./SelectionScope";
-import { colors, mono, ui } from "./theme";
+import { mono, ui, makeStyles, useColors } from "./theme";
 
 /** How long our own "Copied" stays. */
 const COPIED_MS = 1200;
@@ -21,10 +23,29 @@ type Field = TextInput;
  * changed meanwhile copies what is shown. `lines` limits the height (a running card's single line).
  *
  * Inside a SelectionScope (the pane's output) the scope's bar says how much is selected and
- * offers Line, All, To prompt and ✕, and the system's edit menu stays hidden (it opened over the
+ * offers Word, Line, All, To prompt and ✕, and the system's edit menu stays hidden (it opened over the
  * bar and offered Copy again); elsewhere (a sheet) the field shows its own "Copied" and the menu.
+ *
+ * `mark` (the Search output query) marks each match: the field then holds the text as styled
+ * pieces instead of `value`, the same characters, so selection offsets and copying are unchanged.
  */
-export function SelectableText({ text, style, lineHeight, lines }: { text: string; style: TextStyle; lineHeight: number; lines?: number }) {
+export function SelectableText({
+  text,
+  style,
+  lineHeight,
+  lines,
+  mark,
+}: {
+  text: string;
+  style: TextStyle;
+  lineHeight: number;
+  lines?: number;
+  mark?: string;
+}) {
+  const colors = useColors();
+  const styles = useStyles();
+  const markStyle = useMarkStyle();
+  const parts = useMemo(() => (mark ? markParts(text, mark) : null), [text, mark]);
   const shown = useRef(text);
   useEffect(() => {
     shown.current = text;
@@ -67,6 +88,7 @@ export function SelectableText({ text, style, lineHeight, lines }: { text: strin
         copied: isCopied,
         top: y,
         bottom: y + h,
+        word: () => select(wordRange(shown.current, range.current)),
         line: () => select(lineRange(shown.current, range.current)),
         all: () => select({ start: 0, end: shown.current.length }),
         end,
@@ -119,6 +141,9 @@ export function SelectableText({ text, style, lineHeight, lines }: { text: strin
     if (sel.start === sel.end) {
       copied.current = null;
       live.current.scope?.clear(live.current.owner);
+      // Android: Back ends the edit menu's selection mode but the field stays focused, and drew a
+      // caret in the output (caretHidden or not) until something else took the focus
+      if (Platform.OS === "android") field.current?.blur();
       return;
     }
     timer.current = setTimeout(() => copy(sel), COPY_SETTLE_MS);
@@ -126,8 +151,10 @@ export function SelectableText({ text, style, lineHeight, lines }: { text: strin
   return (
     <View ref={wrap} collapsable={false}>
       <TextInput
+        keyboardAppearance={colors.dark ? "dark" : "light"}
         ref={field}
-        value={text}
+        // a TextInput takes `value` or styled children, never both
+        value={parts ? undefined : text}
         multiline
         // React Native's read-only on Android is a disabled view, which cannot select: there the field
         // stays enabled with no keyboard, and `value` undoes anything a hardware keyboard types
@@ -141,7 +168,9 @@ export function SelectableText({ text, style, lineHeight, lines }: { text: strin
         contextMenuHidden={scope !== null && Platform.OS === "ios"}
         onSelectionChange={onSelection}
         style={[styles.field, style, { lineHeight }, lines ? { maxHeight: lineHeight * lines } : null]}
-      />
+      >
+        {parts ? markChildren(parts, markStyle.mark) : null}
+      </TextInput>
       {notice ? (
         <View pointerEvents="none" style={styles.notice}>
           <Text style={styles.noticeText}>Copied</Text>
@@ -151,10 +180,10 @@ export function SelectableText({ text, style, lineHeight, lines }: { text: strin
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = makeStyles((colors) => ({
   // a field draws its own padding: a block's text sits flush like Text
   // the caller's style names the family; mono is the fallback
   field: { padding: 0, margin: 0, textAlignVertical: "top", fontFamily: mono },
   notice: { position: "absolute", top: 0, right: 0, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 10, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.glassRim },
   noticeText: { fontFamily: ui(500), color: colors.textBright, fontSize: 12 },
-});
+}));

@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
+import { themeStub } from "./helpers/themeStub";
 
 type Node = { type: string; props: { label?: string; disabled?: boolean; onPress?: () => void; children: unknown[] } };
 type Auth = { ok: true } | { ok: false; message: string };
@@ -66,7 +67,8 @@ function harness(deferRun = false, parent = false, locked = false) {
     "@/topology": { findPane: () => ({ pane: {} }), paneBranch: () => "", paneTitle: () => "Fixture pane", runningCommand: () => null },
     "@/ui/Button": { Button: "Button" },
     "@/ui/Notice": { ErrorText: "ErrorText", WarningText: "WarningText" },
-    "@/ui/theme": { colors: {}, mono: "mono", radius: {}, ui: () => "ui" },
+    "@/ui/SheetHeader": { SheetHeader: "SheetHeader" },
+    "@/ui/theme": themeStub,
     "@/ui/useSingleFlight": load("../src/ui/useSingleFlight.ts", {}),
     "@/ui/useActionScope": load("../src/ui/useActionScope.ts", { "expo-router": { useFocusEffect: (effect: () => (() => void)) => cleanups.push(effect()) } }),
   });

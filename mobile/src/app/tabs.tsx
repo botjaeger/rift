@@ -1,18 +1,21 @@
 import { useActionScope } from "@/ui/useActionScope";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { memo, useEffect, useRef, useState, type RefObject } from "react";
-import { FlatList, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type ViewProps } from "react-native";
+import { FlatList, Pressable, ScrollView, Text, View, type ViewProps } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { EMPTY_WHAT, idleSince, seenWorking, sheetCounts, sameTabRow, sheetRows, tabKey, tabKind, tabRow, trackIdle, type RowContext, type SheetFilter, type TabRow } from "@/now";
+import { EMPTY_FILTER, idleSince, seenWorking, sheetCounts, sameTabRow, sheetRows, tabKey, tabKind, tabRow, trackIdle, type RowContext, type SheetFilter, type TabRow } from "@/now";
 import { canClose, canMove, canOperate } from "@/fleet";
 import { panesText } from "@/paneView";
 import { fleet, useApp, useLock } from "@/runtime";
+import { Field } from "@/ui/Field";
+import { FilterChip } from "@/ui/FilterChip";
 import { Icon } from "@/ui/Icon";
 import { LIST_ROW_H, ListRow } from "@/ui/ListRow";
-import { canNewPane, canNewTab } from "@/ui/newTab";
+import { canNewTab } from "@/ui/newTab";
+import { Button } from "@/ui/Button";
 import { ErrorText } from "@/ui/Notice";
-import { toggleA11y } from "@/ui/toggle";
-import { colors, ui } from "@/ui/theme";
+import { IconButton, PageHeader } from "@/ui/Screen";
+import { ui, makeStyles, useColors } from "@/ui/theme";
 import { ReorderRow, useReorder, type Dragging } from "@/ui/ReorderRow";
 import { useClose } from "@/ui/useClose";
 import { useMove } from "@/ui/useMove";
@@ -43,10 +46,13 @@ export function matchesSearch(r: TabRow, q: string): boolean {
  * is the computer's.
  */
 export default function Switcher() {
+  const colors = useColors();
+  const styles = useStyles();
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const s = useApp();
-  const { key, pane } = useLocalSearchParams<{ key: string; pane?: string }>();
+  // `from=home`: opened from a computer's card on Portals (Show all), with no pane behind it
+  const { key, pane, from } = useLocalSearchParams<{ key: string; pane?: string; from?: string }>();
   const scope = useActionScope(`${key}:${pane}`);
   const lock = useLock();
 
@@ -58,6 +64,12 @@ export default function Switcher() {
   const host = s.hosts.find((h) => h.record.key === key);
   const [filter, setFilter] = useState<SheetFilter>("all");
   const [query, setQuery] = useState("");
+  // a new search or filter shows what it found from its top (its count, the first match), not
+  // from wherever the whole list was scrolled to
+  const list = useRef<FlatList<ListItem>>(null);
+  useEffect(() => {
+    list.current?.scrollToOffset({ offset: 0, animated: false });
+  }, [filter, query]);
   const [error, setError] = useState<string | null>(null);
   const online = host?.conn.status === "open";
   const tabs = host && online ? host.windows.flatMap((w) => w.tabs) : [];
@@ -80,6 +92,11 @@ export default function Switcher() {
     if (r.pane === null) return;
     scope.leave();
     router.dismiss();
+    // from Portals: the pane opens over it, so Back leads to Portals
+    if (from === "home") {
+      router.push({ pathname: "/host/[key]/pane/[id]", params: { key, id: String(r.pane) } });
+      return;
+    }
     // the pane already open stays; another replaces it, so Back leads where it did
     if (r.tab.panes.some((p) => p.id === here)) return;
     router.replace({ pathname: "/host/[key]/pane/[id]", params: { key, id: String(r.pane) } });
@@ -91,7 +108,6 @@ export default function Switcher() {
   };
   const operate = !!host && canOperate(host);
   const canOpen = !!host && canNewTab(host);
-  const canSplit = !!host && canNewPane(host, here);
   const { say, toast } = useToast();
   const closeTab = useClose(key, here, setError, say, true);
   const closeable = canClose(host);
@@ -125,14 +141,23 @@ export default function Switcher() {
   });
   // the list's items: each section's caption, then its rows
   const items: ListItem[] = [];
-  if (pinned.length > 0) {
-    items.push({ kind: "cap", key: "cap:pinned", text: "Pinned", hint: false });
+  // the whole list: "Pinned", then "Tabs · Drag ≡ to reorder"; a narrowed one counts what it holds
+  if (pinned.length > 0 && whole) {
+    items.push({ kind: "cap", key: "cap:pinned", text: "Pinned" });
     pinned.forEach((r, i) => items.push({ kind: "row", key: r.key, r, list: "pinned", index: i, lifted: pinnedDrag.drag.active === i }));
   }
-  if (others.length > 0) {
-    items.push({ kind: "cap", key: "cap:others", text: pinned.length > 0 ? "Tabs" : `${shown.length} ${shown.length === 1 ? "tab" : "tabs"}`, hint: movable });
-    others.forEach((r, i) => items.push({ kind: "row", key: r.key, r, list: "others", index: i, lifted: othersDrag.drag.active === i }));
+  const rest = whole ? others : shown;
+  if (rest.length > 0) {
+    items.push({ kind: "cap", key: "cap:others", text: whole ? (movable ? "Tabs · Drag ≡ to reorder" : "Tabs") : `${rest.length} ${rest.length === 1 ? "tab" : "tabs"}` });
+    rest.forEach((r, i) => items.push({ kind: "row", key: r.key, r, list: whole ? "others" : "found", index: i, lifted: whole && othersDrag.drag.active === i }));
   }
+  // why the grips went away, and how to get them back
+  const narrowedNote = !whole && shown.length > 0 && canMove(host) && rows.length > 1;
+  const showAll = () => {
+    setFilter("all");
+    setQuery("");
+  };
+  const empty = query.trim() ? { title: `No tab matches “${query.trim()}”`, line: "Search looks in names, commands and folders." } : EMPTY_FILTER[filter];
 
   const row = (list: TabRow[], name: ListName, r: TabRow, i: number, reorder: ReturnType<typeof useReorder>) => (
     <TabsRow
@@ -151,64 +176,38 @@ export default function Switcher() {
   );
 
   return (
-    <View style={[styles.fill, { paddingTop: insets.top }, hidden && styles.hidden]} accessibilityElementsHidden={hidden} importantForAccessibility={hidden ? "no-hide-descendants" : "auto"}>
-      <View style={styles.header}>
-        <View style={styles.titles}>
-          <Text style={styles.title} accessibilityRole="header">
-            Tabs
-          </Text>
-          <View style={styles.subtitle}>
-            <View style={[styles.dot, { backgroundColor: online ? colors.success : colors.textDim }]} />
-            <Text style={styles.subtitleText} numberOfLines={1}>
-              {host ? `${host.record.name} · ${online ? `${rows.length} ${rows.length === 1 ? "tab" : "tabs"}` : "offline"}` : "Computer not found"}
-            </Text>
-          </View>
-        </View>
-        {/* a view-only device has no way to open a tab or a pane */}
-        {operate ? (
-          <>
-            <Pressable accessibilityRole="button" accessibilityLabel="Split pane" accessibilityState={{ disabled: !canSplit }} disabled={!canSplit} hitSlop={4} onPress={() => router.push({ pathname: "/new-pane", params: { key, pane: String(here) } })} style={({ pressed }) => [styles.round, pressed && styles.pressed, !canSplit && styles.disabled]}>
-              <Icon name="newPane" size={16} color={colors.text} />
-            </Pressable>
-            <Pressable accessibilityRole="button" accessibilityLabel="New tab" accessibilityState={{ disabled: !canOpen }} disabled={!canOpen} hitSlop={4} onPress={() => router.push({ pathname: "/new-tab", params: { key } })} style={({ pressed }) => [styles.round, pressed && styles.pressed, !canOpen && styles.disabled]}>
-              <Icon name="add" size={16} color={colors.text} />
-            </Pressable>
-          </>
-        ) : null}
-        <Pressable accessibilityRole="button" accessibilityLabel="Close" hitSlop={4} onPress={close} style={({ pressed }) => [styles.round, pressed && styles.pressed]}>
-          <Icon name="close" size={15} color={colors.text} />
-        </Pressable>
-      </View>
+    <View style={[styles.fill, hidden && styles.hidden]} accessibilityElementsHidden={hidden} importantForAccessibility={hidden ? "no-hide-descendants" : "auto"}>
+      {/* ‹ Back as Panes has it; Split pane is in the pane's ⋯, New tab stays as + */}
+      <PageHeader
+        title="Tabs"
+        subtitle={host ? `${host.record.name} · ${online ? `${rows.length} ${rows.length === 1 ? "tab" : "tabs"}` : "offline"}` : "Computer not found"}
+        dot={online ? colors.success : colors.textDim}
+        back={close}
+        // a view-only device has no way to open a tab
+        right={operate ? <IconButton glass icon="add" label="New tab" disabled={!canOpen} onPress={() => router.push({ pathname: "/new-tab", params: { key } })} /> : null}
+      />
 
-      <View style={styles.search}>
-        <Icon name="search" size={15} color={colors.textMuted} />
-        <TextInput
-          accessibilityLabel="Search tabs"
+      <View style={styles.tools}>
+        <Field
+          icon="search"
+          label="Search tabs"
           placeholder="Search by name, command or folder"
-          placeholderTextColor={colors.textMuted}
           value={query}
           onChangeText={setQuery}
           autoCapitalize="none"
           autoCorrect={false}
           returnKeyType="search"
-          clearButtonMode="while-editing"
-          style={styles.searchInput}
         />
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filters} accessibilityRole="toolbar" accessibilityLabel="Show" keyboardShouldPersistTaps="handled">
+          {FILTERS.map((f) => (
+            <FilterChip key={f.filter} label={f.text} count={counts[f.filter]} selected={filter === f.filter} onPress={() => setFilter(f.filter)} />
+          ))}
+        </ScrollView>
       </View>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filtersBox} contentContainerStyle={styles.filters} accessibilityRole="toolbar" accessibilityLabel="Show" keyboardShouldPersistTaps="handled">
-        {FILTERS.map((f) => {
-          const on = filter === f.filter;
-          const label = `${f.text} ${counts[f.filter]}`;
-          return (
-            <Pressable key={f.filter} {...toggleA11y(on)} accessibilityLabel={label} onPress={() => setFilter(f.filter)} style={({ pressed }) => [styles.chip, on && styles.chipOn, pressed && styles.pressed]}>
-              <Text style={[styles.chipText, on && styles.chipTextOn]}>{label}</Text>
-            </Pressable>
-          );
-        })}
-      </ScrollView>
 
       {/* virtualized: a computer of a hundred tabs draws the screenful in view, not every row */}
       <FlatList
+        ref={list}
         style={styles.fill}
         data={items}
         keyExtractor={(it) => it.key}
@@ -216,12 +215,13 @@ export default function Switcher() {
           item.kind === "cap" ? (
             <Text style={styles.cap} accessibilityRole="header">
               {item.text}
-              {item.hint ? <Text style={styles.capHint}>{"  drag to reorder"}</Text> : null}
             </Text>
           ) : item.list === "pinned" ? (
             row(pinned, "pinned", item.r, item.index, pinnedDrag)
-          ) : (
+          ) : item.list === "others" ? (
             row(others, "others", item.r, item.index, othersDrag)
+          ) : (
+            row(shown, "found", item.r, item.index, othersDrag)
           )
         }
         // the lifted row draws above the cells after it (each cell is a sibling of the others)
@@ -242,16 +242,29 @@ export default function Switcher() {
             ) : null}
           </>
         }
-        ListEmptyComponent={<Text style={styles.empty}>{query.trim() ? `No tab matches “${query.trim()}”.` : `No tab is ${EMPTY_WHAT[filter]}.`}</Text>}
+        ListFooterComponent={narrowedNote ? <Text style={styles.note}>Reordering works on the whole list; clear the search to drag.</Text> : null}
+        // an empty filter says so, and offers the way back
+        ListEmptyComponent={
+          host && online ? (
+            <View style={styles.emptyBox}>
+              <Text style={styles.emptyTitle} accessibilityRole="header">
+                {empty.title}
+              </Text>
+              <Text style={styles.empty}>{empty.line}</Text>
+              {filter !== "all" || query.trim() ? <Button label="Show all tabs" size="small" onPress={showAll} /> : null}
+            </View>
+          ) : null
+        }
       />
     </View>
   );
 }
 
-type ListName = "pinned" | "others";
+/** The pinned tabs, the others (the whole list, in the computer's order), or what a search or filter found. */
+type ListName = "pinned" | "others" | "found";
 
 type ListItem =
-  | { kind: "cap"; key: string; text: string; hint: boolean }
+  | { kind: "cap"; key: string; text: string }
   | { kind: "row"; key: string; r: TabRow; list: ListName; index: number; lifted: boolean };
 
 /**
@@ -262,6 +275,7 @@ type ListItem =
  * finger, and iOS ended the drag a few points in.
  */
 function LiftCell({ item, style, children, ...rest }: ViewProps & { item: ListItem; index: number; cellKey?: string }) {
+  const styles = useStyles();
   return (
     <View {...rest} collapsable={false} style={[style, styles.cell, item.kind === "row" && item.lifted && styles.liftedCell]}>
       {children}
@@ -295,6 +309,8 @@ interface TabsRowProps {
 // re-rendered only when what it draws changed: the page re-renders on every publish and clock tick
 const TabsRow = memo(
   function TabsRow({ r, list, index, count, canDrag, isHere, closeable, drag, setDrag, acts }: TabsRowProps) {
+    const colors = useColors();
+    const styles = useStyles();
     const latest = () => acts.current.row(r.key) ?? r;
     return (
       <ReorderRow grip index={index} count={count} rowH={LIST_ROW_H} enabled={canDrag} drag={drag} setDrag={setDrag} onMove={(from, to) => acts.current.move(list, from, to)}>
@@ -314,6 +330,7 @@ const TabsRow = memo(
               </>
             }
             line={r.paneLine}
+            lineCodes={r.codes}
             kind={r.kind}
             when={r.when}
             label={[r.title, isHere ? "current tab" : null, r.tab.pinned ? "pinned" : null, r.state, r.line].filter(Boolean).join(", ")}
@@ -339,32 +356,21 @@ const TabsRow = memo(
     sameTabRow(a.r, b.r),
 );
 
-const styles = StyleSheet.create({
+const useStyles = makeStyles((colors) => ({
   pressed: { opacity: 0.75 },
-  disabled: { opacity: 0.45 },
   fill: { flex: 1, backgroundColor: colors.bg },
   hidden: { opacity: 0 },
   pad: { paddingHorizontal: SIDE },
-  header: { flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: SIDE, paddingTop: 8, paddingBottom: 12 },
-  round: { width: 44, height: 44, borderRadius: 22, borderWidth: 1, borderColor: colors.glassRim, backgroundColor: colors.glass, alignItems: "center", justifyContent: "center" },
-  titles: { flex: 1, minWidth: 0, gap: 3 },
-  title: { fontFamily: ui(600), color: colors.textBright, fontSize: 22 },
-  subtitle: { flexDirection: "row", alignItems: "center", gap: 6 },
-  dot: { width: 7, height: 7, borderRadius: 4 },
-  subtitleText: { flexShrink: 1, fontFamily: ui(400), color: colors.textMuted, fontSize: 12 },
-  search: { height: 44, marginHorizontal: SIDE, marginBottom: 10, borderRadius: 12, borderWidth: 1, borderColor: colors.hairline, backgroundColor: colors.surface, flexDirection: "row", alignItems: "center", gap: 8, paddingLeft: 12 },
-  searchInput: { flex: 1, height: 44, fontFamily: ui(400), color: colors.textBright, fontSize: 15, paddingRight: 12 },
-  filtersBox: { flexGrow: 0 },
-  filters: { gap: 6, paddingHorizontal: SIDE, paddingBottom: 10 },
-  chip: { height: 32, paddingHorizontal: 12, borderRadius: 16, borderWidth: 1, borderColor: colors.glassRim, justifyContent: "center" },
-  chipOn: { backgroundColor: colors.glassRim, borderColor: "transparent" },
-  chipText: { fontFamily: ui(500), color: colors.textMuted, fontSize: 13 },
-  chipTextOn: { color: colors.textBright },
-  cap: { fontFamily: ui(600), color: colors.textMuted, fontSize: 12, letterSpacing: 0.6, textTransform: "uppercase", paddingHorizontal: SIDE, paddingTop: 14, paddingBottom: 6, borderBottomWidth: 1, borderBottomColor: colors.hairline },
-  capHint: { fontFamily: ui(400), letterSpacing: 0, textTransform: "none" },
+  // the search field and the filters, on the header's chrome
+  tools: { gap: 10, paddingTop: 12, paddingBottom: 12, paddingHorizontal: 14, backgroundColor: colors.chrome, borderBottomWidth: 1, borderBottomColor: colors.hairline },
+  filters: { gap: 6 },
+  cap: { fontFamily: ui(500), color: colors.textMuted, fontSize: 12, letterSpacing: 0.5, textTransform: "uppercase", paddingHorizontal: SIDE + 4, paddingTop: 18, paddingBottom: 8, borderBottomWidth: 1, borderBottomColor: colors.hairline },
   cell: { zIndex: 0 },
   liftedCell: { zIndex: 2, elevation: 6 },
   panes: { borderRadius: 6, borderWidth: 1, borderColor: colors.borderStrong, paddingHorizontal: 5, paddingVertical: 1 },
   panesText: { fontFamily: ui(500), color: colors.textMuted, fontSize: 11 },
-  empty: { fontFamily: ui(400), color: colors.textMuted, fontSize: 14, paddingVertical: 24, paddingHorizontal: SIDE, textAlign: "center" },
-});
+  emptyBox: { alignItems: "center", gap: 8, paddingVertical: 32, paddingHorizontal: SIDE },
+  emptyTitle: { fontFamily: ui(600), color: colors.textBright, fontSize: 16, textAlign: "center" },
+  empty: { fontFamily: ui(400), color: colors.textMuted, fontSize: 14, lineHeight: 20, textAlign: "center", marginBottom: 4 },
+  note: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13, lineHeight: 18, paddingVertical: 16, paddingHorizontal: SIDE, textAlign: "center" },
+}));

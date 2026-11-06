@@ -83,6 +83,12 @@ pub const MAX_REQUEST_ID: usize = 64;
 pub const MAX_TEXT: usize = 1024;
 /// How often the gateway asks whether a program copied something for phones.
 pub const COPY_POLL: std::time::Duration = std::time::Duration::from_millis(500);
+/// How often the gateway asks for the desktop's theme while phones are
+/// connected; a change reaches them as `theme`.
+pub const THEME_POLL: Duration = Duration::from_secs(1);
+/// Longest theme `name`, in UTF-16 code units (the phone's measure; it drops
+/// a theme whose name is longer or empty).
+pub const MAX_THEME_NAME: usize = 64;
 /// Longest `paste`, in bytes (it counts against [`KEYS_RATE`]). Its message
 /// may reach [`MAX_UPLOAD_MESSAGE`], which leaves room for JSON escapes.
 pub const MAX_PASTE: usize = 48 * 1024;
@@ -911,6 +917,12 @@ pub trait Source: Send + Sync + 'static {
     /// (`remote_clipboard`): the copy's number and its text. Defaults to none.
     fn clipboard(&self, since: u64) -> Option<(u64, String)> {
         let _ = since;
+        None
+    }
+    /// The desktop's resolved theme (feature `theme`): the welcome carries
+    /// it, and a change goes to every connection as `theme` within
+    /// [`THEME_POLL`]. Defaults to none (no feature).
+    fn theme(&self) -> Option<protocol::Theme> {
         None
     }
     /// `pane`'s visible screen while it shows the alternate screen, or

@@ -246,6 +246,125 @@ function rowCells(runs: readonly ScreenRun[]): { col: number; text: string; cell
   return out;
 }
 
+/** Ends a link, as the desktop's `urls_in` (views/terminal.rs). */
+const LINK_STOP = new Set([" ", "\t", '"', "'", "<", ">", ")", "]", "}", "`"]);
+/** A link the program wrapped onto the next rows is followed this far. */
+const LINK_MAX_ROWS = 4;
+
+/** A link on the screen: the cells it covers on each row it touches, and its whole address. */
+export interface ScreenLink {
+  url: string;
+  spans: { row: number; col: number; cells: number }[];
+}
+
+/**
+ * The http(s) links on a program's screen, found as the desktop finds them (`urls_in`: from the
+ * scheme to a space, quote or closing bracket, without trailing . , ; :). A link that fills its
+ * row to the last column goes on at the start of the next row, the way a long address wraps.
+ */
+export function screenLinks(lines: readonly (readonly ScreenRun[])[], cols: number): ScreenLink[] {
+  const rows = lines.map(rowCells);
+  const out: ScreenLink[] = [];
+  for (let r = 0; r < rows.length; r++) {
+    const cells = rows[r]!;
+    const text = cells.map((c) => c.text).join("");
+    const lower = text.toLowerCase();
+    // char index into `text` for each entry of `cells` (an entry may hold a combining mark)
+    const at: number[] = [];
+    let n = 0;
+    for (const c of cells) {
+      at.push(n);
+      n += c.text.length;
+    }
+    let from = 0;
+    while (from < cells.length) {
+      const i = cells.findIndex((_, k) => k >= from && (lower.startsWith("https://", at[k]) || lower.startsWith("http://", at[k])));
+      if (i === -1) break;
+      const scheme = lower.startsWith("https://", at[i]) ? 8 : 7;
+      let end = i;
+      while (end < cells.length && !LINK_STOP.has(cells[end]!.text)) end++;
+      const spans = [{ row: r, col: cells[i]!.col, cells: 0 }];
+      let url = cells.slice(i, end).map((c) => c.text).join("");
+      let last = cells[end - 1];
+      // wrapped: the link reaches the row's last column and the next row goes on with no gap
+      let row = r;
+      while (end === cells.length && last && last.col + last.cells >= cols && row + 1 < rows.length && row - r + 1 < LINK_MAX_ROWS) {
+        const next = rows[row + 1]!;
+        let k = 0;
+        while (k < next.length && next[k]!.col === k && !LINK_STOP.has(next[k]!.text)) k++;
+        if (k === 0) break;
+        spans.push({ row: row + 1, col: 0, cells: 0 });
+        url += next.slice(0, k).map((c) => c.text).join("");
+        row++;
+        if (k < next.length) break;
+        last = next[k - 1];
+      }
+      // trailing punctuation is not part of the address
+      let trim = 0;
+      while (url.length - trim > scheme && ".,;:".includes(url[url.length - 1 - trim]!)) trim++;
+      url = url.slice(0, url.length - trim);
+      if (url.length > scheme) {
+        // each span's cells, the trimmed tail taken off the last one
+        let left = url.length;
+        for (const s of spans) {
+          const source = rows[s.row]!;
+          let k = s.row === r ? i : 0;
+          let cellsHere = 0;
+          while (k < source.length && left > 0 && !LINK_STOP.has(source[k]!.text)) {
+            left -= source[k]!.text.length;
+            cellsHere += source[k]!.cells;
+            k++;
+          }
+          s.cells = cellsHere;
+        }
+        out.push({ url, spans: spans.filter((s) => s.cells > 0) });
+      }
+      // a continuation row holds no scheme at its start, so the next rows are scanned as usual
+      from = Math.max(end, i + 1);
+    }
+  }
+  return out;
+}
+
+/** Only web links open from the phone (the desktop's `openable_url` also takes file and mailto, which the screen never finds). */
+export const openableLink = (url: string) => /^https?:\/\/\S+$/i.test(url);
+
+/** The link covering a cell, if any. */
+export function linkAt(links: readonly ScreenLink[], cell: Cell): string | null {
+  for (const l of links) for (const s of l.spans) if (s.row === cell.row && cell.col >= s.col && cell.col < s.col + s.cells) return l.url;
+  return null;
+}
+
+/**
+ * A row's pieces with the links on it marked: a piece that a link only partly covers is split at
+ * the link's edges, so exactly the link's cells draw as a link.
+ */
+export function markLinks(pieces: readonly Piece[], spans: readonly { col: number; cells: number }[]): (Piece & { link: boolean })[] {
+  if (spans.length === 0) return pieces.map((p) => ({ ...p, link: false }));
+  const inLink = (col: number) => spans.some((s) => col >= s.col && col < s.col + s.cells);
+  const out: (Piece & { link: boolean })[] = [];
+  for (const p of pieces) {
+    if (p.wide) {
+      out.push({ ...p, link: inLink(p.col) });
+      continue;
+    }
+    // narrow pieces: one character per cell, a combining mark rides with its character
+    const chars: string[] = [];
+    for (const ch of p.text) {
+      if (chars.length > 0 && isZeroWidth(ch.codePointAt(0)!)) chars[chars.length - 1] += ch;
+      else chars.push(ch);
+    }
+    let start = 0;
+    for (let k = 1; k <= chars.length; k++) {
+      if (k === chars.length || inLink(p.col + k) !== inLink(p.col + start)) {
+        out.push({ ...p, text: chars.slice(start, k).join(""), col: p.col + start, cells: k - start, link: inLink(p.col + start) });
+        start = k;
+      }
+    }
+  }
+  return out;
+}
+
 /**
  * The text between two cells, both included, in reading order: a wide character touched by the
  * selection comes whole, each row's trailing blanks are left out.

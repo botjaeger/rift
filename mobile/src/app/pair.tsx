@@ -1,7 +1,7 @@
 import { useActionScope } from "@/ui/useActionScope";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useEffect, useRef, useState } from "react";
-import { ActivityIndicator, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, ScrollView, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { parsePairLink } from "@/pairing";
 import { addressHost, relayHost } from "@/protocol/relay";
@@ -9,8 +9,8 @@ import { fleet, useApp } from "@/runtime";
 import { Button } from "@/ui/Button";
 import { Icon } from "@/ui/Icon";
 import { ErrorText, WarningText } from "@/ui/Notice";
-import { PageHeader } from "@/ui/Screen";
-import { colors, mono, radius, ui } from "@/ui/theme";
+import { PageHeader, SectionTitle } from "@/ui/Screen";
+import { mono, radius, ui, makeStyles, useColors } from "@/ui/theme";
 
 type Phase = { t: "ready" } | { t: "pairing" } | { t: "failed"; message: string };
 
@@ -21,6 +21,7 @@ function keyGroups(key: string): string {
 
 /** One label / value line of the details card. */
 function Detail({ label, children, first, monoValue }: { label: string; children: string; first?: boolean; monoValue?: boolean }) {
+  const styles = useStyles();
   return (
     <View style={[styles.detail, !first && styles.divider]} accessible accessibilityLabel={`${label}: ${children}`}>
       <Text style={styles.dt}>{label}</Text>
@@ -34,6 +35,8 @@ function Detail({ label, children, first, monoValue }: { label: string; children
  * deep link: nothing is sent until Pair.
  */
 export default function PairScreen() {
+  const colors = useColors();
+  const styles = useStyles();
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const params = useLocalSearchParams<{ link?: string }>();
@@ -57,12 +60,11 @@ export default function PairScreen() {
   );
 
   // A link this app already paired with (Android re-delivers the launching link when the activity
-  // is recreated) opens its host instead of asking again.
+  // is recreated) goes to Portals, where the computer's card is, instead of asking again.
   const spent = link !== null && fleet.pairedWith(link);
   useEffect(() => {
     if (!spent || !link) return;
     router.dismissTo("/");
-    router.push({ pathname: "/host/[key]", params: { key: link.key } });
   }, [spent, link?.key, router]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const cancel = () => {
@@ -75,15 +77,12 @@ export default function PairScreen() {
   if (!link) {
     return (
       <View style={styles.fill}>
-        <PageHeader back={cancel} />
+        <PageHeader title="Not a pairing code" back={cancel} />
         <View style={styles.body}>
-          <Text style={styles.title} accessibilityRole="header">
-            Not a pairing code
-          </Text>
           <Text style={styles.text}>This link is not a valid Rift pairing link. Create a new code on your computer and try again.</Text>
         </View>
         <View style={[styles.actions, { paddingBottom: Math.max(40, insets.bottom + 6) }]}>
-          <Button label="Scan again" variant="primary" size="large" style={styles.flex} onPress={() => router.replace("/scan")} />
+          <Button label="Scan again" variant="primary" style={styles.flex} onPress={() => router.replace("/scan")} />
         </View>
       </View>
     );
@@ -100,10 +99,9 @@ export default function PairScreen() {
     if (!current()) return;
     cancelRef.current = null;
     if (r.ok) {
-      // A deep link can make this the only screen: return to the tabs first so the host
-      // screen has a way back.
+      // Portals: the new computer's card, its tabs in the redesigned rows (a deep link can make
+      // this the only screen, so dismiss to the root rather than go back)
       router.dismissTo("/");
-      router.push({ pathname: "/host/[key]", params: { key: r.host.key } });
     } else if (r.message !== "Cancelled.") {
       setPhase({ t: "failed", message: r.message });
     }
@@ -112,24 +110,25 @@ export default function PairScreen() {
   const addresses = link.addresses.map((a) => `${addressHost(a)} · LAN`);
   return (
     <View style={styles.fill}>
-      <PageHeader back={cancel} />
+      <PageHeader title={`Pair with ${link.name}?`} back={cancel} />
       <ScrollView contentContainerStyle={styles.body}>
-        <View style={styles.tile}>
-          <Icon name="computer" size={26} color={colors.textMuted} />
-        </View>
         <View style={styles.intro}>
-          <Text style={styles.title} accessibilityRole="header">
-            Pair with {link.name}?
-          </Text>
-          <Text style={styles.text}>
+          <View style={styles.tile}>
+            <Icon name="computer" size={26} color={colors.textMuted} />
+          </View>
+          <Text style={[styles.text, styles.flex]}>
             {link.permission === "operate"
               ? "This phone will see its tabs and panes and can run commands there."
               : "This phone will see its tabs and panes. It cannot run commands or send keys."}
           </Text>
         </View>
+        <SectionTitle>From the code</SectionTitle>
         <View style={styles.card}>
+          <Detail label="Computer" first>
+            {link.name}
+          </Detail>
           {addresses.map((a, i) => (
-            <Detail key={a} label={i === 0 ? "Address" : ""} first={i === 0}>
+            <Detail key={a} label={i === 0 ? "Address" : ""}>
               {a}
             </Detail>
           ))}
@@ -139,6 +138,7 @@ export default function PairScreen() {
             {keyGroups(link.key)}
           </Detail>
         </View>
+        <Text style={styles.note}>Check the key matches the one on your computer’s screen.</Text>
         {link.relay ? (
           <Text style={styles.note}>Away from this network the phone connects through the relay, which forwards only encrypted traffic.</Text>
         ) : null}
@@ -152,11 +152,10 @@ export default function PairScreen() {
         ) : null}
       </ScrollView>
       <View style={[styles.actions, { paddingBottom: Math.max(40, insets.bottom + 6) }]}>
-        <Button label="Cancel" size="large" style={styles.cancel} onPress={cancel} />
+        <Button label="Cancel" style={styles.cancel} onPress={cancel} />
         <Button
           label={phase.t === "failed" ? "Try again" : "Pair"}
           variant="primary"
-          size="large"
           style={styles.pair}
           disabled={phase.t === "pairing" || !s.ready || s.loadError !== null}
           onPress={() => void pair()}
@@ -166,23 +165,22 @@ export default function PairScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = makeStyles((colors) => ({
   fill: { flex: 1, backgroundColor: colors.chrome },
   flex: { flex: 1 },
-  body: { paddingTop: 20, paddingHorizontal: 20, gap: 22, maxWidth: 560, width: "100%", alignSelf: "center" },
+  body: { paddingTop: 20, paddingHorizontal: 16, gap: 18, maxWidth: 560, width: "100%", alignSelf: "center" },
   tile: {
     width: 56,
     height: 56,
-    borderRadius: 14,
+    borderRadius: radius.card,
     backgroundColor: colors.surface,
     borderWidth: 1,
     borderColor: colors.hairline,
     alignItems: "center",
     justifyContent: "center",
   },
-  intro: { gap: 8 },
-  title: { fontFamily: ui(600), color: colors.textBright, fontSize: 24 },
-  text: { fontFamily: ui(400), color: colors.textMuted, fontSize: 15, lineHeight: 22.5 },
+  intro: { flexDirection: "row", alignItems: "center", gap: 14 },
+  text: { fontFamily: ui(400), color: colors.textMuted, fontSize: 15, lineHeight: 22 },
   note: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13, lineHeight: 19 },
   card: {
     backgroundColor: colors.surface,
@@ -191,13 +189,14 @@ const styles = StyleSheet.create({
     borderColor: colors.hairline,
     overflow: "hidden",
   },
-  detail: { flexDirection: "row" },
+  // the standard's value row (the Pair confirmation board): the label left, its value right
+  detail: { flexDirection: "row", alignItems: "center", minHeight: 48, paddingHorizontal: 14, gap: 12 },
   divider: { borderTopWidth: 1, borderTopColor: colors.hairline },
-  dt: { fontFamily: ui(400), width: 96, paddingVertical: 12, paddingHorizontal: 14, color: colors.textMuted, fontSize: 14 },
-  dd: { fontFamily: ui(400), flex: 1, paddingVertical: 12, paddingHorizontal: 14, color: colors.text, fontSize: 14 },
+  dt: { fontFamily: ui(400), paddingVertical: 12, color: colors.text, fontSize: 15 },
+  dd: { fontFamily: ui(400), flex: 1, paddingVertical: 12, color: colors.textMuted, fontSize: 14, textAlign: "right" },
   mono: { fontFamily: mono, fontSize: 12 },
   progress: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 10 },
-  actions: { flexDirection: "row", gap: 10, paddingTop: 16, paddingHorizontal: 20 },
+  actions: { flexDirection: "row", gap: 10, paddingTop: 16, paddingHorizontal: 16 },
   cancel: { flex: 1 },
   pair: { flex: 2 },
-});
+}));

@@ -1,45 +1,42 @@
 import { useActionScope } from "@/ui/useActionScope";
 import { useIsFocused, usePathname, useRouter } from "expo-router";
 import { memo, useEffect, useRef, useState } from "react";
-import { AccessibilityInfo, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { AccessibilityInfo, Pressable, ScrollView, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { primaryChoice } from "@/answer";
-import { filterHome, homeChoiceLabel, homeCounts, idleSince, quickChoices, sameTabRow, seenWorking, tabKey, tabKind, tabRow, trackIdle, type HomeFilter, type RowContext, type TabRow } from "@/now";
+import { homeChoiceLabel, homeRows, homeSummary, idleSince, quickChoices, sameTabRow, seenWorking, tabKey, tabKind, tabRow, trackIdle, type RowContext, type TabRow } from "@/now";
 import { canOperate, type HostView } from "@/fleet";
 import { needsAuthBeforeRun } from "@/lock";
 import { authenticate, fleet, useApp } from "@/runtime";
 import { restoreTarget } from "@/stores";
 import { Tile } from "@/ui/Avatar";
-import { LINE_COLOR } from "@/ui/ConnectionSheet";
-import { hostLine } from "@/ui/connStatus";
+import { Button } from "@/ui/Button";
+import { lineColor } from "@/ui/ConnectionSheet";
+import { hostLine, lastSeenAt, pairedText, updating } from "@/ui/connStatus";
 import { hostDot } from "@/ui/hostDot";
 import { FirstRun } from "@/ui/FirstRun";
 import { Icon } from "@/ui/Icon";
 import { confirmDestructive } from "@/ui/confirm";
+import { CodeText } from "@/ui/ListRow";
 import { canNewTab } from "@/ui/newTab";
 import { ErrorText } from "@/ui/Notice";
 import { ProgressBar } from "@/ui/ProgressBar";
+import { NavRow } from "@/ui/Rows";
 import { KIND_COLOR, StatusMark } from "@/ui/StatusMark";
 import { SwipeAction } from "@/ui/SwipeAction";
-import { tabBottom, titleTop } from "@/ui/Screen";
-import { toggleA11y } from "@/ui/toggle";
-import { colors, mono, tint, ui } from "@/ui/theme";
+import { IconButton, tabBottom, titleTop } from "@/ui/Screen";
+import { radius, ui, makeStyles, useColors } from "@/ui/theme";
 import { useNow } from "@/ui/useNow";
 
 /** The last pane is reopened once per app run, on the first launch of Portals. */
 let restored = false;
-
-const CHIPS: { filter: HomeFilter; text: (n: number) => string; color: string }[] = [
-  { filter: "needs", text: (n) => `${n} needs you`, color: colors.warning },
-  { filter: "working", text: (n) => `${n} working`, color: colors.accent },
-  { filter: "idle", text: (n) => `${n} idle`, color: colors.textMuted },
-];
 
 const openPane = (router: ReturnType<typeof useRouter>, host: string, pane: number) =>
   router.push({ pathname: "/host/[key]/pane/[id]", params: { key: host, id: String(pane) } });
 
 /** A coding agent's question answered in place (Main mockup): the pills, then "Open". */
 function AnswerPills({ row, host }: { row: TabRow; host: HostView }) {
+  const styles = useStyles();
   const router = useRouter();
   const s = useApp();
   const [error, setError] = useState<string | null>(null);
@@ -76,40 +73,23 @@ function AnswerPills({ row, host }: { row: TabRow; host: HostView }) {
     <View style={styles.pillsBox}>
       <View style={styles.pills}>
         {quick.map((q) => (
-          <Pressable
+          <Button
             key={q.index}
-            accessibilityRole="button"
+            label={homeChoiceLabel(q.label)}
             accessibilityLabel={q.opens ? `${ask.waiting.choices[q.index]}, opens the question` : ask.waiting.choices[q.index]}
-            accessibilityState={{ disabled: busy }}
+            variant={q.index === primary ? "primary" : "secondary"}
+            size="small"
+            numberOfLines={1}
             disabled={busy}
-            hitSlop={{ top: 4, bottom: 4 }}
             onPress={() =>
               q.opens
                 ? router.push({ pathname: "/answer", params: { key: row.host, pane: String(ask.pane), reply: "1" } })
                 : void send(q.index)
             }
-            style={({ pressed }) => [styles.pill, q.index === primary ? styles.pillPrimary : styles.pillOutline, pressed && styles.pressed]}
-          >
-            <Text
-              style={q.index === primary ? styles.pillPrimaryText : styles.pillText}
-              numberOfLines={1}
-              adjustsFontSizeToFit
-              minimumFontScale={0.75}
-            >
-              {homeChoiceLabel(q.label)}
-            </Text>
-          </Pressable>
+          />
         ))}
         <View style={styles.flex} />
-        <Pressable
-          accessibilityRole="link"
-          accessibilityLabel={`Open ${row.title}`}
-          hitSlop={{ top: 4, bottom: 4, left: 8, right: 8 }}
-          onPress={() => openPane(router, row.host, ask.pane)}
-          style={({ pressed }) => [styles.open, pressed && styles.pressed]}
-        >
-          <Text style={styles.openText}>Open</Text>
-        </Pressable>
+        <Button label="Open" accessibilityLabel={`Open ${row.title}`} variant="text" size="small" onPress={() => openPane(router, row.host, ask.pane)} />
       </View>
       {error ? <ErrorText>{error}</ErrorText> : null}
     </View>
@@ -127,17 +107,20 @@ interface TabRowProps {
 const TabRowView = memo(TabRowBody, (a: TabRowProps, b: TabRowProps) => a.last === b.last && a.answerHere === b.answerHere && a.host.record.name === b.host.record.name && sameTabRow(a.row, b.row));
 
 function TabRowBody({ row, host, last, answerHere }: TabRowProps) {
+  const colors = useColors();
+  const styles = useStyles();
   const router = useRouter();
   const needs = row.kind === "needs";
   const question = row.ask ? row.ask.waiting.prompt.split("\n")[0]!.trim() : "";
   const inline = answerHere && needs && row.operate && row.ask?.waiting.kind === "choice" && quickChoices(row.ask.waiting) !== null;
-  // the line carries the question ("claude · waiting for you · Edit x?"); the inline answer shows it whole
-  const line = row.line;
+  // the line carries the question ("claude · Waiting for you · Edit x?"); the inline answer shows it
+  // whole. The pane count goes beside the title ("project2 · 2 panes"), so the line says what it does.
+  const line = row.paneLine || row.line;
   return (
     <View style={[styles.row, needs && styles.rowNeeds, !last && styles.rowRule, inline && styles.rowInline]}>
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel={[row.title, row.state, inline ? question : line].filter(Boolean).join(", ")}
+        accessibilityLabel={[row.title, row.panes > 1 ? `${row.panes} panes` : null, row.state, inline ? question : line].filter(Boolean).join(", ")}
         accessibilityHint="Opens the tab"
         disabled={row.pane === null}
         onPress={() => row.pane !== null && openPane(router, row.host, row.pane)}
@@ -147,12 +130,14 @@ function TabRowBody({ row, host, last, answerHere }: TabRowProps) {
           <Tile agent={row.agent} program={row.program} />
         </View>
         <View style={styles.rowText}>
-          <Text style={styles.title} numberOfLines={1}>
-            {row.title}
-          </Text>
-          <Text style={styles.line} numberOfLines={1}>
-            {line}
-          </Text>
+          <View style={styles.titleLine}>
+            {/* the name is cut once, at its end; the pane count stays whole */}
+            <Text style={styles.title} numberOfLines={1}>
+              {row.title}
+            </Text>
+            {row.panes > 1 ? <Text style={styles.panes}>{` · ${row.panes} panes`}</Text> : null}
+          </View>
+          <CodeText line={line} codes={row.codes} />
           {inline ? (
             <Text style={styles.question}>
               {question}
@@ -163,7 +148,7 @@ function TabRowBody({ row, host, last, answerHere }: TabRowProps) {
         <View style={styles.side}>
           <StatusMark kind={row.kind} />
           {row.when ? (
-            <Text style={[styles.when, { color: row.kind === "idle" ? colors.textMuted : KIND_COLOR[row.kind] }]} numberOfLines={1}>
+            <Text style={[styles.when, { color: row.kind === "idle" ? colors.textMuted : colors[KIND_COLOR[row.kind]] }]} numberOfLines={1}>
               {row.when}
             </Text>
           ) : null}
@@ -174,7 +159,9 @@ function TabRowBody({ row, host, last, answerHere }: TabRowProps) {
   );
 }
 
-function HostCard({ host, rows, now, answerHere }: { host: HostView; rows: TabRow[]; now: number; answerHere: boolean }) {
+function HostCard({ host, rows, now, answerHere, twin }: { host: HostView; rows: TabRow[]; now: number; answerHere: boolean; twin: boolean }) {
+  const colors = useColors();
+  const styles = useStyles();
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
   const scope = useActionScope(host.record.key);
@@ -182,7 +169,13 @@ function HostCard({ host, rows, now, answerHere }: { host: HostView; rows: TabRo
   const online = host.conn.status === "open";
   const failed = host.conn.status === "failed";
   const tabs = host.windows.reduce((n, w) => n + w.tabs.length, 0);
-  const line = hostLine(host.conn, now, online ? tabs : null);
+  const line = hostLine(host.conn, now, online ? tabs : null, lastSeenAt(host));
+  // another pairing has the same name: each card says when it was paired, which tells them apart
+  const paired = twin ? pairedText(host.record.pairedAt, now) : "";
+  const lineText = paired ? `${line.text} · ${paired}` : line.text;
+  // a computer that cannot be reached offers its fixes in place: Try again, and Unpair (an old pairing)
+  const unreachable = (failed || host.conn.status === "closed") && !updating(host.conn);
+  const shown = homeRows(rows);
   // the permission of this connection, else the one stored at pairing
   const viewOnly = !canOperate(host);
   // Swipe left, Unpair: asks first; the computer leaves the list once this phone has forgotten it
@@ -215,10 +208,10 @@ function HostCard({ host, rows, now, answerHere }: { host: HostView; rows: TabRo
   // the New tab sheet chooses what the tab starts with and opens it
   const newTab = () => router.push({ pathname: "/new-tab", params: { key: host.record.key, from: "home" } });
   return (
-    <SwipeAction label={`Unpair ${name}`} text="Unpair" radius={16} onAction={() => void unpair()}>
+    <SwipeAction label={`Unpair ${name}`} text="Unpair" radius={radius.card} onAction={() => void unpair()}>
       <View style={styles.card} accessibilityLabel={name}>
         <View style={[styles.head, rows.length > 0 && styles.headRule]}>
-          <View style={[styles.dot, { backgroundColor: hostDot(host) }]} />
+          <View style={[styles.dot, { backgroundColor: colors[hostDot(host)] }]} />
           <View style={styles.headText}>
             <View style={styles.nameLine}>
               <Text style={styles.name} numberOfLines={1}>
@@ -229,13 +222,13 @@ function HostCard({ host, rows, now, answerHere }: { host: HostView; rows: TabRo
             {/* the line is a button: it opens the Connection sheet (every path, with why it is used or not) */}
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel={`${line.text}. Connection details`}
+              accessibilityLabel={`${lineText}. Connection details`}
               hitSlop={{ top: 13, bottom: 13, right: 16 }}
               onPress={() => router.push({ pathname: "/connection", params: { key: host.record.key } })}
               style={({ pressed }) => [styles.connButton, pressed && styles.pressed]}
             >
-              <Text style={[styles.conn, { color: LINE_COLOR[line.tone] }]}>{line.text}</Text>
-              <Icon name="forward" size={12} color={LINE_COLOR[line.tone]} />
+              <Text style={[styles.conn, { color: lineColor(colors)[line.tone] }]}>{lineText}</Text>
+              <Icon name="forward" size={12} color={lineColor(colors)[line.tone]} />
             </Pressable>
           </View>
           {online && canNewTab(host) ? (
@@ -248,25 +241,14 @@ function HostCard({ host, rows, now, answerHere }: { host: HostView; rows: TabRo
               <Icon name="newTab" size={20} color={colors.textMuted} />
             </Pressable>
           ) : null}
-          {failed && host.conn.failure === "auth" ? (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={`Pair ${name} again`}
-              onPress={() => router.push("/scan")}
-              style={({ pressed }) => [styles.headText2, pressed && styles.pressed]}
-            >
-              <Text style={styles.headAction}>Pair again</Text>
-            </Pressable>
-          ) : line.retry ? (
-            <Pressable
-              accessibilityRole="button"
+          {!unreachable && line.retry ? (
+            <Button
+              label="Try again"
               accessibilityLabel={`Try again to reach ${name}`}
+              size="small"
               onPress={() => fleet.retry(host.record.key)}
-              hitSlop={{ top: 4, bottom: 4 }}
-              style={({ pressed }) => [styles.tryAgain, pressed && styles.pressed]}
-            >
-              <Text style={styles.tryAgainText}>Try again</Text>
-            </Pressable>
+              style={styles.tryAgain}
+            />
           ) : null}
         </View>
         {line.progress ? (
@@ -277,20 +259,52 @@ function HostCard({ host, rows, now, answerHere }: { host: HostView; rows: TabRo
         {line.hint ? <Text style={styles.why}>{line.hint}</Text> : null}
         {host.notice ? <ErrorText style={styles.inset}>{host.notice}</ErrorText> : null}
         {error ? <ErrorText style={styles.inset}>{error}</ErrorText> : null}
+        {unreachable ? (
+          <View style={styles.fixes}>
+            {failed && host.conn.failure === "auth" ? (
+              <NavRow first accent chevron={false} label="Pair again" accessibilityLabel={`Pair ${name} again`} hint="Opens the camera to scan a new code" onPress={() => router.push("/scan")} />
+            ) : line.retry ? (
+              <NavRow first accent chevron={false} label="Try again" accessibilityLabel={`Try again to reach ${name}`} onPress={() => fleet.retry(host.record.key)} />
+            ) : null}
+            {/* the error red: it ends something; it asks first */}
+            <NavRow
+              first={!(failed && host.conn.failure === "auth") && !line.retry}
+              destructive
+              label="Unpair"
+              accessibilityLabel={`Unpair ${name}`}
+              hint="Asks first"
+              onPress={() => void unpair()}
+            />
+          </View>
+        ) : null}
         {online
-          ? rows.map((r, i) => <TabRowView key={r.key} row={r} host={host} last={i === rows.length - 1} answerHere={answerHere} />)
+          ? shown.map((r, i) => <TabRowView key={r.key} row={r} host={host} last={i === shown.length - 1} answerHere={answerHere} />)
           : null}
+        {online && rows.length > shown.length ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`Show all ${rows.length} tabs on ${name}`}
+            onPress={() => router.push({ pathname: "/tabs", params: { key: host.record.key, from: "home" } })}
+            style={({ pressed }) => [styles.showAll, pressed && styles.pressed]}
+          >
+            <Text style={styles.showAllText}>{`Show all ${rows.length} tabs`}</Text>
+          </Pressable>
+        ) : null}
       </View>
     </SwipeAction>
   );
 }
 
-/** Portals (the home screen): the state chips, then each paired computer with its tabs. */
+/**
+ * Portals (the home screen): one line that counts the tabs by state, then each paired computer
+ * with the tabs that matter most (what needs you first) and a way to the rest.
+ */
 export default function PortalsScreen() {
+  const colors = useColors();
+  const styles = useStyles();
   const router = useRouter();
   const s = useApp();
   const insets = useSafeAreaInsets();
-  const [picked, setPicked] = useState<HomeFilter | null>(null);
   // the working clocks tick each second, else "Needs you · 2m" and "seen 2h ago" each 30 s
   // (and each second while a computer counts down to its next try)
   // (only while the page is on top: a covered page does not wake each second)
@@ -309,9 +323,8 @@ export default function PortalsScreen() {
   const multi = s.hosts.length > 1;
   const ctx: RowContext = { now, multi, waitingSince: (h, p, w) => fleet.waitingSince(h, p, w), asked: s.asked };
   const all = live.map((h) => ({ host: h, rows: h.windows.flatMap((w) => w.tabs.map((t) => tabRow(h, t, ctx))) }));
-  const counts = homeCounts(all.flatMap((c) => c.rows));
-  // a state that ran out of tabs no longer filters
-  const filter = picked !== null && counts[picked] > 0 ? picked : null;
+  // the counts are words in one line, not chips: they filter nothing (the Tabs page does)
+  const summary = homeSummary(all.flatMap((c) => c.rows));
 
   // A cold start goes straight back to the pane open last, while its computer is still paired.
   // Only when Portals is on screen then: a pane already on top (this restore, a tapped alert)
@@ -331,8 +344,8 @@ export default function PortalsScreen() {
 
   if (s.ready && !s.loadError && s.hosts.length === 0) return <FirstRun />;
 
-  const rowsOf = (h: HostView) => filterHome(all.find((c) => c.host.record.key === h.record.key)?.rows ?? [], filter);
-  const shown = s.hosts.filter((h) => filter === null || rowsOf(h).length > 0);
+  const rowsOf = (h: HostView) => all.find((c) => c.host.record.key === h.record.key)?.rows ?? [];
+  const twin = (h: HostView) => s.hosts.some((o) => o !== h && o.record.name === h.record.name);
   return (
     <View style={[styles.page, { paddingTop: titleTop(insets.top) }]}>
       <View style={styles.header}>
@@ -340,92 +353,54 @@ export default function PortalsScreen() {
           <Text style={styles.heading} accessibilityRole="header">
             Portals
           </Text>
+          {/* the root page keeps its large title; its two actions are the header's glass buttons */}
           <View style={styles.buttons}>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Settings"
-              onPress={() => router.push("/settings")}
-              style={({ pressed }) => [styles.glass, pressed && styles.pressed]}
-            >
-              <Icon name="settings" size={20} color={colors.text} />
-            </Pressable>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Pair a computer"
-              onPress={() => router.push("/scan")}
-              style={({ pressed }) => [styles.glass, pressed && styles.pressed]}
-            >
-              <Icon name="add" size={20} color={colors.text} />
-            </Pressable>
+            <IconButton glass icon="settings" label="Settings" onPress={() => router.push("/settings")} />
+            <IconButton glass icon="add" label="Pair a computer" onPress={() => router.push("/scan")} />
           </View>
         </View>
-        <View style={styles.chips} accessibilityRole="toolbar" accessibilityLabel="Show tabs that">
-          {CHIPS.filter((c) => counts[c.filter] > 0).map((c) => {
-            const on = filter === c.filter;
-            // the needs chip stands out while nothing is filtered: it is what wants a look
-            const lit = on || (c.filter === "needs" && filter === null);
-            const label = c.text(counts[c.filter]);
-            return (
-              <Pressable
-                key={c.filter}
-                {...toggleA11y(on)}
-                accessibilityLabel={label}
-                onPress={() => setPicked(on ? null : c.filter)}
-                style={({ pressed }) => [
-                  styles.chip,
-                  lit && { borderColor: tint(c.color, 0x55), backgroundColor: c.filter === "idle" ? colors.glassRim : tint(c.color, 0x1f) },
-                  pressed && styles.pressed,
-                ]}
-              >
-                {lit && c.filter !== "idle" ? <View style={[styles.chipDot, { backgroundColor: c.color }]} /> : null}
-                <Text style={[styles.chipText, lit && { color: c.filter === "idle" ? colors.textBright : c.color }]}>{label}</Text>
-              </Pressable>
-            );
-          })}
-        </View>
+        {summary.length > 0 ? (
+          <Text style={styles.summary} accessibilityLabel={summary.map((p) => p.text).join(", ")}>
+            {summary.map((p, i) => (
+              <Text key={p.kind} style={p.kind === "needs" ? { color: colors.warning } : undefined}>
+                {i > 0 ? " · " : ""}
+                {p.kind === "needs" ? "● " : ""}
+                {p.text}
+              </Text>
+            ))}
+          </Text>
+        ) : null}
       </View>
       <ScrollView style={styles.flex} contentContainerStyle={[styles.cards, { paddingBottom: tabBottom(insets.bottom) }]}>
-        {shown.map((h) => (
-          <HostCard key={h.record.key} host={h} rows={rowsOf(h)} now={now} answerHere={!multi} />
+        {/* the keychain could not be read (locked, say): say so and offer to read it again, never a blank page */}
+        {s.loadError ? (
+          <View style={styles.loadError}>
+            <ErrorText>{`Could not read this device’s keys: ${s.loadError}. Unlock the device, then try again.`}</ErrorText>
+            <Button label="Try again" variant="primary" onPress={() => void fleet.retryInit()} />
+          </View>
+        ) : null}
+        {s.hosts.map((h) => (
+          <HostCard key={h.record.key} host={h} rows={rowsOf(h)} now={now} answerHere={!multi} twin={twin(h)} />
         ))}
       </ScrollView>
     </View>
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = makeStyles((colors) => ({
   flex: { flex: 1, minWidth: 0 },
   pressed: { opacity: 0.75 },
   page: { flex: 1, backgroundColor: colors.chrome },
-  header: { paddingHorizontal: 20, gap: 10 },
+  // a scrolled card is cut 8 pt under the summary, not at its baseline (the cards keep their 16 pt at rest)
+  header: { paddingHorizontal: 20, paddingBottom: 8, gap: 10 },
   titleRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-  heading: { fontFamily: ui(600), color: colors.textBright, fontSize: 32, letterSpacing: -0.5 },
+  // the Standard's large title: Inter 600 30/36
+  heading: { fontFamily: ui(600), color: colors.textBright, fontSize: 30, lineHeight: 36, letterSpacing: -0.5 },
   buttons: { flexDirection: "row", gap: 8 },
-  glass: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: colors.glass,
-    borderWidth: 1,
-    borderColor: colors.glassRim,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  chips: { flexDirection: "row", gap: 8 },
-  chip: {
-    height: 32,
-    paddingHorizontal: 12,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: colors.glassRim,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-  },
-  chipDot: { width: 7, height: 7, borderRadius: 4 },
-  chipText: { fontFamily: ui(500), color: colors.textMuted, fontSize: 13 },
-  cards: { paddingTop: 16, paddingHorizontal: 16, gap: 12 },
-  card: { borderRadius: 16, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.hairline, overflow: "hidden" },
+  summary: { fontFamily: ui(400), color: colors.textMuted, fontSize: 14, lineHeight: 20 },
+  loadError: { gap: 12 },
+  cards: { paddingTop: 8, paddingHorizontal: 16, gap: 12 },
+  card: { borderRadius: radius.card, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.hairline, overflow: "hidden" },
   head: { flexDirection: "row", alignItems: "center", gap: 10, paddingLeft: 16, paddingRight: 6, minHeight: 60, paddingVertical: 8 },
   headRule: { borderBottomWidth: 1, borderBottomColor: colors.hairline },
   dot: { width: 9, height: 9, borderRadius: 5 },
@@ -435,22 +410,20 @@ const styles = StyleSheet.create({
   // the status line wraps, never cut: its reason may be long
   connButton: { alignSelf: "flex-start", flexDirection: "row", alignItems: "center", gap: 6, maxWidth: "100%" },
   conn: { flexShrink: 1, fontFamily: ui(400), fontSize: 13, lineHeight: 18 },
-  tryAgain: { height: 36, paddingHorizontal: 14, borderRadius: 18, borderWidth: 1, borderColor: colors.borderStrong, alignItems: "center", justifyContent: "center", marginRight: 8 },
-  tryAgainText: { fontFamily: ui(400), color: colors.textBright, fontSize: 14 },
+  tryAgain: { marginRight: 8 },
   progress: { paddingHorizontal: 16, paddingBottom: 12 },
+  // a fact, not a call for attention: orange is for "needs you" only
   viewOnly: {
     fontFamily: ui(500),
-    color: colors.warning,
+    color: colors.textMuted,
     fontSize: 11,
     paddingHorizontal: 6,
     paddingVertical: 2,
-    borderRadius: 4,
+    borderRadius: radius.small,
     borderWidth: 1,
-    borderColor: `${colors.warning}55`,
+    borderColor: colors.borderStrong,
   },
   headIcon: { width: 44, height: 44, alignItems: "center", justifyContent: "center" },
-  headText2: { minWidth: 44, height: 44, paddingHorizontal: 10, alignItems: "center", justifyContent: "center" },
-  headAction: { fontFamily: ui(500), color: colors.accent, fontSize: 14 },
   why: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13, lineHeight: 18, paddingHorizontal: 16, paddingBottom: 14 },
   inset: { marginHorizontal: 16, marginBottom: 12 },
   row: { minHeight: 64 },
@@ -462,19 +435,16 @@ const styles = StyleSheet.create({
   rowMainCompact: { alignItems: "center", minHeight: 64 },
   tileBox: { flexShrink: 0 },
   rowText: { flex: 1, minWidth: 0, gap: 3 },
-  title: { fontFamily: ui(600), color: colors.textBright, fontSize: 15 },
+  titleLine: { flexDirection: "row", alignItems: "center", minWidth: 0 },
+  title: { flexShrink: 1, fontFamily: ui(600), color: colors.textBright, fontSize: 15 },
+  panes: { flexShrink: 0, fontFamily: ui(400), color: colors.textMuted, fontSize: 15 },
+  fixes: { borderTopWidth: 1, borderTopColor: colors.hairline },
+  showAll: { minHeight: 44, alignItems: "center", justifyContent: "center", borderTopWidth: 1, borderTopColor: colors.hairline },
+  showAllText: { fontFamily: ui(500), color: colors.accent, fontSize: 14 },
   side: { flexShrink: 0, minWidth: 36, alignItems: "flex-end", justifyContent: "center", gap: 5, alignSelf: "center" },
   when: { fontFamily: ui(500), fontSize: 11, fontVariant: ["tabular-nums"] },
-  line: { fontFamily: mono, color: colors.textMuted, fontSize: 12 },
   question: { fontFamily: ui(400), color: colors.text, fontSize: 14, lineHeight: 20, marginTop: 4 },
   pillsBox: { gap: 8, paddingLeft: 68, paddingRight: 16 },
   pills: { flexDirection: "row", alignItems: "center", gap: 8 },
-  pill: { height: 36, borderRadius: 18, alignItems: "center", justifyContent: "center" },
-  pillPrimary: { backgroundColor: colors.accent, paddingHorizontal: 16 },
-  pillOutline: { borderWidth: 1, borderColor: colors.borderStrong, paddingHorizontal: 14 },
-  pillPrimaryText: { fontFamily: ui(600), color: colors.bg, fontSize: 14 },
-  pillText: { fontFamily: ui(500), color: colors.text, fontSize: 14 },
-  open: { height: 36, justifyContent: "center" },
-  openText: { fontFamily: ui(500), color: colors.accent, fontSize: 14 },
-});
+}));
 

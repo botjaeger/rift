@@ -23,8 +23,8 @@ export const PROGRAMS: readonly Program[] = [
 ];
 
 /** The row's second line. */
-export const programLine = (p: Program, kind: OpenKind): string =>
-  p.command === null ? `A plain shell in the new ${kind}` : `Opens a shell, then types ${p.command}`;
+export const programLine = (p: Program, _kind: OpenKind): string =>
+  p.command === null ? "A plain shell" : `Opens a shell, then runs ${p.command}`;
 
 /**
  * What starting `p` asks first: `confirm` shows the command before it is typed (Settings › Ask

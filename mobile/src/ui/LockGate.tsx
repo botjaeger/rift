@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Keyboard, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { appLock, authenticate, useLock } from "@/runtime";
+import { appLock, authenticate, biometricSupport, useLock } from "@/runtime";
 import { Button } from "./Button";
 import { ErrorText } from "./Notice";
-import { colors, ui } from "./theme";
+import { Mark } from "./Splash";
+import { ui, makeStyles } from "./theme";
 
 /**
  * The app lock over everything (Settings › Security). While locked, the screens stay mounted
@@ -13,6 +14,7 @@ import { colors, ui } from "./theme";
  * shows no terminal output.
  */
 export function LockGate({ children }: { children: ReactNode }) {
+  const styles = useStyles();
   const { locked, covered } = useLock();
   const hidden = locked || covered;
   // A field focused when the app locked keeps the keyboard up over the lock screen, and its keys
@@ -39,10 +41,20 @@ export function LockGate({ children }: { children: ReactNode }) {
 }
 
 function LockScreen({ covered }: { covered: boolean }) {
+  const styles = useStyles();
   const insets = useSafeAreaInsets();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const asked = useRef(false);
+  // what unlocks it, in the button's words ("Unlock with Face ID")
+  const [bio, setBio] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    void biometricSupport().then((r) => live && setBio(r.label?.replace(/^Require /, "") ?? null));
+    return () => {
+      live = false;
+    };
+  }, []);
 
   const unlock = useCallback(async () => {
     setBusy(true);
@@ -66,13 +78,17 @@ function LockScreen({ covered }: { covered: boolean }) {
       contentContainerStyle={[styles.lockContent, { paddingTop: insets.top + 24, paddingBottom: insets.bottom + 24 }]}
       accessibilityViewIsModal
     >
+      {/* the mark, one line, one button */}
+      <View style={styles.mark}>
+        <Mark />
+      </View>
       <Text style={styles.title} accessibilityRole="header">
         Rift is locked
       </Text>
-      <Text style={styles.text}>Your terminal sessions stay hidden until you unlock.</Text>
+      <Text style={styles.text}>Your tabs stay connected.</Text>
       {error ? <ErrorText>{error}</ErrorText> : null}
       <Button
-        label={busy ? "Unlocking…" : "Unlock"}
+        label={busy ? "Unlocking…" : bio ? `Unlock with ${bio}` : "Unlock"}
         variant="primary"
         disabled={busy}
         accessibilityHint="Asks for Face ID, a fingerprint or the device passcode"
@@ -82,11 +98,12 @@ function LockScreen({ covered }: { covered: boolean }) {
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = makeStyles((colors) => ({
   fill: { flex: 1 },
   cover: { ...StyleSheet.absoluteFill, backgroundColor: colors.bg },
   lock: { ...StyleSheet.absoluteFill, backgroundColor: colors.bg },
   lockContent: { flexGrow: 1, justifyContent: "center", padding: 24, gap: 16, maxWidth: 480, width: "100%", alignSelf: "center" },
-  title: { fontFamily: ui(600), color: colors.textBright, fontSize: 22 },
-  text: { fontFamily: ui(400), color: colors.textMuted, fontSize: 15, lineHeight: 21 },
-});
+  mark: { alignItems: "center", marginBottom: 8 },
+  title: { fontFamily: ui(600), color: colors.textBright, fontSize: 22, textAlign: "center" },
+  text: { fontFamily: ui(400), color: colors.textMuted, fontSize: 15, lineHeight: 21, textAlign: "center" },
+}));

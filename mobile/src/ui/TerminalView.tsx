@@ -5,6 +5,7 @@ import {
   AccessibilityInfo,
   AppState,
   Keyboard,
+  Linking,
   Platform,
   Pressable,
   ScrollView,
@@ -29,15 +30,18 @@ import {
 } from "@/keyboard";
 import { SubmitAuthHold } from "@/lock";
 import {
-  clampZoom,
   FIT_DEBOUNCE_MS,
   FIT_REFRESH_MS,
   fitFontSize,
   fitSize,
   isDoubleTap,
   keptZoom,
+  onKeptZoom,
   pinchZoom,
+  setKeptZoom,
   touchDistance,
+  ZOOM_MAX,
+  ZOOM_MIN,
   zoomPercent,
   zoomStep,
 } from "@/paneView";
@@ -52,16 +56,16 @@ import { programSend } from "@/paneView";
 import { promptText, textToCopy } from "@/selection";
 import { SelectionBar } from "./SelectionBar";
 import * as haptics from "@/haptics";
-import { fullScreenRow, rowWithPaste } from "@/controlKeys";
-import { CELL_RATIO, rowKeys, textRoom, cellAt, cursorScrollY, drawnText, fitArea, fitFont, lastTextRow, lineAt, ordered, screenSpan, selectionText, wordAt, wordStep, type Cell, LINE_RATIO, rowPieces, rowSegments, screenDefaults, segmentColors, showsKeyRow, type Piece } from "@/terminal";
+import { rowWithPaste } from "@/controlKeys";
+import { CELL_RATIO, rowKeys, textRoom, cellAt, cursorScrollY, drawnText, fitArea, fitFont, lastTextRow, lineAt, linkAt, markLinks, openableLink, ordered, screenLinks, screenSpan, selectionText, wordAt, wordStep, type Cell, LINE_RATIO, rowPieces, rowSegments, screenDefaults, segmentColors, showsKeyRow, type Piece, type ScreenLink } from "@/terminal";
 import { ControlRow, NO_STICKY, type Sticky } from "./ControlRow";
 import { ScreenSkeleton } from "./PaneLoading";
 import { useOpenShell } from "./useOpenShell";
 import { ErrorText, WarningText } from "./Notice";
-import { colors, mono, monoBold, ui } from "./theme";
+import { fromPalette, mono, monoBold, ui, makeStyles, useColors } from "./theme";
 
 /** The terminal's default colours (a run's null fg / bg): terminal text on the pane's ground. */
-const DEFAULTS = { fg: colors.fg, bg: colors.bg };
+const defaultColors = fromPalette((colors) => ({ fg: colors.fg, bg: colors.bg }));
 const PADDING = 8;
 const PADDING_X = 6;
 
@@ -71,9 +75,9 @@ function decoration(flags: number): TextStyle["textDecorationLine"] {
   return u && s ? "underline line-through" : u ? "underline" : s ? "line-through" : undefined;
 }
 
-/** A selection handle: a 2 pt stem the row's height with a 12 pt knob (above the start, below the end), and how close a finger must come to take it. */
+/** A selection handle: a 2 pt stem the row's height with an 18 pt knob (above the start, below the end), and how close a finger must come to take it (44 pt, either side). */
 const STEM = 2;
-const KNOB = 12;
+const KNOB = 18;
 const HANDLE_REACH = 44;
 /** The loupe over a dragged handle: its size, how much larger it draws the row, and its gap above the finger's row. */
 const LOUPE_W = 150;
@@ -94,14 +98,21 @@ function PieceView({
   fontSize,
   lineHeight,
   defaults,
+  link,
 }: {
   piece: Piece;
   cell: number;
   fontSize: number;
   lineHeight: number;
   defaults: { fg: string; bg: string };
+  /** Part of a link (a tap opens it): drawn in the accent, underlined. */
+  link: boolean;
 }) {
-  const { color, backgroundColor } = segmentColors(piece, defaults);
+  const colors = useColors();
+  const styles = useStyles();
+  const colorsHere = segmentColors(piece, defaults);
+  const backgroundColor = colorsHere.backgroundColor;
+  const color = link && !piece.cursor ? colors.accent : colorsHere.color;
   const left = piece.col * cell;
   const width = piece.cells * cell;
   const text: TextStyle = {
@@ -112,7 +123,7 @@ function PieceView({
     // bold is a face of its own (Android takes no weight from a custom family)
     ...(piece.flags & RUN_BOLD ? { fontFamily: monoBold } : null),
     fontStyle: piece.flags & RUN_ITALIC ? "italic" : undefined,
-    textDecorationLine: decoration(piece.flags),
+    textDecorationLine: link ? (piece.flags & RUN_STRIKE ? "underline line-through" : "underline") : decoration(piece.flags),
     includeFontPadding: false,
   };
   return (
@@ -143,6 +154,8 @@ const Row = memo(function Row({
   rule,
   fg,
   bg,
+  links,
+  onLink,
 }: {
   runs: ScreenRun[];
   cursorCol: number | null;
@@ -152,13 +165,19 @@ const Row = memo(function Row({
   rule: string | null;
   fg: string;
   bg: string;
+  /** The links on this row: their cells, and the address each opens (`NO_LINKS` for none). */
+  links: readonly RowLink[];
+  /** Opens a link (a screen reader's action on the row). */
+  onLink?: (url: string) => void;
 }) {
+  const styles = useStyles();
   const lineHeight = Math.round(fontSize * LINE_RATIO);
   const cell = fontSize * CELL_RATIO;
   const segments = rowSegments(runs, cursorCol);
   const spoken = segments.map((x) => x.text).join("");
   const blank = spoken.trim() === "";
   const defaults = { fg, bg };
+  const url = links[0]?.url;
   return (
     <View
       style={{ height: lineHeight, width }}
@@ -167,14 +186,31 @@ const Row = memo(function Row({
       accessibilityLabel={blank ? undefined : spoken}
       accessibilityElementsHidden={blank}
       importantForAccessibility={blank ? "no-hide-descendants" : "yes"}
+      // a row with a link: activating it opens the (first) link
+      accessibilityRole={url ? "link" : undefined}
+      accessibilityHint={url ? "Opens the link" : undefined}
+      accessibilityActions={url && onLink ? [{ name: "activate" }] : undefined}
+      onAccessibilityAction={url && onLink ? () => onLink(url) : undefined}
     >
       {rule ? <View style={[styles.rule, { height: lineHeight, backgroundColor: `#${rule}` }]} /> : null}
-      {rowPieces(segments).map((piece) => (
-        <PieceView key={piece.col} piece={piece} cell={cell} fontSize={fontSize} lineHeight={lineHeight} defaults={defaults} />
+      {markLinks(rowPieces(segments), links).map((piece) => (
+        <PieceView key={piece.col} piece={piece} cell={cell} fontSize={fontSize} lineHeight={lineHeight} defaults={defaults} link={piece.link} />
       ))}
     </View>
   );
 });
+
+/** A link's cells on one row, with the address it opens. */
+type RowLink = { col: number; cells: number; url: string };
+/** A row with no link: one shared value, so rows that did not change keep their memo. */
+const NO_LINKS: readonly RowLink[] = [];
+
+/** Each row's links (rows without one share `NO_LINKS`). */
+function linksByRow(links: readonly ScreenLink[], rows: number): (readonly RowLink[])[] {
+  const out: RowLink[][] = [];
+  for (const l of links) for (const s of l.spans) (out[s.row] ??= []).push({ col: s.col, cells: s.cells, url: l.url });
+  return Array.from({ length: rows }, (_, r) => out[r] ?? NO_LINKS);
+}
 
 /** Where a selection's handles take a finger, in the rows' coordinates: the centre of each knob. */
 export function handleSpots(a: Cell, b: Cell, cell: number, rowHeight: number) {
@@ -192,6 +228,7 @@ export function handleSpots(a: Cell, b: Cell, cell: number, rowHeight: number) {
  * above it, the end's below): drawn only, the view's touches move them.
  */
 function SelectionMarks({ a, b, cols, cell, rowHeight }: { a: Cell; b: Cell; cols: number; cell: number; rowHeight: number }) {
+  const styles = useStyles();
   const { from, to, start, end } = handleSpots(a, b, cell, rowHeight);
   const bands = [];
   for (let r = from.row; r <= to.row; r++) {
@@ -215,6 +252,7 @@ function SelectionMarks({ a, b, cols, cell, rowHeight }: { a: Cell; b: Cell; col
  * a caret there, above the row (below it on the first rows) so the finger never hides what it picks.
  */
 function Loupe({ row, edge, screen, fontSize, rowHeight, cell, fg, bg }: { row: number; edge: number; screen: ScreenState; fontSize: number; rowHeight: number; cell: number; fg: string; bg: string }) {
+  const styles = useStyles();
   const big = fontSize * LOUPE_SCALE;
   const bigRow = Math.round(big * LINE_RATIO);
   const height = bigRow + 12;
@@ -228,7 +266,7 @@ function Loupe({ row, edge, screen, fontSize, rowHeight, cell, fg, bg }: { row: 
   return (
     <View pointerEvents="none" accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={[styles.loupe, { left, top, height, backgroundColor: bg }]}>
       <View style={{ position: "absolute", top: 6, left: centre - edge * big * CELL_RATIO, width }}>
-        <Row runs={screen.lines[row] ?? []} cursorCol={null} fontSize={big} width={width} rule={null} fg={fg} bg={bg} />
+        <Row runs={screen.lines[row] ?? []} cursorCol={null} fontSize={big} width={width} rule={null} fg={fg} bg={bg} links={NO_LINKS} />
       </View>
       <View style={[styles.loupeCaret, { left: centre - 1, top: 6, height: bigRow }]} />
     </View>
@@ -248,10 +286,16 @@ function Grid({
   rowsRef,
   selection,
   loupe,
+  links,
+  onLink,
 }: {
   screen: ScreenState;
   zoom: number;
   fitted: boolean;
+  /** The screen's links (`screenLinks`), drawn as links on their rows. */
+  links: readonly ScreenLink[];
+  /** Opens a link (a screen reader's action on its row). */
+  onLink: (url: string) => void;
   /** Told each row's height and each cell's width in points (a drag's lines, a touch's cell). */
   onRowHeight?: (height: number, cell: number) => void;
   /** The rows' view, to turn a touch into a cell. */
@@ -261,6 +305,8 @@ function Grid({
   /** A dragged handle's row and the column boundary it stands on: the loupe shows them. */
   loupe?: { row: number; edge: number } | null;
 }) {
+  const colors = useColors();
+  const styles = useStyles();
   const [width, setWidth] = useState(0);
   const onLayout = (e: LayoutChangeEvent) => setWidth(e.nativeEvent.layout.width);
   const fit = fitted ? { fontSize: fitFontSize(1), scroll: false } : fitFont(width - PADDING_X * 2, screen.cols);
@@ -270,10 +316,11 @@ function Grid({
     onRowHeight?.(rowHeight, fontSize * CELL_RATIO);
   }, [onRowHeight, rowHeight, fontSize]);
   const rowWidth = Math.ceil(screen.cols * fontSize * CELL_RATIO) + 2;
-  const defaults = screenDefaults(screen, DEFAULTS);
+  const defaults = screenDefaults(screen, defaultColors(colors));
   const scroll = fit.scroll || rowWidth > width - PADDING_X * 2;
   const [cursorRow, cursorCol] = screen.cursor ?? [-1, -1];
   const keys = rowKeys(screen.lines);
+  const rowLinks = useMemo(() => linksByRow(links, screen.lines.length), [links, screen.lines.length]);
   const rows = (
     <View ref={rowsRef} collapsable={false}>
       {screen.lines.map((runs, r) => (
@@ -286,6 +333,8 @@ function Grid({
           rule={screen.rules.get(r) ?? null}
           fg={defaults.fg}
           bg={defaults.bg}
+          links={rowLinks[r] ?? NO_LINKS}
+          onLink={onLink}
         />
       ))}
       {selection ? <SelectionMarks a={selection.a} b={selection.b} cols={screen.cols} cell={fontSize * CELL_RATIO} rowHeight={rowHeight} /> : null}
@@ -295,7 +344,8 @@ function Grid({
   return (
     <View style={styles.gridWrap} onLayout={onLayout}>
       {width === 0 ? null : scroll ? (
-        <ScrollView horizontal contentContainerStyle={styles.gridPad}>
+        // a selection's handles take sideways drags: the rows stand still meanwhile
+        <ScrollView horizontal scrollEnabled={!selection} contentContainerStyle={styles.gridPad}>
           {rows}
         </ScrollView>
       ) : (
@@ -330,6 +380,7 @@ export function TerminalView({
   canPaste,
   canMouse,
   keepHeight,
+  covered,
   onPasted,
   onBar,
 }: {
@@ -358,15 +409,22 @@ export function TerminalView({
   canMouse?: boolean;
   /** Something docked over the view (a question card): the program keeps its height, as under the keyboard. */
   keepHeight?: boolean;
+  /** A menu is open over the view: the keyboard goes away, or the keys riding it would cover the menu's last rows. */
+  covered?: boolean;
   /** Something pasted waits in the pane's message box: show it. */
   onPasted?: () => void;
   /** With `bare`: the selection bar while text is selected, else null; the pane draws it over its own controls. */
   onBar?: (bar: ReactNode | null) => void;
 }) {
+  const colors = useColors();
+  const styles = useStyles();
   const s = useApp();
   const scope = useActionScope(`${hostKey}:${paneId}`);
   const capture = useRef<KeyCaptureHandle>(null);
   const [focused, setFocused] = useState(false);
+  useEffect(() => {
+    if (covered) capture.current?.blur();
+  }, [covered]);
   const [sticky, setSticky] = useState<Sticky>(NO_STICKY);
   const [error, setError] = useState<string | null>(null);
   const [atPrompt, setAtPrompt] = useState(false);
@@ -623,7 +681,17 @@ export function TerminalView({
   const movingHandle = useRef<"a" | "b" | null>(null);
   // where the moving end last was: touches come faster than renders, and each word step ticks once
   const lastEnd = useRef<Cell | null>(null);
+  // from the finger to the middle of the cell the taken handle stands on: the knob sits half a
+  // row off its row, so moving by the knob without this would jump the end a row up or down
+  const grab = useRef({ x: 0, y: 0 });
   const shown = frozen ?? screen;
+  // the links on the screen: drawn as links, and a tap on one opens it
+  const links = useMemo(() => (shown ? screenLinks(shown.lines, shown.cols) : []), [shown]);
+  const openLink = useCallback((url: string) => {
+    if (openableLink(url)) void Linking.openURL(url);
+  }, []);
+  // the link under a point, by the rows' last measured place (a tap's keyboard focus asks it at once)
+  const linkUnder = (pageX: number, pageY: number) => (shown ? linkAt(links, cellOf(pageX, pageY, shown)) : null);
   const cancelHold = () => {
     clearTimeout(holdTimer.current);
     holdTimer.current = undefined;
@@ -662,6 +730,8 @@ export function TerminalView({
       setSelection({ a, b });
       movingHandle.current = "b";
       lastEnd.current = b;
+      // the finger that held stands on the text itself
+      grab.current = { x: 0, y: 0 };
       holdAt.current = { x: pageX, y: pageY };
       setCopied(false);
       haptics.selectStart();
@@ -677,17 +747,18 @@ export function TerminalView({
       () => {
         setCopiedText(text);
         haptics.copied();
-        AccessibilityInfo.announceForAccessibility("Selected and copied");
+        // said once per copy; the bar's "✓ Copied" stays in view and is not announced again
+        AccessibilityInfo.announceForAccessibility("Copied");
       },
       () => AccessibilityInfo.announceForAccessibility("Could not copy"),
     );
   };
-  // the bar's Word, Line and Screen widen the selection to whole words, whole rows or every cell
-  const widen = (to: "word" | "line" | "screen") => {
+  // the bar's Word, Line and All widen the selection to whole words, whole rows or every cell
+  const widen = (to: "word" | "line" | "all") => {
     if (!shown || !selection) return;
     const [from, end] = ordered(selection.a, selection.b);
     const [a, b] =
-      to === "screen"
+      to === "all"
         ? screenSpan(shown.lines.length, shown.cols)
         : to === "line"
           ? [{ row: from.row, col: 0 }, lineAt(shown.lines, end)[1]]
@@ -754,9 +825,10 @@ export function TerminalView({
       clearTimeout(zoomTimer.current);
     };
   }, []);
+  // the ⋯ menu's Text size changes the same kept zoom
+  useEffect(() => onKeptZoom(setZoomState), []);
   const setZoom = (z: number) => {
-    const c = clampZoom(z);
-    keptZoom.value = c;
+    const c = setKeptZoom(z);
     setZoomState(c);
     setZoomShown(true);
     clearTimeout(zoomTimer.current);
@@ -780,7 +852,13 @@ export function TerminalView({
       const toLast = dist(end);
       if (Math.min(toFirst, toLast) > HANDLE_REACH) return endSelection();
       // the end the finger took keeps moving, the other stays
-      setSelection({ a: toFirst <= toLast ? to : from, b: toFirst <= toLast ? from : to });
+      const taken = toFirst <= toLast ? from : to;
+      const cell = cellSize();
+      grab.current = {
+        x: (taken.col + 0.5) * cell - (pageX - metrics.current.x),
+        y: (taken.row + 0.5) * rowHeight.current - (pageY - metrics.current.y),
+      };
+      setSelection({ a: toFirst <= toLast ? to : from, b: taken });
       lastEnd.current = toFirst <= toLast ? from : to;
       movingHandle.current = "b";
       return;
@@ -818,7 +896,7 @@ export function TerminalView({
         const at = holdAt.current;
         if (at && Math.hypot(t[0]!.pageX - at.x, t[0]!.pageY - at.y) <= DRAG_SLOP) return;
         holdAt.current = null;
-        const b = cellOf(t[0]!.pageX, t[0]!.pageY, shown);
+        const b = cellOf(t[0]!.pageX + grab.current.x, t[0]!.pageY + grab.current.y, shown);
         if (wordStep(shown.lines, lastEnd.current ?? selection.b, b)) haptics.selectStep();
         lastEnd.current = b;
         // the moving end is the selection's start when it lies before the other end
@@ -868,11 +946,14 @@ export function TerminalView({
         lastTap.current = now;
         // a program that tracks the mouse takes the tap as a click; any other says no, silently.
         // A touch that only caught a flick clicks nothing
-        if (canMouse && screen && focusOnTap.current) {
+        // A tap on a link opens it, before the program's click
+        if (shown && focusOnTap.current) {
           const { x, y } = tap.current;
           atRows(() => {
-            const c = cellOf(x, y, screen);
-            void fleet.sendMouse(hostKey, paneId, c.col, c.row);
+            const c = cellOf(x, y, shown);
+            const url = linkAt(links, c);
+            if (url) openLink(url);
+            else if (canMouse) void fleet.sendMouse(hostKey, paneId, c.col, c.row);
           });
         }
       }
@@ -954,10 +1035,11 @@ export function TerminalView({
       <Pressable
         accessibilityRole="button"
         accessibilityLabel="Smaller text"
-        accessibilityState={{ disabled: zoom <= 0.6 }}
+        disabled={zoom <= ZOOM_MIN}
+        accessibilityState={{ disabled: zoom <= ZOOM_MIN }}
         onPress={() => setZoom(zoomStep(zoom, -1))}
         hitSlop={6}
-        style={({ pressed }) => [styles.zoomButton, pressed && styles.pressed]}
+        style={({ pressed }) => [styles.zoomButton, zoom <= ZOOM_MIN && styles.disabled, pressed && styles.pressed]}
       >
         <Text style={styles.zoomGlyph}>−</Text>
       </Pressable>
@@ -967,10 +1049,11 @@ export function TerminalView({
       <Pressable
         accessibilityRole="button"
         accessibilityLabel="Larger text"
-        accessibilityState={{ disabled: zoom >= 2 }}
+        disabled={zoom >= ZOOM_MAX}
+        accessibilityState={{ disabled: zoom >= ZOOM_MAX }}
         onPress={() => setZoom(zoomStep(zoom, 1))}
         hitSlop={6}
-        style={({ pressed }) => [styles.zoomButton, pressed && styles.pressed]}
+        style={({ pressed }) => [styles.zoomButton, zoom >= ZOOM_MAX && styles.disabled, pressed && styles.pressed]}
       >
         <Text style={styles.zoomGlyph}>+</Text>
       </Pressable>
@@ -996,17 +1079,17 @@ export function TerminalView({
         <SelectionBar
           selected={selectedNow}
           copied={barCopied}
-          note={loupe ? "lift to copy" : "screen held"}
-          keys={[
-            { label: "Word", hint: "Select whole words", onPress: () => barActs.current.widen("word") },
-            { label: "Line", hint: "Select whole lines", onPress: () => barActs.current.widen("line") },
-            { label: "Screen", hint: "Select the whole screen", onPress: () => barActs.current.widen("screen") },
-            ...(prompts ? [{ label: "To prompt", hint: "Put the selection in the command line", onPress: () => barActs.current.toPrompt(), sep: true }] : []),
-          ]}
-          onCancel={() => barActs.current.endSelection()}
+          of="screen"
+          note={loupe ? "Lift to copy" : "Screen held"}
+          onWord={() => barActs.current.widen("word")}
+          onLine={() => barActs.current.widen("line")}
+          onAll={() => barActs.current.widen("all")}
+          onPrompt={prompts ? () => barActs.current.toPrompt() : undefined}
+          promptOff={operate ? "To prompt needs the message box under the screen." : "This device cannot type here."}
+          onCancel={endSelection}
         />
       ) : null,
-    [selecting, selectedNow, barCopied, loupe, prompts],
+    [selecting, selectedNow, barCopied, loupe, prompts, operate, endSelection],
   );
   useEffect(() => {
     if (bare) onBar?.(selectionBar);
@@ -1016,14 +1099,14 @@ export function TerminalView({
   // a desktop in use keeps its size: then the phone fits what comes to its width
   const fittedHere = held && (shown?.cols ?? 0) <= (cols ?? 0);
   const grid = shown ? (
-    <Grid screen={shown} zoom={zoom} fitted={fittedHere} onRowHeight={onRowHeight} rowsRef={rowsView} selection={selection} loupe={loupe} />
+    <Grid screen={shown} zoom={zoom} fitted={fittedHere} onRowHeight={onRowHeight} rowsRef={rowsView} selection={selection} loupe={loupe} links={links} onLink={openLink} />
   ) : (
     // the pane's steps card (PaneLoading) says what is awaited; these are the rows to come
     <ScreenSkeleton />
   );
 
   return (
-    <View style={[styles.fill, { backgroundColor: screenDefaults(screen, DEFAULTS).bg }]}>
+    <View style={[styles.fill, { backgroundColor: screenDefaults(screen, defaultColors(colors)).bg }]}>
       {/* above the screen, not over its first row; the program keeps its size meanwhile (onArea) */}
       {screen?.ageMs != null ? (
         <View style={styles.age} accessibilityLiveRegion="polite">
@@ -1047,7 +1130,8 @@ export function TerminalView({
           >
             <ScrollView ref={scroller} style={styles.fill} accessibilityLabel={label} {...a11yCopy} scrollEnabled={localScroll && !selecting} bounces={!canScroll} onLayout={onArea} onScroll={trackLocal} scrollEventThrottle={16} onScrollEndDrag={onScroll} onMomentumScrollEnd={onScroll} onContentSizeChange={onContent}>
               {/* not one element for screen readers: they read the rows */}
-              <Pressable onPress={() => { if (focusOnTap.current) capture.current?.focus(); }} accessible={false}>
+              {/* a tap on a link opens it and leaves the keyboard down */}
+              <Pressable onPress={(e) => { if (focusOnTap.current && !linkUnder(e.nativeEvent.pageX, e.nativeEvent.pageY)) capture.current?.focus(); }} accessible={false}>
                 {grid}
               </Pressable>
             </ScrollView>
@@ -1085,11 +1169,11 @@ export function TerminalView({
           {!canType ? (
             <Text style={styles.oldRift}>This computer's Rift takes keys from the row only; update it to type here.</Text>
           ) : null}
-          {/* a full-screen program needs its keys: the row shows here whatever Settings says */}
+          {/* a full-screen program needs its keys: the key block and arrow pad show here whatever Settings says */}
           {showsKeyRow(s.settings.showKeys, true) ? (
             <ControlRow
-              // a screenshot for the program needs Paste: on the row whatever Settings › Keys holds
-              ids={rowWithPaste(fullScreenRow(s.settings.controlKeys), !!canUpload)}
+              // a screenshot for the program needs Paste: in the block whatever Settings › Keys holds
+              ids={rowWithPaste(s.settings.controlKeys, !!canUpload)}
               sticky={sticky}
               disabled={!online}
               onSticky={setSticky}
@@ -1097,10 +1181,9 @@ export function TerminalView({
               onOpen={onOpen}
               onPaste={canType || canUpload ? () => void onPaste() : undefined}
               systemPaste={canUpload ? systemPaste : undefined}
-              // the last key: hide the keyboard, or open it (a tap on the screen opens it too)
+              // the keyboard key: hide the keyboard, or open it (a tap on the screen opens it too)
               onHideKeyboard={typing && focused ? () => capture.current?.blur() : undefined}
               onShowKeyboard={typing && !focused ? () => capture.current?.focus() : undefined}
-              wrap
             />
           ) : null}
         </View>
@@ -1120,11 +1203,11 @@ export function TerminalView({
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = makeStyles((colors) => ({
   fill: { flex: 1, backgroundColor: colors.bg },
   gridWrap: { flex: 1 },
   gridPad: { paddingVertical: PADDING, paddingHorizontal: PADDING_X },
-  cell: { fontFamily: mono, color: DEFAULTS.fg },
+  cell: { fontFamily: mono, color: colors.fg },
   // as the blocks view's view-only line
   viewOnly: {
     fontFamily: ui(400),
@@ -1170,4 +1253,4 @@ const styles = StyleSheet.create({
   rule: { position: "absolute", left: -4, top: 0, width: 2 },
   disabled: { opacity: 0.45 },
   pressed: { opacity: 0.7 },
-});
+}));

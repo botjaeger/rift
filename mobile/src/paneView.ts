@@ -40,6 +40,59 @@ export const isDoubleTap = (prev: number | null, now: number) => prev !== null &
 /** The zoom the app keeps for its run: every terminal view starts at it. */
 export const keptZoom = { value: 1 };
 
+const zoomListeners = new Set<(zoom: number) => void>();
+
+/**
+ * Keeps `zoom` (clamped) as the pinch does, and tells every view that follows it (the terminal
+ * view, the ⋯ menu's Text size): the menu and a pinch change the same zoom. Returns the kept value.
+ */
+export function setKeptZoom(zoom: number): number {
+  const z = clampZoom(zoom);
+  keptZoom.value = z;
+  for (const fn of zoomListeners) fn(z);
+  return z;
+}
+
+/** Calls `fn` with the kept zoom whenever it changes; returns the unsubscribe. */
+export function onKeptZoom(fn: (zoom: number) => void): () => void {
+  zoomListeners.add(fn);
+  return () => void zoomListeners.delete(fn);
+}
+
+// --- Search output: the matches marked ------------------------------------------------------
+
+/** The most matches marked in one text: a short query over a long output stays cheap to draw. */
+export const MAX_MARKS = 100;
+
+/** A piece of a text: marked where it matches the search. */
+export type MarkPart = { text: string; mark: boolean };
+
+const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, (c) => `\\${c}`);
+
+/**
+ * `text` in pieces, each occurrence of `query` (trimmed, any case) marked, at most `max` of them
+ * (the rest of the text after the last one stays plain); null when the query is empty or not in
+ * the text, so the plain text is drawn as before. Joined, the pieces are `text` exactly: a
+ * selection's offsets are the same.
+ */
+export function markParts(text: string, query: string, max = MAX_MARKS): MarkPart[] | null {
+  const q = query.trim();
+  if (q === "" || text === "") return null;
+  const re = new RegExp(escapeRegExp(q), "gi");
+  const parts: MarkPart[] = [];
+  let at = 0;
+  let count = 0;
+  for (let m = re.exec(text); m !== null && count < max; m = re.exec(text)) {
+    if (m.index > at) parts.push({ text: text.slice(at, m.index), mark: false });
+    parts.push({ text: m[0], mark: true });
+    at = m.index + m[0].length;
+    count++;
+  }
+  if (count === 0) return null;
+  if (at < text.length) parts.push({ text: text.slice(at), mark: false });
+  return parts;
+}
+
 // --- fitting the program to the phone's view (feature `fit`) ------------------------------------
 
 /** The font size at 100 % zoom while the program is fitted to the view; the zoom scales it. */
@@ -118,12 +171,16 @@ export function screenView(p: Pane, alt: boolean, blocksHoldRunning: boolean, no
 export const fieldKey = (name: string): "send" | "newline" | null => (name === "enter" ? "send" : name === "shift+enter" ? "newline" : null);
 
 /**
- * The message box's placeholder for `program` in a screen `width` wide: the program's name only when
- * it fits on the box's one line (14 pt mono; the box leaves about 184 pt for the +, ⌃, Send and gutters).
+ * The field's placeholder while `program` runs, in a screen `width` wide: who it types to ("Type
+ * to npm"), when that fits on the field's one line (Inter 14, about 7.5 pt a character; the line
+ * leaves about 284 pt for Stop ⌃C, +, ⌨, Send and the gutters), else the program's name alone, else "Type here".
  */
 export function messagePlaceholder(program: string, width: number): string {
-  const full = `Message for ${program}`;
-  return full.length * 8.4 <= width - 184 ? full : "Message";
+  const room = width - 284;
+  const fits = (t: string) => t.length * 7.5 <= room;
+  const full = `Type to ${program}`;
+  if (program === "") return "Type here";
+  return fits(full) ? full : fits(program) ? program : "Type here";
 }
 
 /**
@@ -358,7 +415,7 @@ export function sheetChip(b: Block): { text: string; tone: ChipTone } {
   if (b.state === "running") return { text: `● Running ${formatClock(b.duration_ms)}`, tone: "running" };
   if (b.exit === null) return { text: "Finished", tone: "done" };
   if (b.exit === 0) return { text: "✓ Succeeded", tone: "ok" };
-  return { text: `✕ Failed · exit ${b.exit}`, tone: "failed" };
+  return { text: `✕ Failed with ${b.exit}`, tone: "failed" };
 }
 
 /** "just now", "4 min ago", "2 h ago", "yesterday". */
@@ -375,19 +432,24 @@ export function outputLines(output: string): string {
 
 // --- the agent's question card --------------------------------------------------------------
 
-/** "Claude asks" for the program "claude"; "Asks" when the program is unknown. */
+/** The coding agents by their own names (as New tab lists them). */
+const AGENT_NAMES: Record<string, string> = { claude: "Claude Code", codex: "Codex", opencode: "OpenCode" };
+
+/** Who asks, by name: "Claude Code" for the program "claude", else the program capitalized; "The command" when unknown. */
 export function askerName(program: string | null): string {
-  return program ? program.charAt(0).toUpperCase() + program.slice(1) : "The command";
+  if (!program) return "The command";
+  return AGENT_NAMES[program] ?? program.charAt(0).toUpperCase() + program.slice(1);
 }
 
 /**
- * An answer button's label: "No…" for the reply entry, "Yes, this session" and "Yes, always"
+ * An answer button's label, saying what happens: "No, explain" for the reply entry (it opens the
+ * field for why), "Yes, this session" and "Yes, always"
  * for the Yes entries that extend the permission, else the entry up to its first comma or
  * bracket, cut at 24 characters.
  */
 export function answerLabel(w: Waiting, i: number): string {
   const c = w.choices[i]!.trim();
-  if (i === replyChoice(w)) return "No…";
+  if (i === replyChoice(w)) return "No, explain";
   if (/^yes\b/i.test(c)) {
     if (/\bsession\b/i.test(c)) return "Yes, this session";
     if (/\b(always|don't ask|do not ask|accept edits|all edits)\b/i.test(c)) return "Yes, always";

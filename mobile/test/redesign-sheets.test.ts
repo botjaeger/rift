@@ -24,7 +24,7 @@ describe("the redesign's sheets are wired", () => {
   it("view-only devices get no New tab or New pane control", () => {
     const tabs = src("src/app/tabs.tsx");
     expect(tabs).toContain("const operate = !!host && canOperate(host);");
-    expect(tabs).toContain("{operate ? (");
+    expect(tabs).toContain("right={operate ? <IconButton");
     expect(src("src/app/panes.tsx")).toContain("host && loc && canOperate(host) ? (");
   });
   it("there is no split direction to choose", () => {
@@ -83,13 +83,13 @@ describe("the key row", () => {
   const row = src("src/ui/ControlRow.tsx");
   const keys = src("src/controlKeys.ts");
   const paste = src("modules/rift-keys/ios/RiftPasteButton.swift");
-  it("draws the Keys board's 52 x 44 pt keys, each its own 44 pt target", () => {
-    expect(row).toContain("export const KEY_W = 52;");
-    expect(row).toMatch(/key: \{\s*width: KEY_W,\s*height: TOUCH,\s*borderRadius: 12,/);
-    expect(row).toContain("slot: { minWidth: TOUCH, minHeight: TOUCH,");
-    expect(row).toContain("keyWord: { width: undefined, minWidth: KEY_W,");
+  it("draws the Keys redesign board's 41 pt keys with 8 pt corners beside the 132 x 88 arrow pad", () => {
+    expect(row).toContain("export const KEY_H = 41;");
+    expect(row).toContain("export const PAD_W = 132;");
+    expect(row).toContain("export const BLOCK_H = 88;");
+    expect(row).toMatch(/key: \{\s*borderRadius: 8,/);
   });
-  it("draws every symbol from the one icon set, words in mono, colour only for a state", () => {
+  it("draws every symbol from the one icon set, keys in mono, words in Inter, colour only for a state", () => {
     // ⌃ ⌥ ⇧ are icons now, not font glyphs; ⇧Tab leads with the shift icon
     expect(keys).toMatch(/id: "ctrl",[^\n]*icon: "control"/);
     expect(keys).toMatch(/id: "alt",[^\n]*icon: "option"/);
@@ -97,17 +97,21 @@ describe("the key row", () => {
     expect(keys).toMatch(/id: "shift\+tab",[^\n]*lead: "shift"/);
     expect(row).toContain('<Icon name={def.icon} size={18} weight="medium" color={fg} />');
     expect(row).toContain("label: { fontFamily: monoMedium, fontSize: 13,");
-    expect(row).toContain("keyActive: { backgroundColor: tints.accentBadge, borderColor: colors.accent }");
-    // the system Paste takes the key's ground instead of drawing a black circle
+    expect(row).toContain("word: { fontFamily: ui(500), fontSize: 12 }");
+    expect(row).toContain("keyActive: { backgroundColor: colors.accent, borderColor: colors.accent }");
+    // the system Paste takes the key's ground instead of drawing a black circle: the theme's,
+    // handed in by the key row (Dark Default's only when none is)
     expect(paste).toContain("config.cornerStyle = .fixed");
-    expect(paste).toContain("config.baseBackgroundColor = keyGround");
+    expect(paste).toContain("config.baseBackgroundColor = ground ?? keyGround");
+    expect(row).toContain("ground={colors.surface} ink={colors.text}");
     // the Attach sheet's Paste row: the list's ground and the accent of its sibling rows' icons
-    expect(paste).toContain("config.baseBackgroundColor = rowGround");
-    expect(paste).toContain("config.baseForegroundColor = accent");
+    expect(paste).toContain("config.baseBackgroundColor = ground ?? rowGround");
+    expect(paste).toContain("config.baseForegroundColor = ink ?? accent");
+    expect(src("src/app/attach.tsx")).toMatch(/<SystemPasteButton\s+labelled\s+ground=\{colors\.bg\}\s+ink=\{colors\.accent\}/);
+    expect(src("modules/rift-keys/ios/RiftPasteModule.swift")).toContain('Prop("ground")');
   });
-  it("scrolls sideways only, without moving the screen", () => {
-    expect(row).toContain("directionalLockEnabled");
-    expect(row).toContain("bounces={false}");
-    expect(row).toContain('overScrollMode="never"');
+  it("never scrolls: two rows of keys, so the screen above keeps its size", () => {
+    expect(row).not.toContain("ScrollView");
+    expect(row).toContain("block: { flexDirection: \"row\", gap: 10, height: BLOCK_H }");
   });
 });

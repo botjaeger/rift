@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { NO_ANSWER, type ConnState, type PathStatus } from "../src/protocol/client";
 import type { Endpoint } from "../src/protocol/relay";
-import { agoText, backInText, elapsedText, failNote, hostLine, pathRows, retrySeconds } from "../src/ui/connStatus";
+import { formatClock } from "../src/ui/format";
+import { agoText, backInText, failNote, hostLine, lastSeenAt, pairedText, pathRows, retrySeconds } from "../src/ui/connStatus";
 
 const LAN: Endpoint = { kind: "lan", address: "192.168.0.149:7878" };
 const RELAY: Endpoint = { kind: "relay", url: "wss://rift-relay.playhaws.com" };
@@ -56,13 +57,13 @@ const offline = conn({ status: "offline", paths: [path(LAN), path(RELAY)] });
 
 describe("hostLine: the status line of a computer's card", () => {
   it("Same Wi-Fi", () => {
-    expect(hostLine(onLan, NOW, 4)).toMatchObject({ text: "Connected · this network · 4 tabs", tone: "muted", progress: false, retry: false, hint: null });
+    expect(hostLine(onLan, NOW, 4)).toMatchObject({ text: "This network · 4 tabs", tone: "muted", progress: false, retry: false, hint: null });
   });
   it("Finding it: LAN failed, relay being tried", () => {
     expect(hostLine(searching, NOW, null)).toMatchObject({ text: "Not on this network · trying the relay…", tone: "busy", progress: true, retry: false });
   });
   it("Away (relay)", () => {
-    expect(hostLine(viaRelay, NOW, 4)).toMatchObject({ text: "Connected · through the relay · 4 tabs", tone: "muted" });
+    expect(hostLine(viaRelay, NOW, 4)).toMatchObject({ text: "Over the relay · 4 tabs", tone: "muted" });
   });
   it("Relay down: counts down, offers Try again, explains", () => {
     expect(hostLine(failing, NOW, null)).toMatchObject({
@@ -88,6 +89,19 @@ describe("hostLine: the status line of a computer's card", () => {
     expect(hostLine(conn({ status: "failed", failure: "gave_up", attempt: 5 }), NOW, null).hint).toMatch(/every 30 seconds while the app is open, when you tap Try again/);
     // cancelled sooner
     expect(hostLine(conn({ status: "failed", failure: "gave_up", attempt: 2 }), NOW, null).text).toBe("Can’t reach it · stopped");
+  });
+  it("A computer that stopped answering says when it was last seen, when that is known", () => {
+    const gaveUp = conn({ status: "failed", failure: "gave_up", attempt: 5 });
+    expect(hostLine(gaveUp, NOW, null, NOW - 2 * 3_600_000).text).toBe("Can’t reach it · last seen 2 h ago");
+    expect(lastSeenAt({ lastSeen: null, record: { seenAt: NOW - 60_000 } })).toBe(NOW - 60_000);
+    expect(lastSeenAt({ lastSeen: NOW, record: { seenAt: NOW - 60_000 } })).toBe(NOW);
+    expect(lastSeenAt({ lastSeen: null, record: {} })).toBeNull();
+  });
+  it("Tells two pairings apart by the day each was made", () => {
+    const now = new Date(2026, 10, 6).getTime();
+    expect(pairedText(new Date(2026, 10, 3, 9).toISOString(), now)).toBe("paired 3 Nov");
+    expect(pairedText(new Date(2025, 0, 12).toISOString(), now)).toBe("paired 12 Jan 2025");
+    expect(pairedText("not a date", now)).toBe("");
   });
   it("Updating: expected, so busy, no retry counter, Try again kept", () => {
     const closing = { reason: "update" as const, backInS: 60, at: NOW };
@@ -141,7 +155,7 @@ describe("hostLine: the status line of a computer's card", () => {
     });
   });
   it("counts one tab in the singular", () => {
-    expect(hostLine(onLan, NOW, 1).text).toBe("Connected · this network · 1 tab");
+    expect(hostLine(onLan, NOW, 1).text).toBe("This network · 1 tab");
   });
   it("does not mention a relay the computer does not have", () => {
     const noRelay = conn({ status: "closed", retryInMs: 500, retryAt: NOW + 500, paths: [path(LAN, { state: "failed", error: NO_ANSWER })] });
@@ -204,7 +218,7 @@ describe("pathRows: the Connection sheet", () => {
   });
   it("shows the real error of a path, not a made-up cause", () => {
     const c = conn({ status: "closed", retryInMs: 1, paths: [path(LAN, { state: "failed", error: "connect ECONNREFUSED" }), path(RELAY)] });
-    expect(pathRows(c)[0]).toMatchObject({ mark: "✕", note: "connect ECONNREFUSED" });
+    expect(pathRows(c)[0]).toMatchObject({ mark: "✕", note: "Connect ECONNREFUSED" });
   });
   it("lists one row per LAN address", () => {
     const second: Endpoint = { kind: "lan", address: "10.0.0.5:7878" };
@@ -233,7 +247,9 @@ describe("failNote", () => {
     expect(failNote(path(RELAY, { state: "failed", error: "Expected HTTP 101 response but was '429 Too Many Requests'" }))).toBe(
       "Expected HTTP 101 response but was '429 Too Many Requests'",
     );
-    expect(failNote(path(LAN, { state: "failed", error: "gateway stopped responding" }))).toBe("gateway stopped responding");
+    // a raw error reads as a sentence
+    expect(failNote(path(LAN, { state: "failed", error: "gateway stopped responding" }))).toBe("Gateway stopped responding");
+    expect(failNote(path(LAN, { state: "failed", error: "the computer's key does not match the paired key" }))).toBe("The computer's key does not match the paired key");
   });
 });
 
@@ -243,9 +259,10 @@ describe("times", () => {
     expect(retrySeconds({ retryAt: NOW + 8_000, retryInMs: 8_000 }, NOW + 7_001)).toBe(1);
     expect(retrySeconds({ retryAt: null, retryInMs: 2_500 }, NOW)).toBe(3);
   });
-  it("elapsedText and agoText", () => {
-    expect(elapsedText(3_900)).toBe("0:03");
-    expect(elapsedText(65_000)).toBe("1:05");
+  it("an elapsed wait (the running clock) and agoText", () => {
+    expect(formatClock(3_900)).toBe("0:03");
+    expect(formatClock(65_000)).toBe("1:05");
+    expect(formatClock(3_723_000)).toBe("1:02:03");
     expect(agoText(20_000)).toBe("a moment ago");
     expect(agoText(2 * 60_000 + 1)).toBe("2 min ago");
     expect(agoText(3 * 3_600_000)).toBe("3 h ago");

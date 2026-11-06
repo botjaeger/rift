@@ -16,6 +16,7 @@ export interface Selected {
   /** The field's top and bottom in the window: a tap there (or on its handles) keeps the selection. */
   top: number;
   bottom: number;
+  word: () => void;
   line: () => void;
   all: () => void;
   end: () => void;
@@ -45,8 +46,8 @@ export const useSelectionOwner = () => useContext(OwnerContext);
 
 /**
  * The pane's output while text in it is selected: the other blocks dim, and the selection bar says
- * how much is selected and that it is copied, with Line, All, To prompt (when the pane takes
- * commands) and ✕. The bar is docked under the output, in the place of the pane's controls
+ * how much is selected and that it is copied, with Word, Line, All, To prompt (disabled when the
+ * pane takes no commands) and ✕. The bar is docked under the output, in the place of the pane's controls
  * (`onSelecting` tells the pane to put them away), so it never covers the text.
  */
 export function SelectionScope({
@@ -99,11 +100,12 @@ export function SelectionScope({
       <SelectionBar
         selected={active.selected}
         copied={active.copied}
-        keys={[
-          { label: "Line", hint: "Select the whole line", onPress: active.line },
-          { label: "All", hint: "Select all of this text", onPress: active.all },
-          ...(canPrompt ? [{ label: "To prompt", hint: "Put the selection in the command line", onPress: toPrompt, sep: true }] : []),
-        ]}
+        of="block"
+        onWord={active.word}
+        onLine={active.line}
+        onAll={active.all}
+        onPrompt={canPrompt ? toPrompt : undefined}
+        promptOff="Nothing can be typed in this pane."
         onCancel={active.end}
       />,
     );

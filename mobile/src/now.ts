@@ -342,10 +342,6 @@ export function stateText(kind: TabKind, o: { ageMs: number | null; elapsedMs: n
 }
 
 
-/** What the Portals chips filter on: failed tabs count with the idle ones (nothing runs). */
-export type HomeFilter = "needs" | "working" | "idle";
-export const homeFilterOf = (k: TabKind): HomeFilter => (k === "failed" ? "idle" : k);
-
 /** One tab's row on Portals and in the Tabs sheet. */
 export interface TabRow {
   /** `host:pane` of the pane that speaks for the tab, else `host:tabN`. */
@@ -362,10 +358,12 @@ export interface TabRow {
   program: string | null;
   /** The state in words ("Working 3:56"), for screen readers. */
   state: string;
-  /** What the pane that speaks for the tab does, its pane count first: "2 panes · claude · waiting for you · Allow edits?". */
+  /** What the pane that speaks for the tab does, its pane count first: "2 panes · claude · Waiting for you · Allow edits?". */
   line: string;
   /** The same without the pane count (a list that shows the count as its own mark). */
   paneLine: string;
+  /** The commands, paths and output in the lines, drawn mono (PaneSummary `codes`). */
+  codes: string[];
   /** The short time beside the status mark: "3:56", "2m", "✕ 101", or "". */
   when: string;
   /** The question of the asking pane, with the pane it was asked in. */
@@ -399,12 +397,14 @@ export interface PaneSummary {
   kind: TabKind;
   program: string | null;
   agent: boolean;
-  /** "waiting for you · Allow edits?", "cargo test · running", "~/code · idle · ls ✓". */
+  /** In words, its command the only code: "Waiting for you · Allow edits?", "cargo test · running", "cargo test · failed with 101", "Idle · last: ls". */
   activity: string;
   /** "Needs you · 2m": the state in words, for screen readers. */
   state: string;
   /** "2m", "3:56", "✕ 101", or "" when unknown. */
   when: string;
+  /** The commands, paths and output in `activity` (and the program in its line): drawn mono, the words in Inter. */
+  codes: string[];
 }
 
 /** A pane's summary; `key`: its idle-since key (`host:pane`). */
@@ -427,14 +427,27 @@ export function paneSummary(host: string, p: Pane, ctx: RowContext, idle: Readon
   const state = stateText(kind, { ageMs, elapsedMs, failed: kind === "failed" ? 1 : 0 });
   const detail = p.running?.line || p.running?.title || "";
   let activity: string;
-  if (kind === "needs" && p.waiting) activity = ["waiting for you", firstLine(p.waiting.prompt)].filter(Boolean).join(" · ");
+  if (kind === "needs" && p.waiting) activity = ["Waiting for you", firstLine(p.waiting.prompt)].filter(Boolean).join(" · ");
   else if (kind === "working") activity = agent ? ["running", detail].filter(Boolean).join(" · ") : [command || p.job, "running", p.running?.line].filter(Boolean).join(" · ");
-  else if (kind === "failed") activity = `${command} · exited ${p.last_exit}`;
-  else if (agent) activity = ["idle", p.running?.title || "waiting for your prompt"].join(" · ");
-  else activity = [cwd, "idle", p.last_command ? `${p.last_command}${p.last_exit === 0 ? " ✓" : ""}` : null].filter(Boolean).join(" · ");
+  else if (kind === "failed") activity = `${command} · failed with ${p.last_exit}`;
+  else if (agent) activity = ["Idle", p.running?.title || "waiting for your prompt"].join(" · ");
+  // an idle shell: the command it ran last, else where it is
+  else activity = p.last_command ? `Idle · last: ${p.last_command}` : cwd ? `Idle · ${cwd}` : "Idle";
   const when =
     kind === "working" ? (elapsedMs === null ? "" : formatClock(elapsedMs)) : kind === "failed" ? `✕ ${p.last_exit}` : ageMs === null ? "" : agoCompact(ageMs);
-  return { kind, program, agent, activity, state, when };
+  // what each line holds besides words: a question and an idle agent's title are words
+  const said =
+    kind === "needs"
+      ? []
+      : kind === "working"
+        ? [agent ? null : command || p.job, p.running?.line]
+        : kind === "failed"
+          ? [command]
+          : agent
+            ? []
+            : [p.last_command ? p.last_command : cwd];
+  const codes = [agent ? program : null, ...said].filter((c): c is string => !!c);
+  return { kind, program, agent, activity, state, when, codes };
 }
 
 /** A pane's line: its program, then what it does (a shell's command already names itself). */
@@ -460,6 +473,7 @@ export function sameTabRow(a: TabRow, b: TabRow): boolean {
     a.state === b.state &&
     a.line === b.line &&
     a.paneLine === b.paneLine &&
+    a.codes.join("\0") === b.codes.join("\0") &&
     a.when === b.when &&
     a.operate === b.operate &&
     a.panes === b.panes &&
@@ -482,14 +496,17 @@ export function tabRow(h: HostView, tab: Tab, ctx: RowContext, idle: ReadonlyMap
   const failed = failedCount(tab);
   // the tab's words come from its state (several panes can fail); the line from its lead pane
   const state = kind === "failed" ? stateText(kind, { ageMs: null, elapsedMs: null, failed }) : (s?.state ?? stateText(kind, { ageMs: null, elapsedMs: null, failed }));
-  // the mark is the tab's: a failed tab whose speaking pane did not fail shows a failed pane's time
+  // the mark is the tab's: a failed tab whose speaking pane did not fail shows a failed pane's
+  // time, and its line ("make · failed with 2"), so the words never say Idle beside a red ✕
   const failing = kind === "failed" && s?.kind !== "failed" ? tab.panes.find((q) => !isLive(q) && q.last_exit !== null && q.last_exit !== 0) : undefined;
-  const when = failing ? paneSummary(host, failing, ctx, idle).when : (s?.when ?? "");
+  const fs = failing ? paneSummary(host, failing, ctx, idle) : null;
+  const when = fs ? fs.when : (s?.when ?? "");
+  const said = fs ?? s;
   const more = tab.panes.length > 1 ? `${tab.panes.length} panes · ` : "";
   // a tab named after its folder ("~", "rift") says no more for the folder leading its line
   const title = tabTitle(tab);
   const place = p?.cwd ? tildePath(p.cwd) : null;
-  if (s && place && (place === title || place.split("/").at(-1) === title) && s.activity.startsWith(`${place} · `)) s.activity = s.activity.slice(place.length + 3);
+  if (s && place && (place === title || place.split("/").at(-1) === title) && s.activity === `Idle · ${place}`) s.activity = "Idle";
   return {
     key,
     host,
@@ -501,8 +518,9 @@ export function tabRow(h: HostView, tab: Tab, ctx: RowContext, idle: ReadonlyMap
     agent: s?.agent ?? false,
     program: s?.program ?? null,
     state,
-    line: s ? more + paneLine(s) : more.replace(/ · $/, ""),
-    paneLine: s ? paneLine(s) : "",
+    line: said ? more + paneLine(said) : more.replace(/ · $/, ""),
+    paneLine: said ? paneLine(said) : "",
+    codes: said?.codes ?? [],
     when,
     ask: p?.waiting ? { pane: p.id, waiting: p.waiting, program: s?.program ?? null } : null,
     operate: (h.welcome?.permission ?? h.record.permission) === "operate",
@@ -511,17 +529,21 @@ export function tabRow(h: HostView, tab: Tab, ctx: RowContext, idle: ReadonlyMap
 }
 
 
-/** Portals' chips: tabs per state (failed with idle). */
-export function homeCounts(rows: readonly { kind: TabKind }[]): Record<HomeFilter, number> {
-  const n = { needs: 0, working: 0, idle: 0 };
-  for (const r of rows) n[homeFilterOf(r.kind)]++;
-  return n;
+/** Portals' summary line, a count per state in words and none of them zero: "1 needs you", "2 working", "1 failed", "27 idle". */
+export function homeSummary(rows: readonly { kind: TabKind }[]): { kind: TabKind; text: string }[] {
+  const n = sheetCounts(rows);
+  const words: Record<TabKind, string> = { needs: "needs you", working: "working", failed: "failed", idle: "idle" };
+  return (["needs", "working", "failed", "idle"] as const).filter((k) => n[k] > 0).map((k) => ({ kind: k, text: `${n[k]} ${words[k]}` }));
 }
 
-/** Rows in the chip's state, or all of them without one. */
-export function filterHome<T extends { kind: TabKind }>(rows: readonly T[], f: HomeFilter | null): T[] {
-  // no filter: tab order, with what needs an answer on top of its computer
-  return f === null ? [...rows.filter((r) => r.kind === "needs"), ...rows.filter((r) => r.kind !== "needs")] : rows.filter((r) => homeFilterOf(r.kind) === f);
+/** How many tabs a computer's card on Portals shows; the rest are a tap away (Show all). */
+export const HOME_ROWS = 5;
+
+const RANK: Record<TabKind, number> = { needs: 0, working: 1, failed: 2, idle: 3 };
+
+/** A card's rows: what needs you first, then what works, what failed, what idles (each in tab order), the first `max`. */
+export function homeRows<T extends { kind: TabKind }>(rows: readonly T[], max = HOME_ROWS): T[] {
+  return [...rows].sort((a, b) => RANK[a.kind] - RANK[b.kind]).slice(0, max);
 }
 
 /** The Tabs sheet's filter. */
@@ -538,13 +560,13 @@ export function sheetRows<T extends { kind: TabKind }>(rows: readonly T[], f: Sh
   return f === "all" ? [...rows] : rows.filter((r) => r.kind === f);
 }
 
-/** "No tab is waiting for you." */
-export const EMPTY_WHAT: Record<SheetFilter, string> = {
-  all: "open",
-  needs: "waiting for you",
-  working: "working",
-  failed: "failing",
-  idle: "idle",
+/** What the Tabs page says when a filter holds nothing: that it is empty, and what would show there. */
+export const EMPTY_FILTER: Record<SheetFilter, { title: string; line: string }> = {
+  all: { title: "No tabs", line: "This computer has no tabs open in Rift." },
+  needs: { title: "Nothing needs you", line: "Agents that ask a question show here." },
+  working: { title: "Nothing is working", line: "Commands that run show here." },
+  failed: { title: "Nothing failed", line: "Commands that fail show here." },
+  idle: { title: "Nothing is idle", line: "Tabs that wait for a command show here." },
 };
 
 /** The mockup's answer pills: "Yes", "Always", "No" (the quick choices' own labels are longer). */

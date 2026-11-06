@@ -5,7 +5,7 @@
 import { isLogsCommand, isUseCommand, promptChips } from "./chips";
 import type { PaneState } from "./protocol/store";
 import type { ComposeContainer, Pane, PaneChip, RuntimeVersion } from "./protocol/types";
-import { colors } from "./ui/palette";
+import type { ColorName } from "./ui/palette";
 
 /** Which menu a chip opens; the first three are the folder, branch and changes menus (feature `chips`). */
 export type ChipOpen = "dirs" | "branches" | "changes" | "pr" | "python" | "php" | "docker" | "elapsed";
@@ -17,10 +17,10 @@ export interface ChipFeatures {
   promptChips: boolean;
 }
 
-/** A run of a chip's text with its colour. */
+/** A run of a chip's text with its colour (a palette name: the palette in use draws it). */
 export interface ChipText {
   text: string;
-  color: string;
+  color: ColorName;
 }
 
 /** The glyphs the chips use (src/ui/Icon.tsx); a kind this app does not know gets `terminal`. */
@@ -44,7 +44,7 @@ export interface ChipItem {
   /** What the "This pane" sheet calls it. */
   name: string;
   icon: ChipIcon;
-  iconColor: string;
+  iconColor: ColorName;
   /** What the desktop draws. */
   full: ChipText[];
   /** What the narrow row shows. */
@@ -113,21 +113,25 @@ const OPENS_SPOKEN: Record<ChipOpen, string> = {
 };
 
 /** The desktop's colour roles in this app's palette (docs/ui.md; palette.ts maps `dim` / `muted` the other way round). */
-const TONES: Record<string, string> = {
-  bright: colors.textBright,
-  ui: colors.text,
-  dim: colors.textMuted,
-  muted: colors.textDim,
-  success: colors.success,
-  error: colors.error,
-  warning: colors.warning,
-  accent: colors.accent,
-  magenta: colors.magenta,
-  indigo: colors.indigo,
+const TONES: Record<string, ColorName> = {
+  bright: "textBright",
+  ui: "text",
+  dim: "textMuted",
+  muted: "textDim",
+  success: "success",
+  error: "error",
+  warning: "warning",
+  accent: "accent",
+  magenta: "magenta",
+  indigo: "indigo",
 };
 
+/** The chips that tell the time: the command line shows one as plain text after the chips, not as a chip. */
+const TIMERS = new Set(["elapsed", "time12", "time24", "date"]);
+export const isTimer = (kind: string): boolean => TIMERS.has(kind);
+
 /** A tone's colour; a tone this app does not know (a newer desktop) is drawn as ordinary text. */
-export const toneColor = (tone: string): string => TONES[tone] ?? colors.text;
+export const toneColor = (tone: string): ColorName => TONES[tone] ?? "text";
 
 const styled = (parts: { text: string; tone: string }[]): ChipText[] => parts.map((p) => ({ text: p.text, color: toneColor(p.tone) }));
 
@@ -210,8 +214,8 @@ export function chipItems(pane: Pane | null, state: PaneState | null, features: 
         "cwd",
         {
           icon: "accent",
-          full: [{ text: c.cwd, color: colors.textBright }],
-          short: [{ text: folderName(c.cwd), color: colors.textBright }],
+          full: [{ text: c.cwd, color: "textBright" }],
+          short: [{ text: folderName(c.cwd), color: "textBright" }],
           attention: false,
         },
         features,
@@ -226,8 +230,8 @@ export function chipItems(pane: Pane | null, state: PaneState | null, features: 
         "git_branch",
         {
           icon: "success",
-          full: [{ text: b.name, color: colors.text }, ...(marks ? [{ text: marks, color: colors.textDim }] : [])],
-          short: [{ text: b.name, color: colors.text }, ...(b.dirty ? [{ text: "•", color: colors.textDim }] : [])],
+          full: [{ text: b.name, color: "text" }, ...(marks ? [{ text: marks, color: "textDim" as const }] : [])],
+          short: [{ text: b.name, color: "text" }, ...(b.dirty ? [{ text: "•", color: "textDim" as const }] : [])],
           attention: false,
         },
         features,
@@ -242,15 +246,15 @@ export function chipItems(pane: Pane | null, state: PaneState | null, features: 
         {
           icon: "success",
           full: [
-            { text: String(d.files), color: colors.text },
-            { text: "•", color: colors.textDim },
-            { text: `+${d.added}`, color: colors.success },
-            { text: `−${d.removed}`, color: colors.error },
+            { text: String(d.files), color: "text" },
+            { text: "•", color: "textDim" },
+            { text: `+${d.added}`, color: "success" },
+            { text: `−${d.removed}`, color: "error" },
           ],
           short: [
-            { text: String(d.files), color: colors.text },
-            { text: `+${compact(d.added)}`, color: colors.success },
-            { text: `−${compact(d.removed)}`, color: colors.error },
+            { text: String(d.files), color: "text" },
+            { text: `+${compact(d.added)}`, color: "success" },
+            { text: `−${compact(d.removed)}`, color: "error" },
           ],
           attention: false,
         },
@@ -343,12 +347,12 @@ export interface ContainerRow {
   running: boolean;
   /** `8080→8080 · up 2 hours`, or the whole status when stopped. */
   detail: string;
-  health: { word: string; color: string } | null;
+  health: { word: string; color: ColorName } | null;
   /** Null: not offered. */
   command: string | null;
 }
 
-const HEALTH_COLORS = { healthy: colors.success, starting: colors.warning, unhealthy: colors.error } as const;
+const HEALTH_COLORS = { healthy: "success", starting: "warning", unhealthy: "error" } as const satisfies Record<string, ColorName>;
 
 /** The Docker menu's rows: the service, then its ports and uptime, then its health check's verdict. */
 export function containerRows(containers: readonly ComposeContainer[]): ContainerRow[] {

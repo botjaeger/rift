@@ -40,6 +40,22 @@ export function lineRange(value: string, sel: { start: number; end: number }): {
   return { start, end: nl < 0 ? value.length : nl };
 }
 
+/**
+ * The whole words a field's selection touches, as offsets into `value`: a word runs between spaces,
+ * line breaks and the box rules a program draws (as `wordAt` on a program's screen). An edge on a
+ * space stays where it is.
+ */
+export function wordRange(value: string, sel: { start: number; end: number }): { start: number; end: number } {
+  const isWord = (c: string | undefined) => c !== undefined && !/^[\s|│┃]$/.test(c);
+  let start = Math.max(0, Math.min(sel.start, sel.end, value.length));
+  let end = Math.min(value.length, Math.max(sel.start, sel.end, 0));
+  while (start > 0 && isWord(value[start - 1]) && isWord(value[start])) start--;
+  // a caret before a word's first character: take that word
+  if (end === start && isWord(value[end])) end++;
+  while (end < value.length && isWord(value[end - 1]) && isWord(value[end])) end++;
+  return { start, end };
+}
+
 /** How much a selection holds, as its bar says it: lines, and characters (code points, line breaks left out). */
 export function selectionCount(text: string): { lines: number; chars: number } {
   if (text === "") return { lines: 0, chars: 0 };

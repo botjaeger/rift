@@ -1,6 +1,6 @@
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useEffect, useState } from "react";
-import { AccessibilityInfo, StyleSheet, Text, View } from "react-native";
+import { AccessibilityInfo, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { tildePath } from "@/chips";
 import { canOperate, draftKey } from "@/fleet";
@@ -11,7 +11,8 @@ import { authenticate, fleet, useApp, useLock } from "@/runtime";
 import { findPane, paneBranch, paneTitle, runningCommand } from "@/topology";
 import { Button } from "@/ui/Button";
 import { ErrorText, WarningText } from "@/ui/Notice";
-import { colors, mono, radius, ui } from "@/ui/theme";
+import { SheetHeader } from "@/ui/SheetHeader";
+import { mono, radius, ui, makeStyles, useColors } from "@/ui/theme";
 import { useSingleFlight } from "@/ui/useSingleFlight";
 import { useActionScope } from "@/ui/useActionScope";
 
@@ -33,6 +34,8 @@ function chipAction(kind: string | undefined, arg: string | undefined): ChipActi
  * sent, only with Settings › Ask before running on.
  */
 export default function ConfirmScreen() {
+  const colors = useColors();
+  const styles = useStyles();
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const {
@@ -84,9 +87,9 @@ export default function ConfirmScreen() {
   const canRun = !!host && operate && !!loc && connected && running === null && problem === null && !sending;
   const askFirst = needsAuthBeforeRun(s.settings);
   const hostName = host?.record.name ?? "this computer";
-  const where = [loc ? paneTitle(loc) : "Pane closed", loc?.pane.cwd ? tildePath(loc.pane.cwd) : null, branch]
-    .filter(Boolean)
-    .join(" · ");
+  // where it runs, in words: "In ~/code/project1 (main) on studio-mac."
+  const place = loc ? (loc.pane.cwd ? tildePath(loc.pane.cwd) : paneTitle(loc)) : null;
+  const where = loc ? `In ${place}${branch ? ` (${branch})` : ""} on ${hostName}.` : "This pane has closed.";
 
   const once = useSingleFlight();
   const run = () => once(async () => {
@@ -119,71 +122,64 @@ export default function ConfirmScreen() {
 
   return (
     <View
-      style={[styles.fill, styles.content, { paddingBottom: Math.max(36, insets.bottom + 2) }, hidden && styles.hidden]}
+      style={[styles.fill, { paddingBottom: Math.max(36, insets.bottom + 2) }, hidden && styles.hidden]}
       accessibilityElementsHidden={hidden}
       importantForAccessibility={hidden ? "no-hide-descendants" : "auto"}
     >
-      <View style={styles.head}>
-        <Text style={styles.title} accessibilityRole="header">
-          Run on {hostName}?
-        </Text>
-        <Text style={styles.where}>{where}</Text>
-      </View>
+      {/* a title that asks; why it asks under it; where it runs under the command */}
+      <SheetHeader title="Run this?" subtitle="Ask before running is on" onClose={close} />
+      <View style={styles.content}>
+        <View style={styles.command} accessible accessibilityLabel={`Command: ${command}`}>
+          <Text style={styles.commandText} selectable>
+            <Text style={{ color: colors.success }}>❯ </Text>
+            {command}
+          </Text>
+        </View>
 
-      <View style={styles.command} accessible accessibilityLabel={`Command: ${command}`}>
-        <Text style={styles.commandText} selectable>
-          <Text style={{ color: colors.success }}>❯ </Text>
-          {command}
-        </Text>
-      </View>
+        <Text style={styles.why}>{where}</Text>
 
-      <Text style={styles.why}>Shown because Settings › Ask before running is on.</Text>
+        {running ? (
+          <WarningText>
+            This pane is running {running}. Commands only run at a prompt; the pane's command line sends text to the program.
+          </WarningText>
+        ) : null}
+        {host && !operate ? <WarningText>This device may only view {hostName}.</WarningText> : null}
+        {!connected && host ? <WarningText>Not connected to {hostName}.</WarningText> : null}
+        {problem === "too_long" ? <WarningText>The command is too long (2 KiB at most).</WarningText> : null}
+        {problem === "control" ? <WarningText>The command must be one line.</WarningText> : null}
+        {error ? <ErrorText>{error}</ErrorText> : null}
 
-      {running ? (
-        <WarningText>
-          This pane is running {running}. Commands only run at a prompt; the pane's command line sends text to the program.
-        </WarningText>
-      ) : null}
-      {host && !operate ? <WarningText>This device may only view {hostName}.</WarningText> : null}
-      {!connected && host ? <WarningText>Not connected to {hostName}.</WarningText> : null}
-      {problem === "too_long" ? <WarningText>The command is too long (2 KiB at most).</WarningText> : null}
-      {problem === "control" ? <WarningText>The command must be one line.</WarningText> : null}
-      {error ? <ErrorText>{error}</ErrorText> : null}
-
-      <View style={styles.buttons}>
-        <Button label="Cancel" size="large" onPress={close} style={styles.cancel} />
-        <Button
-          label={sending ? "Running…" : "Run"}
-          variant="primary"
-          size="large"
-          disabled={!canRun}
-          accessibilityHint={
-            host && !operate
-              ? "Unavailable: this device may only view this computer"
-              : running
-                ? "Unavailable while the pane is running a program"
-                : askFirst
-                  ? "Asks for Face ID, a fingerprint or the passcode first"
-                  : undefined
-          }
-          onPress={() => void run()}
-          style={styles.run}
-        />
+        <View style={styles.buttons}>
+          <Button label="Cancel" onPress={close} style={styles.cancel} />
+          <Button
+            label={sending ? "Running…" : "Run"}
+            variant="primary"
+            disabled={!canRun}
+            accessibilityHint={
+              host && !operate
+                ? "Unavailable: this device may only view this computer"
+                : running
+                  ? "Unavailable while the pane is running a program"
+                  : askFirst
+                    ? "Asks for Face ID, a fingerprint or the passcode first"
+                    : undefined
+            }
+            onPress={() => void run()}
+            style={styles.run}
+          />
+        </View>
       </View>
     </View>
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = makeStyles((colors) => ({
   fill: { backgroundColor: colors.surface },
   hidden: { opacity: 0 },
-  content: { paddingTop: 24, paddingHorizontal: 20, gap: 16, maxWidth: 560, width: "100%", alignSelf: "center" },
-  head: { gap: 4 },
-  title: { fontFamily: ui(600), color: colors.textBright, fontSize: 20 },
-  where: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13 },
+  content: { paddingTop: 4, paddingHorizontal: 20, gap: 16, maxWidth: 560, width: "100%", alignSelf: "center" },
   command: {
     backgroundColor: colors.bg,
-    borderRadius: radius.button,
+    borderRadius: radius.field,
     borderWidth: 1,
     borderColor: colors.hairline,
     padding: 14,
@@ -194,4 +190,4 @@ const styles = StyleSheet.create({
   buttons: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
   cancel: { flexGrow: 1, flexBasis: 100 },
   run: { flexGrow: 2, flexBasis: 200 },
-});
+}));

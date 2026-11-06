@@ -429,6 +429,15 @@ pub enum ServerMsg {
         /// `output`); none when absent.
         #[serde(default)]
         features: Vec<String>,
+        /// The desktop's theme (feature `theme`); absent from older
+        /// gateways, whose phones keep their last theme.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        theme: Option<Theme>,
+    },
+    /// The desktop's theme changed (feature `theme`; sent to every
+    /// connection).
+    Theme {
+        theme: Theme,
     },
     Topology {
         windows: Vec<Window>,
@@ -584,6 +593,32 @@ pub enum ServerMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         back_in_s: Option<u32>,
     },
+}
+
+/// The desktop's resolved theme ([`ServerMsg::Welcome`], [`ServerMsg::Theme`]):
+/// its name, whether its ground is dark, and its tokens as `"rrggbb"` /
+/// `"rrggbbaa"` (no `#`, as the screen's colours), named as the desktop's
+/// theme files name them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Theme {
+    pub name: String,
+    pub dark: bool,
+    pub bg: String,
+    pub bg_chrome: String,
+    pub surface: String,
+    pub border: String,
+    pub fg: String,
+    pub text_bright: String,
+    pub text_ui: String,
+    pub text_dim: String,
+    pub text_muted: String,
+    pub accent: String,
+    pub success: String,
+    pub error: String,
+    pub warning: String,
+    pub selection: String,
+    /// The 16 ANSI colours.
+    pub ansi: Vec<String>,
 }
 
 /// Why the gateway stops ([`ServerMsg::Closing`]).
@@ -999,7 +1034,7 @@ mod tests {
     #[test]
     fn every_server_fixture_round_trips() {
         let all = fixtures("server");
-        assert_eq!(all.len(), 33, "server fixtures");
+        assert_eq!(all.len(), 35, "server fixtures");
         for (name, value) in all {
             let msg: ServerMsg =
                 serde_json::from_value(value.clone()).unwrap_or_else(|e| panic!("{name}: {e}"));

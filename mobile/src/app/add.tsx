@@ -1,16 +1,19 @@
 import { useRouter } from "expo-router";
 import { useState } from "react";
-import { KeyboardAvoidingView, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { KeyboardAvoidingView, ScrollView, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { parsePairLink } from "@/pairing";
 import { Button } from "@/ui/Button";
+import { Field } from "@/ui/Field";
 import { Icon } from "@/ui/Icon";
 import { ErrorText } from "@/ui/Notice";
-import { PageHeader } from "@/ui/Screen";
-import { colors, mono, radius, ui } from "@/ui/theme";
+import { PageHeader, SectionTitle } from "@/ui/Screen";
+import { ui, makeStyles, useColors } from "@/ui/theme";
 
 /** "Paste a pairing link" (no board of its own; styled as the Pair boards). */
 export default function AddScreen() {
+  const colors = useColors();
+  const styles = useStyles();
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const [text, setText] = useState("");
@@ -33,28 +36,26 @@ export default function AddScreen() {
       <PageHeader title="Paste a pairing link" back={() => (router.canGoBack() ? router.back() : router.replace("/"))} />
       <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
         <Text style={styles.text}>
-          On your computer: Rift › Settings › Remote access › Pair a phone, then copy the link under the code (or run{" "}
-          <Text style={styles.code}>rift-terminal remote pair</Text>). It works once, for 2 minutes.
+          On your computer: Rift › Settings › Remote access › Pair a phone, then copy the link under the code. It works once, for 2 minutes.
         </Text>
         <View style={styles.field}>
-          <Text style={styles.label}>Pairing link</Text>
-          <TextInput
+          <SectionTitle>Pairing link</SectionTitle>
+          <Field
+            icon="paste"
+            label="Pairing link"
             value={text}
             onChangeText={(t) => {
               setText(t);
               setError(null);
             }}
             onSubmitEditing={next}
-            placeholder="rift-remote://pair?a=…"
-            placeholderTextColor={colors.textMuted}
+            placeholder="rift-remote://pair?…"
             autoCapitalize="none"
             autoCorrect={false}
             spellCheck={false}
             keyboardType="url"
             returnKeyType="go"
-            accessibilityLabel="Pairing link"
             accessibilityHint="Paste the link that starts with rift-remote://pair"
-            style={styles.input}
           />
         </View>
       </ScrollView>
@@ -62,10 +63,10 @@ export default function AddScreen() {
         {/* over Continue, not under the field: with the keyboard up the scroll view ended at the
             field and the error drew below its visible part */}
         {error ? <ErrorText>{error}</ErrorText> : null}
-        <Button label="Continue" variant="primary" size="large" onPress={next} disabled={text.trim() === ""} />
+        <Button label="Continue" variant="primary" onPress={next} disabled={text.trim() === ""} />
         <Button
           label="Scan the code instead"
-          variant="link"
+          variant="text"
           icon={<Icon name="scan" color={colors.accent} />}
           onPress={() => router.replace("/scan")}
         />
@@ -74,23 +75,10 @@ export default function AddScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = makeStyles((colors) => ({
   fill: { flex: 1, backgroundColor: colors.chrome },
-  body: { paddingTop: 20, paddingHorizontal: 20, gap: 22, maxWidth: 560, width: "100%", alignSelf: "center" },
-  text: { fontFamily: ui(400), color: colors.textMuted, fontSize: 15, lineHeight: 22.5 },
-  code: { fontFamily: mono, color: colors.text },
-  field: { gap: 4 },
-  label: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12 },
-  input: {
-    height: 44,
-    paddingHorizontal: 10,
-    borderRadius: radius.small,
-    borderWidth: 1,
-    borderColor: colors.borderStrong,
-    backgroundColor: colors.bg,
-    color: colors.textBright,
-    fontFamily: mono,
-    fontSize: 14,
-  },
-  actions: { paddingTop: 16, paddingHorizontal: 20, gap: 10 },
-});
+  body: { paddingTop: 20, paddingHorizontal: 16, gap: 18, maxWidth: 560, width: "100%", alignSelf: "center" },
+  text: { fontFamily: ui(400), color: colors.text, fontSize: 15, lineHeight: 22 },
+  field: { gap: 8 },
+  actions: { paddingTop: 16, paddingHorizontal: 16, gap: 10 },
+}));

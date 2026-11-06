@@ -2,7 +2,7 @@
 
 import type { ConnState } from "../protocol/client";
 import { pathLabel } from "../protocol/relay";
-import { colors } from "./palette";
+import type { ColorName } from "./palette";
 
 /** Why a client stopped for good, in full (the Connection sheet, the pane's failure card). */
 export function failureLabel(conn: ConnState): string {
@@ -24,32 +24,32 @@ export function failureLabel(conn: ConnState): string {
   }
 }
 
-/** The status text and dot color; the dot is decoration, the text carries the meaning. */
-export function describeConn(conn: ConnState): { label: string; color: string } {
+/** The status text and dot color (a palette name); the dot is decoration, the text carries the meaning. */
+export function describeConn(conn: ConnState): { label: string; color: ColorName } {
   const via = conn.path ? ` · ${pathLabel(conn.path)}` : "";
   if (conn.closing?.reason === "update" && (conn.status === "connecting" || (conn.status === "closed" && conn.retryInMs !== null)))
-    return { label: "Rift is updating on the computer · reconnecting by itself", color: colors.accent };
+    return { label: "Rift is updating on the computer · reconnecting by itself", color: "accent" };
   switch (conn.status) {
     case "open":
-      return { label: `Connected${via}`, color: colors.success };
+      return { label: `Connected${via}`, color: "success" };
     case "connecting":
       return {
         label: `${conn.attempt > 0 ? `Reconnecting (attempt ${conn.attempt + 1})` : "Connecting"}${via}…`,
-        color: colors.accent,
+        color: "accent",
       };
     case "failed":
-      return { label: failureLabel(conn), color: colors.error };
+      return { label: failureLabel(conn), color: "error" };
     case "offline":
-      return { label: "Offline: this device has no network", color: colors.textDim };
+      return { label: "Offline: this device has no network", color: "textDim" };
     case "closed":
       return conn.retryInMs !== null
         ? {
             label: `Disconnected${conn.error ? ` (${conn.error})` : ""}, retrying in ${Math.ceil(conn.retryInMs / 1000)} s`,
-            color: colors.error,
+            color: "error",
           }
-        : { label: "Disconnected", color: colors.textDim };
+        : { label: "Disconnected", color: "textDim" };
     case "idle":
-      return { label: "Not connected", color: colors.textDim };
+      return { label: "Not connected", color: "textDim" };
   }
 }
 

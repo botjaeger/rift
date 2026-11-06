@@ -1,10 +1,10 @@
 import { useMemo } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Pressable, Text, View } from "react-native";
 import { Directions, Gesture, GestureDetector } from "react-native-gesture-handler";
 import type { TabKind } from "@/now";
 import { Icon } from "./Icon";
 import { StatusMark } from "./StatusMark";
-import { colors, ui } from "./theme";
+import { ui, makeStyles, useColors } from "./theme";
 
 interface Props {
   title: string;
@@ -29,6 +29,8 @@ interface Props {
  * what › and ‹ do; a screen reader gets Next tab / Previous tab as actions.
  */
 export function TabBar({ title, kind, number, count, prev, next, onPrev, onNext, onOpen }: Props) {
+  const colors = useColors();
+  const styles = useStyles();
   // flings only: a tap still taps
   const swipe = useMemo(
     () =>
@@ -92,7 +94,7 @@ export function TabBar({ title, kind, number, count, prev, next, onPrev, onNext,
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = makeStyles((colors) => ({
   bar: { height: 52, flexDirection: "row", alignItems: "center", gap: 2, paddingHorizontal: 4, backgroundColor: colors.chrome, borderBottomWidth: 1, borderBottomColor: colors.hairline },
   arrow: { width: 44, height: 44, alignItems: "center", justifyContent: "center" },
   middle: { flex: 1, minWidth: 0, alignItems: "center", gap: 2 },
@@ -100,4 +102,4 @@ const styles = StyleSheet.create({
   title: { flexShrink: 1, fontFamily: ui(600), color: colors.textBright, fontSize: 15 },
   metaText: { fontFamily: ui(400), color: colors.textMuted, fontSize: 11 },
   pressed: { opacity: 0.7 },
-});
+}));
