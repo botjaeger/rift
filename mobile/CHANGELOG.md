@@ -6,6 +6,31 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.9.0 — 2026-11-07
+
+Every screen redrawn to the new plan, with the real Claude, Codex and OpenCode logos.
+
+### New
+
+- **Agent logos** — Tabs, panes and New tab show the real Claude, Codex and OpenCode logos.
+- **A change in full** — Full diff on a question shows the whole change on its own page.
+
+### Improved
+
+- **Every screen** — The pane header, command output, command line, Tabs, Panes, Portals,
+  pairing, the lock screen, questions, selection and Settings follow one new design.
+- **Sheets** — Every sheet has the same handle at the top and keeps its buttons at the bottom.
+- **Arrows** — An arrow that opens something points the other way while it is open, and the ⌃
+  button shows ⌄ while the keys show.
+- **Paste key** — Shows the word Paste on iPhone.
+- **Appearance** — Themes are shown as a grid of swatches.
+
+### Fixed
+
+- **Keys and keyboard** — With the keys and the keyboard both up, the pane scrolls so the line
+  you are typing on stays in view.
+- **Command line** — Its hint no longer gets cut off mid-word on narrow screens.
+
 ## 0.8.0 · update 1 — 2026-11-07
 
 The command line is back to + ⌃ and the field, and the ⋯ menu has no dark bands.
