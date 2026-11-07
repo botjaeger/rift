@@ -3,6 +3,7 @@ import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as scroll from "../src/scroll";
+import * as historyModule from "../src/history";
 import * as terminal from "../src/terminal";
 import * as paneView from "../src/paneView";
 import * as controlKeys from "../src/controlKeys";
@@ -10,15 +11,16 @@ import * as selection from "../src/selection";
 import { themeStub } from "./helpers/themeStub";
 
 type Node = { type: unknown; props: Record<string, unknown> & { children: unknown[] } };
-type Touch = (event: { nativeEvent: { touches: { pageX: number; pageY: number }[] } }) => void;
+type Touch = (event: { nativeEvent: { touches: { pageX: number; pageY: number }[]; timestamp: number } }) => void;
 
 // Execute the real TerminalView callbacks and scroll engine; native layout, navigation and
 // Fleet I/O are leaves. Device walks separately exercise responder ownership and rendering.
-function harness(typing = false) {
+function harness(typing = false, props: Record<string, unknown> = {}) {
   const effects: (() => void | (() => void))[] = [];
   const focusEffects: (() => void | (() => void))[] = [];
   const appListeners = new Set<(state: string) => void>();
   const send = vi.fn(() => Promise.resolve({ ok: true } as { ok: boolean; code?: string }));
+  const history = vi.fn(() => new Promise(() => {}));
   const react = {
     createElement: (type: unknown, props: object, ...children: unknown[]) => ({ type, props: { ...props, children } }),
     memo: (fn: unknown) => fn,
@@ -41,8 +43,9 @@ function harness(typing = false) {
       StyleSheet: { create: (s: unknown) => s, absoluteFill: {} },
       View: "View", ScrollView: "ScrollView", Pressable: "Pressable", Text: "Text",
     },
-    "@/runtime": { useApp: () => ({ settings: { controlKeys: [] }, hosts: [] }), fleet: { sendScroll: send } },
+    "@/runtime": { useApp: () => ({ settings: { controlKeys: [] }, hosts: [] }), fleet: { sendScroll: send, history } },
     "@/scroll": scroll,
+    "@/history": historyModule,
     "@/terminal": terminal,
     "@/paneView": paneView,
     "@/selection": selection,
@@ -66,7 +69,7 @@ function harness(typing = false) {
     if (!(name in dependencies)) throw new Error(`Unstubbed import ${name}`);
     return dependencies[name];
   } });
-  const tree = module.exports.TerminalView({ hostKey: "fixture", paneId: 12, screen: null, operate: true, canType: typing, bare: !typing, online: true, running: true, canScroll: true });
+  const tree = module.exports.TerminalView({ hostKey: "fixture", paneId: 12, screen: null, operate: true, canType: typing, bare: !typing, online: true, running: true, canScroll: true, ...props });
   function find(value: unknown, matches: (node: Node) => boolean): Node | undefined {
     if (Array.isArray(value)) return value.map((v) => find(v, matches)).find(Boolean);
     if (!value || typeof value !== "object") return;
@@ -79,9 +82,10 @@ function harness(typing = false) {
   if (capture) (capture.props.ref as { current: unknown }).current = { focus };
   const cleanups = effects.map((effect) => effect()).filter((f): f is () => void => !!f);
   const focusCleanups = focusEffects.map((effect) => effect()).filter((f): f is () => void => !!f);
-  const touch = (name: string, y?: number, x = 100) => (node.props[name] as Touch)({ nativeEvent: { touches: y === undefined ? [] : [{ pageX: x, pageY: y }] } });
+  // the event's own time, as React Native stamps every touch event
+  const touch = (name: string, y?: number, x = 100) => (node.props[name] as Touch)({ nativeEvent: { touches: y === undefined ? [] : [{ pageX: x, pageY: y }], timestamp: Date.now() } });
   return {
-    send, touch, tree, focus,
+    send, history, touch, tree, focus, find,
     // a press event as React Native gives one: where the finger lifted (no link on this test's screen)
     press: () => (find(tree, (n) => n.type === "Pressable" && n.props.accessible === false)!.props.onPress as (e: unknown) => void)({ nativeEvent: { pageX: 0, pageY: 0 } }),
     background: () => appListeners.forEach((fn) => fn("background")),
@@ -220,6 +224,52 @@ describe("terminal touch scrolling", () => {
     h.touch("onTouchEnd");
     h.press();
     expect(h.focus).toHaveBeenCalledTimes(1);
+    h.unmount();
+  });
+});
+
+describe("the lines above a primary screen (feature `history`)", () => {
+  // Rift's view of a pane, its first row line 500 of numbering 7
+  const styled = (alt = false) => ({
+    cols: 20, rows: 4, alt, cursor: [3, 2], fg: null, bg: null, rules: new Map(), stale: false, ageMs: null,
+    lines: [500, 501, 502, 503].map((n) => [[String(n), null, null, 0]]),
+    scrollback: { epoch: 7, first: 0, top: 500 },
+  });
+  const drag = (h: ReturnType<typeof harness>) => {
+    h.touch("onTouchStart", 100);
+    for (const y of [132, 164, 196]) { vi.advanceTimersByTime(20); h.touch("onTouchMove", y); }
+    h.touch("onTouchEnd");
+    vi.advanceTimersByTime(500);
+  };
+
+  it("are one tall screen the phone scrolls itself: a drag sends the computer nothing", () => {
+    const h = harness(false, { screen: styled(), canHistory: true });
+    const grid = h.find(h.tree, (n) => n.props?.lightAbove !== undefined)!;
+    const shown = grid.props.screen as { lines: unknown[]; cursor: number[] };
+    // 500 slots above the screen's 4 rows; the cursor moves down with them
+    expect(shown.lines).toHaveLength(504);
+    expect(shown.cursor).toEqual([503, 2]);
+    // the 500 rows above are history (drawn light, in chunks), the rows near the end drawn first
+    expect([grid.props.lightAbove, grid.props.historyOrigin, grid.props.mountFrom]).toEqual([500, 0, 492]);
+    drag(h);
+    expect(h.send).not.toHaveBeenCalled();
+    h.unmount();
+  });
+
+  it("asks for the page of lines right above the screen", () => {
+    const h = harness(false, { screen: styled(), canHistory: true });
+    expect(h.history).toHaveBeenCalledWith("fixture", 12, 7, 300, 500);
+    h.unmount();
+  });
+
+  it.each([
+    ["an older computer", { screen: styled(), canHistory: false }],
+    ["the alternate screen", { screen: styled(true), canHistory: true }],
+  ])("%s: a drag scrolls the computer's pane as before", (_name, props) => {
+    const h = harness(false, props);
+    drag(h);
+    expect(h.send).toHaveBeenCalled();
+    expect(h.history).not.toHaveBeenCalled();
     h.unmount();
   });
 });

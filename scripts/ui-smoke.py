@@ -5422,6 +5422,73 @@ assert "^[[200~first" in pm_text and "second^[[201~" in pm_text, pm_text
 # press then release at column 5, row 8 (1-based SGR)
 assert "^[[<0;5;8M^[[<0;5;8m" in pm_text, pm_text
 
+# A phone scrolls the lines above Rift's view of a pane itself (`history`):
+# the screen says where its rows sit among the pane's numbered lines, the
+# lines above it come in pages by number, a line keeps its number while the
+# scrollback is trimmed, and a reflow numbers them anew (the old numbers
+# answer nothing)
+hi = rm / "history"
+(hi / "data").mkdir(parents=True)
+(hi / "hist.py").write_text(
+    "# hist.py BIN OUT SCREEN_JSON FROM TO EPOCH_DELTA: lines FROM .. TO of the first pane\n"
+    "# (expressions over the screen's `top` and `first`) in its numbering plus EPOCH_DELTA\n"
+    "import json, subprocess, sys\n"
+    "bin_, out, screen, lo, hi, delta = sys.argv[1:]\n"
+    "ctl = lambda req: subprocess.run([bin_, 'ctl', 'request', json.dumps(req)],\n"
+    "                                 capture_output=True, text=True).stdout\n"
+    "pane = json.loads(ctl({'cmd': 'status'}))['tabs'][0]['panes'][0]['id']\n"
+    "sb = json.load(open(screen))['screen']['scrollback']\n"
+    "at = {'top': sb['top'], 'first': sb['first']}\n"
+    "req = {'cmd': 'history', 'pane': pane, 'epoch': sb['epoch'] + int(delta),\n"
+    "       'from': eval(lo, {}, at), 'to': eval(hi, {}, at)}\n"
+    "open(out, 'w').write(ctl(req))\n"
+    "open(out + '.done', 'w').close()\n")
+def hist(out, screen, lo, hi_, delta=0):
+    return [f"sh python3 -I {shlex.quote(str(hi / 'hist.py'))} {shlex.quote(str(binary))} "
+            f"{shlex.quote(str(hi / out))} {shlex.quote(str(hi / screen))} "
+            f"{shlex.quote(lo)} {shlex.quote(hi_)} {delta} >/dev/null 2>&1 &",
+            f"wait_file {hi / out}.done 15000"]
+hi_screen = '{"cmd":"screen","pane":PANE,"force":true}'
+remote_run("history", remote_base + 'control_api = "off"\nremote_access = true\nscrollback = 200\n', [
+    f"wait_file {hi / 'data/rift/remote/status.json'} 20000", "wait 1500",
+    "type seq 1 300\\n", "wait 1000",
+    *rin("history", "s1.json", hi_screen),
+    *hist("h1.json", "s1.json", "top - 5", "top"),
+    # 150 lines more: as many leave the top of a 200-line scrollback
+    "type seq 301 450\\n", "wait 1000",
+    *rin("history", "s2.json", hi_screen),
+    *hist("h2.json", "s1.json", "top - 5", "top"),
+    *hist("stale.json", "s2.json", "top - 5", "top", -1),
+    *hist("top.json", "s2.json", "first - 10", "first + 3"),
+    # narrower: the lines reflow and are numbered anew
+    "resize 700 800", "wait 1000",
+    *rin("history", "s3.json", hi_screen),
+    *hist("h3.json", "s2.json", "top - 5", "top"),
+], timeout=60)
+def hi_texts(name):
+    return ["".join(r[0] for r in line) for line in answer(hi, name)["history"]["lines"]]
+s1, s2, s3 = (answer(hi, n)["screen"] for n in ("s1.json", "s2.json", "s3.json"))
+sb1, sb2, sb3 = s1["scrollback"], s2["scrollback"], s3["scrollback"]
+row0 = lambda s: "".join(r[0] for r in s["lines"][0])
+# the five lines right above the screen, counting up to its first row
+h1 = hi_texts("h1.json")
+assert len(h1) == 5 and h1[-1] == str(int(row0(s1)) - 1), (h1, row0(s1))
+assert [int(t) for t in h1] == list(range(int(h1[0]), int(h1[0]) + 5)), h1
+# a range reaching above the oldest line starts at it
+top = answer(hi, "top.json")["history"]
+assert top["from"] == sb2["first"] and len(top["lines"]) == 3, top
+# trimmed: same numbering, the oldest gone, the screen further down, and
+# the same numbers still the same lines
+assert sb2["epoch"] == sb1["epoch"], (sb1, sb2)
+assert sb2["first"] >= sb1["first"] + 100 and sb2["top"] >= sb1["top"] + 150, (sb1, sb2)
+assert hi_texts("h2.json") == h1, (hi_texts("h2.json"), h1)
+# an old numbering: no lines, and the current one named
+stale = answer(hi, "stale.json")["history"]
+assert stale["lines"] == [] and stale["epoch"] == sb2["epoch"], stale
+# reflowed: a new numbering, and the old one answers nothing
+assert s3["cols"] < s2["cols"] and sb3["epoch"] != sb2["epoch"], (s2["cols"], s3["cols"], sb3)
+assert hi_texts("h3.json") == [], hi_texts("h3.json")
+
 # The Cloudflare tunnel (remote_tunnel) without cloudflared: the checklist
 # offers the install, the tunnel and relay wait, and the gateway says so in
 # tunnel.json; turning remote access off removes it

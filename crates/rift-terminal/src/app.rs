@@ -20280,6 +20280,38 @@ impl App {
                     None => Response::error("no such pane"),
                 }
             }
+            Request::History {
+                pane,
+                epoch,
+                from,
+                to,
+            } => {
+                let theme = self.theme.clone();
+                match self
+                    .find_tab_of_pane(pane)
+                    .and_then(|(_, t)| t.pane_mut(pane))
+                {
+                    Some(p) => {
+                        // the pane's own colour scheme, as its screens
+                        let theme = p.theme.as_ref().map_or(&theme, |(_, t)| t);
+                        let page = terminal::remote_history(
+                            &p.session,
+                            theme,
+                            &mut p.remote_view,
+                            epoch,
+                            from,
+                            to,
+                        );
+                        Response {
+                            ok: true,
+                            pane: Some(pane),
+                            history: Some(page),
+                            ..Default::default()
+                        }
+                    }
+                    None => Response::error("no such pane"),
+                }
+            }
             Request::Output {
                 pane,
                 block,
@@ -23363,6 +23395,19 @@ impl App {
             mode.contains(TermMode::ALTERNATE_SCROLL),
             mode.contains(TermMode::APP_CURSOR),
         );
+        // every line of the phone's step (at most 50) reaches the program:
+        // the desktop wheel's own bound would drop the rest of a fast flick
+        let wheel = match wheel {
+            crate::mouse::Wheel::Report { button, .. } => crate::mouse::Wheel::Report {
+                button,
+                count: lines.unsigned_abs(),
+            },
+            crate::mouse::Wheel::Arrows { seq, .. } => crate::mouse::Wheel::Arrows {
+                seq,
+                count: lines.unsigned_abs(),
+            },
+            other => other,
+        };
         if wheel.reaches_program() && !operate {
             return Response::error(crate::remote::SCROLL_VIEW_ONLY);
         }

@@ -1902,9 +1902,14 @@ on the desktop (also for shells a phone started while no window is open).
 - **Scrolling and pasted images from the phone.** A drag on the pane's
   screen scrolls it as the desktop's mouse wheel over it would: wheel
   reports to a program that tracks the mouse (Claude Code's fullscreen
-  renderer, htop), arrow keys under alternate scroll (less), else the
-  phone's own view of the pane: the desktop's view stays where its user
-  left it, and the desktop's scrolling never moves the phone's. A
+  renderer, htop), arrow keys under alternate scroll (less), every line of
+  a fast flick included, else the phone's own view of the pane: the
+  desktop's view stays where its user left it, and the desktop's scrolling
+  never moves the phone's. On the primary screen (Claude Code's classic
+  renderer, Codex with `--no-alt-screen`, a shell's scrollback) a phone
+  that has the lines above the view (`history`) scrolls them itself, at
+  its own frame rate with its own momentum, and sends the computer nothing;
+  new output never pulls the view down while the finger is on it. A
   view-only phone scrolls a view, never a program. *Paste* (in the key block
   wherever images can go, whatever Settings › Keys holds) puts it in the
   phone's message box; *Send* sends an image from the phone's clipboard (an operate phone, a running program, at most

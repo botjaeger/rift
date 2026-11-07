@@ -130,7 +130,8 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 | `mouse` | a click per message; counts against the `keys` rate |
 | `open`, `close`, `start` | 2 per second per connection, together |
 | `fit` | 4 per second per connection; `cols` 20 to 300, `rows` 5 to 120 (clamped) |
-| `scroll` | at most 50 lines either way (clamped), 40 per second per connection (apart from `keys`); at most 20 wheel reports or arrow keys reach the program per `scroll` |
+| `scroll` | at most 50 lines either way (clamped), 40 per second per connection (apart from `keys`); every line of a `scroll` reaches the program as a wheel report or an arrow key |
+| `history` | at most 200 lines and 1 MiB per answer (a longer range keeps its end; lines leave from its start until it fits), 10 requests per second per connection |
 | `upload` | an image of at most 10 MiB, PNG or JPEG by its first bytes, or with `ext` (1 to 8 of `a-z0-9`) a file of any bytes; chunks of 1 to 45 000 bytes (60 000 base64 characters); one upload in flight and 1 started per second per connection; at most 2 in flight across the gateway; 60 s from the first chunk to the last |
 | `output` | 1 to 500 lines and at most 64 KiB per answer, 10 requests per second per connection |
 | `screen` | at most 300 columns and 120 rows (the top-left part of a larger screen), one per 100 ms (per 16 ms for 600 ms after a `scroll`, `keys` or `text`) |
@@ -281,7 +282,7 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
   either way (clamped; 0 does nothing). The desktop decides what that is
   from the pane's terminal modes, exactly as for its own wheel: a program
   that tracks the mouse (Claude Code's fullscreen renderer, vim with
-  `mouse=a`, htop) gets that many wheel reports (at most 20) at the middle of
+  `mouse=a`, htop) gets that many wheel reports at the middle of
   its screen, with no modifiers; a full-screen program without mouse
   tracking under alternate scroll (DECSET 1007: less, man) gets arrow keys
   in its cursor mode; any other alternate screen nothing; on the primary
@@ -370,7 +371,7 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 ## Gateway → client
 
 ```json
-{"t":"welcome","v":2,"host":"studio-mac","os":"macos","version":"0.1.0","device":"d3f1","permission":"operate","features":["screen","text","output","push_failures","push_ntfy","git","notify_off","chips","waiting","complete","running","open","close","move","fit","prompt_chips","closing","scroll","upload","upload_files","paste","mouse","clipboard"]}
+{"t":"welcome","v":2,"host":"studio-mac","os":"macos","version":"0.1.0","device":"d3f1","permission":"operate","features":["screen","text","output","push_failures","push_ntfy","git","notify_off","chips","waiting","complete","running","open","close","move","fit","prompt_chips","closing","scroll","upload","upload_files","paste","mouse","clipboard","history"]}
 {"t":"topology","windows":[{"pid":4242,"tabs":[{"index":0,"title":"rift","active":true,"panes":[{"id":12,"active":true,"cwd":"/Users/me/rift","job":null,"last_command":"cargo test","last_exit":0,"git":{"branch":"main","ahead":1,"behind":0,"dirty":true,"files":3,"added":42,"removed":7}}]}]}]}
 {"t":"snapshot","pane":12,"seq":41,"blocks":[Block],"has_older":true}
 {"t":"update","pane":12,"seq":42,"blocks":[Block],"removed":[80]}
@@ -407,7 +408,7 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
   `topology`, below), `fit` (§ Phase 3), `prompt_chips` (a pane's `chips`
   in `topology`, below, and the `chip` and `reset_elapsed` requests, §
   Prompt chip menus), `open` and `close`, `move` (tab and pane reorder), `closing` (below), `scroll` and
-  `upload`, `upload_files`, `paste` and `mouse` (above), `clipboard` and `theme` (below), and `start` (listed only while
+  `upload`, `upload_files`, `paste` and `mouse` (above), `clipboard`, `theme` and `history` (below), and `start` (listed only while
   the computer allows it: macOS, `remote_access`, durable sessions). A
   gateway that leaves
   the field out serves none of them; the app then hides what needs them.
@@ -759,6 +760,8 @@ subscribed pane's visible screen as text runs:
 - `age_ms`: only on a phone-sized capture the program's output has moved on
   from (§ Phone-sized panes): how far behind it is, in whole seconds, from
   3000 on; absent otherwise.
+- `scrollback`: on the primary screen, where its rows sit among the pane's
+  numbered lines (§ Scrollback the phone scrolls); absent otherwise.
 - `rules`: `[[row, "rrggbb"], …]`, every screen row that carries a block
   rule, the 2px bar the desktop draws left of a command block, header and
   output rows alike, and its colour: success green for exit 0, error red
@@ -916,6 +919,48 @@ on request:
 - An unknown block (or one being typed at the prompt) answers `ack` with
   `error` `no_block`; an unknown pane `no_pane`; past the rate `rate`.
   `view` devices may page.
+
+### Scrollback the phone scrolls (feature `history`)
+
+On the primary screen (`screen` `on`) the phone scrolls the lines above
+Rift's view of the pane itself, with its own scrolling, instead of sending
+`scroll` for every step of a drag. Each styled `screen` carries
+`scrollback`:
+
+```json
+{"t":"screen","pane":12,"cols":80,"rows":24,"alt":false,"cursor":[3,2],"full":false,"lines":[[23,[["hello",null,null,0]]]],"scrollback":{"epoch":7,"first":120,"top":400}}
+```
+
+- Every line of the view (the display list `screen` draws: block headers,
+  output, padding) has a number. Screen row `i` is line `top + i`; `first`
+  is the oldest line the computer still holds.
+- A line keeps its number while the numbering (`epoch`) lasts: new lines
+  come at the end, trimmed scrollback takes the oldest away (`first`
+  grows). Any other change above the screen (a block folded or unfolded,
+  the width reflowed) starts a new numbering; its epoch was never given
+  out before, also by an earlier run of Rift. A change of `scrollback`
+  alone is a frame with `lines: []`.
+- The alternate screen, a phone-sized capture and a shell kept while Rift
+  is closed have no `scrollback`.
+
+Lines above the screen come on request:
+
+```json
+{"t":"history","id":"h1","pane":12,"epoch":7,"from":340,"to":400}
+{"t":"history","id":"h1","pane":12,"epoch":7,"first":120,"from":398,"lines":[[["▾ cargo test","e6e6e6",null,1]],[["running 12 tests",null,null,0]]],"rules":[[0,"3fb950"]]}
+```
+
+- The answer holds lines `from` … `to - 1` that the computer still holds,
+  styled as `screen` rows, at most 200 (a longer range keeps its end, the
+  lines nearest the screen) and at most 1 MiB (lines leave from its start
+  until it fits). Its `from` is the number of `lines[0]`. `rules`:
+  `[[index, "rrggbb"], …]`, the lines carrying a block rule, by their
+  index in `lines`.
+- Another `epoch` than the one asked for answers with the current one and
+  no `lines`: the phone's lines are out of date; it starts again from the
+  next `screen`.
+- `from` must be below `to` (else `ack` `bad_request`); an unknown pane
+  answers `no_pane`; past the rate `rate`. `view` devices may read it.
 
 ### Prompt chip menus (feature `chips`)
 
@@ -1101,7 +1146,9 @@ before, for the phone's Run sheet and the pane's suggestions:
   `{"ok":true,"generation":N,"unchanged":true}` and no screen is built, so
   the gateway's 100 ms reads of an idle pane cost the window nothing) and
   `output`
-  (`{"cmd":"output","pane":12,"block":86,"from":0,"limit":500}`), `menu`
+  (`{"cmd":"output","pane":12,"block":86,"from":0,"limit":500}`), `history`
+  (`{"cmd":"history","pane":12,"epoch":7,"from":340,"to":400}`:
+  `{"ok":true,"pane":12,"history":{"epoch","first","from","lines","rules"}}`), `menu`
   (`{"cmd":"menu","pane":12,"kind":"dirs"}`, `kind` also `branches` or
   `changes`: `{"ok":true,"pane":12,"menu":{…}}`), `diff`
   (`{"cmd":"diff","pane":12,"path":"docs/ui.md","staged":true}`:

@@ -2171,11 +2171,124 @@ pub fn capture_shown(session: &Session, size: rift_pty::GridSize) -> bool {
 /// A paired phone's own view of a pane's styled screen, apart from the
 /// desktop's `view_offset`: display lines scrolled up from the end
 /// (`offset`, 0: following the end) and the length of the list it last
-/// drew (`len`), which keeps the view in place as output arrives.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// drew (`len`), which keeps the view in place as output arrives. Also the
+/// numbering of its lines, which phones scroll themselves (`numbering`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RemoteView {
     pub offset: usize,
     pub len: usize,
+    pub numbering: Numbering,
+}
+
+/// The numbers phones know the styled view's lines by (feature `history`,
+/// [`rift_remote::protocol::Scrollback`]): line `i` of the display list is
+/// number `dropped + i`. Trimmed scrollback takes lines off the top and
+/// adds them to `dropped`, so every line still held keeps its number; any
+/// other change above the screen (a block folded, a reflow) starts a new
+/// numbering (`epoch`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Numbering {
+    /// 0: none yet.
+    pub epoch: u64,
+    pub dropped: u64,
+    cols: usize,
+    /// The sort key of each line of the list last numbered ([`display_keys`]).
+    keys: Vec<u64>,
+}
+
+/// A numbering's epoch, never one this process or an earlier one gave out
+/// before: they count up from the time the first was made.
+fn next_epoch() -> u64 {
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: OnceLock<AtomicU64> = OnceLock::new();
+    NEXT.get_or_init(|| {
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(1, |d| d.as_millis() as u64);
+        AtomicU64::new(ms.max(1))
+    })
+    .fetch_add(1, Ordering::Relaxed)
+}
+
+impl Numbering {
+    /// Number the display list whose lines have `keys`, `cols` wide, shown
+    /// `rows` at a time.
+    fn renumber(&mut self, keys: Vec<u64>, cols: usize, rows: usize) {
+        let kept = self.epoch != 0 && self.cols == cols && {
+            // lines whose key sorts before the new first one were trimmed
+            let removed = keys
+                .first()
+                .map_or(self.keys.len(), |f| self.keys.partition_point(|k| k < f));
+            // above both screens, the lines left must be the same lines
+            let old_above = self.keys.len().saturating_sub(rows);
+            let new_above = keys.len().saturating_sub(rows);
+            let span = old_above.saturating_sub(removed).min(new_above);
+            let same = self.keys[removed..removed + span] == keys[..span];
+            if same {
+                self.dropped += removed as u64;
+            }
+            same
+        };
+        if !kept {
+            self.epoch = next_epoch();
+            self.dropped = 0;
+            self.cols = cols;
+        }
+        self.keys = keys;
+    }
+}
+
+/// A sort key for each line of `display`, in its order: a grid line by its
+/// absolute line, a block header just before the lines of its block, a pad
+/// or a separator by the next line (the last line, for pads at the end).
+/// Two lists of the same pane give a line the same key, whatever was
+/// trimmed above it.
+fn display_keys(display: &[DisplayLine], blocks: &[Block]) -> Vec<u64> {
+    const HEADER: u64 = 0x8000;
+    const GRID: u64 = 0x8001;
+    const SEP: u64 = 0x7fff;
+    // each line's own key (pads have none)
+    let own = |dl: &DisplayLine| match dl {
+        DisplayLine::Grid(abs) => Some((abs << 16) | GRID),
+        DisplayLine::Header(bi) => blocks
+            .get(*bi)
+            .map(|b| (b.suppressed_range().map_or(b.prompt_start, |r| r.0) << 16) | HEADER),
+        DisplayLine::Pad | DisplayLine::Sep => None,
+    };
+    let mut keys = vec![0; display.len()];
+    // backwards: pads and separators sort just before the next line
+    let mut next: Option<u64> = None;
+    let mut run = 0u64;
+    for (i, dl) in display.iter().enumerate().rev() {
+        match (own(dl), dl) {
+            (Some(k), _) => {
+                keys[i] = k;
+                next = Some(k);
+                run = 0;
+            }
+            (None, DisplayLine::Sep) => keys[i] = next.map_or(SEP, |k| (k & !0xffff) | SEP),
+            (None, _) => {
+                if let Some(k) = next {
+                    run += 1;
+                    keys[i] = (k & !0xffff) | (SEP - run).max(1);
+                }
+            }
+        }
+    }
+    // pads with no line after them: just after the line before them
+    let mut prev: Option<u64> = None;
+    let mut after = 0u64;
+    for (i, dl) in display.iter().enumerate() {
+        if let Some(k) = own(dl) {
+            prev = Some(k);
+            after = 0;
+        } else if keys[i] == 0 {
+            after += 1;
+            keys[i] = prev.map_or(after, |k| (k & !0xffff) | (GRID + after));
+        }
+    }
+    keys
 }
 
 impl RemoteView {
@@ -2303,6 +2416,7 @@ fn screen_of<T>(
         rules: Vec::new(),
         lines,
         age_ms: None,
+        scrollback: None,
     })
 }
 
@@ -2333,6 +2447,15 @@ fn styled_screen(
     let (display, rows) = styled_display(term, blocks, clear_pad, scrolled, hidden);
     view.settle(display.len(), rows);
     let view_offset = view.offset;
+    view.numbering
+        .renumber(display_keys(&display, blocks), g.columns(), rows);
+    // the screen's first line, as `styled_rows` picks it
+    let end = display.len() - view_offset.min(display.len().saturating_sub(rows));
+    let scrollback = rift_remote::protocol::Scrollback {
+        epoch: view.numbering.epoch,
+        first: view.numbering.dropped,
+        top: view.numbering.dropped + end.saturating_sub(rows) as u64,
+    };
     // the editor owns the cursor at a prompt, which the phone does not show
     let at_prompt = matches!(blocks.last().map(|b| &b.state), Some(BlockState::Prompt));
     let cursor = term.grid().cursor.point;
@@ -2373,7 +2496,78 @@ fn styled_screen(
         rules,
         lines,
         age_ms: None,
+        scrollback: Some(scrollback),
     })
+}
+
+/// Lines `from` … `to - 1` of the styled view of `session` in numbering
+/// `epoch` (feature `history`): the lines above the screen a phone scrolls
+/// itself. Another epoch (or the alternate screen): no lines, and the
+/// current numbering, which tells the phone its lines are out of date.
+pub fn remote_history(
+    session: &Session,
+    theme: &Theme,
+    view: &mut RemoteView,
+    epoch: u64,
+    from: u64,
+    to: u64,
+) -> rift_remote::HistoryPage {
+    use std::sync::atomic::Ordering;
+    let hidden = filter_hidden(session, None);
+    let (blocks, clear_pad) = {
+        let store = session.blocks.lock().unwrap();
+        (store.snapshot(), store.clear_pad())
+    };
+    let scrolled = session.scrolled.load(Ordering::Acquire);
+    let term = session.term.lock();
+    let n = &mut view.numbering;
+    let none = |n: &Numbering| rift_remote::HistoryPage {
+        epoch: n.epoch,
+        first: n.dropped,
+        from,
+        ..Default::default()
+    };
+    if term.mode().contains(TermMode::ALT_SCREEN) {
+        return none(n);
+    }
+    let pane = term_theme(theme, &term);
+    let theme = pane.as_ref().unwrap_or(theme);
+    let g = term.grid();
+    let cols = g.columns().min(rift_remote::MAX_SCREEN_COLS as usize);
+    let history = g.history_size() as u64;
+    let (display, rows) = styled_display(&term, &blocks, clear_pad, scrolled, &hidden);
+    n.renumber(display_keys(&display, &blocks), g.columns(), rows);
+    if n.epoch != epoch {
+        return none(n);
+    }
+    let held = |line: u64| (line.saturating_sub(n.dropped) as usize).min(display.len());
+    let (start, end) = (held(from), held(to));
+    let runs = GridRuns::new(&term, theme);
+    let live_end = live_end(&term, scrolled);
+    let StyledRows { lines, rules, .. } = styled_rows(
+        &display[..end],
+        (end.saturating_sub(start), cols),
+        &blocks,
+        theme,
+        |abs| block_rule_at(&blocks, theme, live_end, abs),
+        |abs| {
+            let rel = abs as i64 - scrolled as i64;
+            if rel < -(history as i64) || rel >= g.screen_lines() as i64 {
+                Vec::new()
+            } else {
+                runs.row(Line(rel as i32), cols)
+            }
+        },
+        None,
+        0,
+    );
+    rift_remote::HistoryPage {
+        epoch: n.epoch,
+        first: n.dropped,
+        from: n.dropped + start as u64,
+        lines,
+        rules,
+    }
 }
 
 /// The `rows` lines of `display` that end `view_offset` lines above its end
@@ -4546,13 +4740,7 @@ mod tests {
         let mut v = RemoteView::default();
         // 100 display lines, 20 rows: 80 lines above the first screen
         v.settle(100, 20);
-        assert_eq!(
-            v,
-            RemoteView {
-                offset: 0,
-                len: 100
-            }
-        );
+        assert_eq!((v.offset, v.len), (0, 100));
         v.scroll(50, 80);
         v.scroll(50, 80);
         // never past the top of the list the phone draws, so the way back
@@ -4562,35 +4750,90 @@ mod tests {
         assert_eq!(v.offset, 50);
         // 7 lines of new output: the view keeps showing what it showed
         v.settle(107, 20);
-        assert_eq!(
-            v,
-            RemoteView {
-                offset: 57,
-                len: 107
-            }
-        );
+        assert_eq!((v.offset, v.len), (57, 107));
         // following the end: new output scrolls it along
         v.scroll(-50, 87);
         v.scroll(-50, 87);
         assert_eq!(v.offset, 0);
         v.settle(110, 20);
-        assert_eq!(
-            v,
-            RemoteView {
-                offset: 0,
-                len: 110
-            }
-        );
+        assert_eq!((v.offset, v.len), (0, 110));
         // a shorter list (cleared): clamped to its top
         v.scroll(50, 90);
         v.settle(30, 20);
-        assert_eq!(
-            v,
-            RemoteView {
-                offset: 10,
-                len: 30
-            }
-        );
+        assert_eq!((v.offset, v.len), (10, 30));
+    }
+
+    #[test]
+    fn display_keys_sort_as_the_list_and_survive_a_trim() {
+        use DisplayLine::{Grid, Header, Pad};
+        let done = BlockState::Done {
+            exit: Some(0),
+            duration: std::time::Duration::ZERO,
+        };
+        let blocks = vec![
+            block(1, 10, Some(11), Some(14), done.clone(), false),
+            block(
+                2,
+                14,
+                Some(15),
+                None,
+                BlockState::Running {
+                    started: std::time::Instant::now(),
+                },
+                false,
+            ),
+        ];
+        // pads at the top, a header, its lines, pads before the next header
+        // (a soft clear), its lines, pads at the end
+        let display = vec![
+            Pad,
+            Pad,
+            Header(0),
+            Grid(11),
+            Grid(12),
+            Grid(13),
+            Pad,
+            Pad,
+            Header(1),
+            Grid(15),
+            Grid(16),
+            Pad,
+        ];
+        let keys = display_keys(&display, &blocks);
+        assert!(keys.windows(2).all(|w| w[0] < w[1]), "{keys:x?}");
+        // the same lines with the top ones gone keep their keys
+        let trimmed = display_keys(&display[3..], &blocks);
+        assert_eq!(trimmed, keys[3..]);
+    }
+
+    #[test]
+    fn numbering_keeps_numbers_through_trims_and_starts_anew_on_other_changes() {
+        let mut n = Numbering::default();
+        let rows = 3;
+        n.renumber((10..20).collect(), 80, rows);
+        let (epoch, dropped) = (n.epoch, n.dropped);
+        assert!(epoch > 0);
+        // three lines trimmed, two added: the same numbering, three dropped
+        n.renumber((13..22).collect(), 80, rows);
+        assert_eq!((n.epoch, n.dropped), (epoch, dropped + 3));
+        // a change on the screen only (its last 3 lines): kept
+        let mut keys: Vec<u64> = (13..22).collect();
+        keys[8] = 99;
+        n.renumber(keys, 80, rows);
+        assert_eq!(n.epoch, epoch);
+        // a line gone from above the screen (a block folded): a new numbering
+        let folded: Vec<u64> = (13..22).filter(|k| *k != 15).collect();
+        n.renumber(folded.clone(), 80, rows);
+        assert_ne!(n.epoch, epoch);
+        assert_eq!(n.dropped, 0);
+        // another width: a new numbering
+        let before = n.epoch;
+        n.renumber(folded, 60, rows);
+        assert_ne!(n.epoch, before);
+        // every numbering is new, also across views
+        let mut other = Numbering::default();
+        other.renumber(vec![1], 80, rows);
+        assert!(other.epoch > n.epoch);
     }
 
     #[test]

@@ -2,7 +2,7 @@
 // a fixed memory ceiling: at most MAX_BLOCKS blocks and MAX_OUTPUT_CHARS characters of output
 // per pane, oldest blocks dropped first.
 
-import type { Block, OlderMsg, ScreenEndMsg, ScreenMsg, ScreenRun, SnapshotMsg, UpdateMsg } from "./types";
+import type { Block, OlderMsg, ScreenEndMsg, ScreenMsg, ScreenRun, Scrollback, SnapshotMsg, UpdateMsg } from "./types";
 
 export const MAX_BLOCKS = 200;
 /** 256 Ki characters (UTF-16 code units) of block output per pane. */
@@ -133,6 +133,8 @@ export interface ScreenState {
   stale: boolean;
   /** A capture this far behind the program (ms), while the computer is in use; null: current. */
   ageMs: number | null;
+  /** Rift's view of a primary screen: where its rows sit among the pane's numbered lines (feature `history`); null otherwise. */
+  scrollback: Scrollback | null;
 }
 
 const EMPTY_ROW: ScreenRun[] = [];
@@ -180,6 +182,7 @@ export function reduceScreen(prev: ScreenState | null, msg: ScreenMsg | ScreenEn
     rules,
     stale,
     ageMs: msg.age_ms ?? null,
+    scrollback: msg.scrollback ?? null,
   };
 }
 

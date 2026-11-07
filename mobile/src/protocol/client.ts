@@ -41,6 +41,8 @@ import {
   type CompleteRequestMsg,
   type DiffMsg,
   type DiffRequestMsg,
+  type HistoryMsg,
+  type HistoryRequestMsg,
   type ScreenEndMsg,
   type Theme,
   type ScreenMode,
@@ -742,8 +744,20 @@ export class RiftClient {
     ) as Promise<ChipResult<CompleteMsg>>;
   }
 
+  /**
+   * Lines `from` … `to - 1` of the pane's numbered lines in numbering `epoch` (feature
+   * `history`): resolves like `chipMenu`. An answer of another pane, or with lines outside the
+   * range asked for, is `bad_data`.
+   */
+  history(pane: number, epoch: number, from: number, to: number): Promise<ChipResult<HistoryMsg>> {
+    return this.askChip(
+      { t: "history", id: "", pane, epoch, from, to },
+      (m) => m.t === "history" && m.pane === pane && (m.epoch !== epoch || (m.from >= from && m.from + m.lines.length <= to)),
+    ) as Promise<ChipResult<HistoryMsg>>;
+  }
+
   private askChip(
-    req: ChipRequestMsg | ChipDetailRequestMsg | DiffRequestMsg | CompleteRequestMsg,
+    req: ChipRequestMsg | ChipDetailRequestMsg | DiffRequestMsg | CompleteRequestMsg | HistoryRequestMsg,
     fits: (m: ChipAnswerMsg) => boolean,
   ): Promise<ChipResult<ChipAnswerMsg>> {
     const id = this.authed ? `c${++this.idN}` : null;
@@ -1096,6 +1110,7 @@ export class RiftClient {
       case "chip":
       case "diff":
       case "complete":
+      case "history":
         this.settleChip(msg.id, msg);
         return;
       case "screen":

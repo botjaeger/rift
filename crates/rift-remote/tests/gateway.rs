@@ -9,13 +9,13 @@ use rift_remote::protocol::{
     ChangedFile, Completion, CompletionKind, DiffLine, HistoryEntry, Waiting, WaitingKind,
 };
 use rift_remote::protocol::{
-    ChipDetail, ChipKind, ClosingReason, ComposeContainer, PaneChip, Part, Theme, Tone,
+    ChipDetail, ChipKind, ClosingReason, ComposeContainer, PaneChip, Part, Scrollback, Theme, Tone,
 };
 use rift_remote::registry::{self, PairingLink};
 use rift_remote::transport::{self, Channel, HandshakeError, Recv};
 use rift_remote::{
-    CompletePage, Config, DiffPage, Gateway, ImageKind, Input, InputError, Key, KeyBase, Menu,
-    MenuKind, OutputError, OutputPage, Page, Screen, Source, SourceError, serve,
+    CompletePage, Config, DiffPage, Gateway, HistoryPage, ImageKind, Input, InputError, Key,
+    KeyBase, Menu, MenuKind, OutputError, OutputPage, Page, Screen, Source, SourceError, serve,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -78,6 +78,8 @@ struct State {
     ready_error: Option<InputError>,
     /// The desktop's theme (`None`: an older computer, no feature).
     theme: Option<Theme>,
+    /// Each pane's numbered lines: (epoch, number of the first, lines).
+    histories: BTreeMap<u64, (u64, u64, Vec<String>)>,
 }
 
 #[derive(Clone, Default)]
@@ -519,6 +521,41 @@ impl Source for Fake {
             total,
         })
     }
+
+    /// Every held line in `from` … `to - 1`, whatever its count: the
+    /// gateway bounds the page. Another epoch: no lines.
+    fn history(
+        &self,
+        pane: u64,
+        epoch: u64,
+        from: u64,
+        to: u64,
+    ) -> Result<HistoryPage, OutputError> {
+        let st = self.0.lock().unwrap();
+        let (now, first, lines) = st.histories.get(&pane).ok_or(OutputError::NoPane)?;
+        if epoch != *now {
+            return Ok(HistoryPage {
+                epoch: *now,
+                first: *first,
+                from,
+                ..Default::default()
+            });
+        }
+        let end = first + lines.len() as u64;
+        let (from, to) = (from.clamp(*first, end), to.clamp(*first, end));
+        let held = &lines[(from - first) as usize..(to - first) as usize];
+        Ok(HistoryPage {
+            epoch: *now,
+            first: *first,
+            from,
+            lines: held.iter().map(|l| vec![Run::plain(l)]).collect(),
+            // a rule on every tenth line
+            rules: (from..to)
+                .filter(|n| n % 10 == 0)
+                .map(|n| ((n - from) as u16, "3fb950".to_string()))
+                .collect(),
+        })
+    }
 }
 
 impl Fake {
@@ -802,7 +839,7 @@ fn pairing_then_reconnecting_gets_welcome_and_topology() {
     assert_eq!(
         welcome,
         json!({"t":"welcome","v":2,"host":"test-host","os":"linux","version":"9.9.9",
-               "device":d.id,"permission":"operate","features":["screen","text","output","push_failures","push_ntfy","git","notify_off","chips","waiting","complete","running","open","close","move","fit","prompt_chips","closing","scroll","upload","upload_files","paste","mouse","clipboard"]})
+               "device":d.id,"permission":"operate","features":["screen","text","output","push_failures","push_ntfy","git","notify_off","chips","waiting","complete","running","open","close","move","fit","prompt_chips","closing","scroll","upload","upload_files","paste","mouse","clipboard","history"]})
     );
     assert_eq!(
         (d.name.as_str(), d.platform.as_str()),
@@ -3215,6 +3252,7 @@ fn screen(rows: &[&str], alt: bool, cursor: Option<[u16; 2]>) -> Screen {
         bg: None,
         rules: Vec::new(),
         age_ms: None,
+        scrollback: None,
         lines: rows
             .iter()
             .map(|r| {
@@ -3467,6 +3505,7 @@ fn a_full_screen_over_a_mib_goes_out_without_styles() {
             bg: None,
             rules: Vec::new(),
             age_ms: None,
+            scrollback: None,
             lines: vec![row; 120],
         },
     );
@@ -3492,6 +3531,7 @@ fn a_full_screen_over_a_mib_goes_out_without_styles() {
             bg: None,
             rules: Vec::new(),
             age_ms: None,
+            scrollback: None,
             lines: vec![vec![Run::plain("x")]; 200],
         },
     );
@@ -3525,6 +3565,7 @@ fn after_an_unstyled_screen_diffs_restyle_only_the_rows_that_differ() {
             bg: None,
             rules: Vec::new(),
             age_ms: None,
+            scrollback: None,
             lines: vec![row; 120],
         },
     );
@@ -3625,6 +3666,7 @@ fn a_slow_client_gets_the_newest_screen_not_a_queue_of_them() {
         bg: None,
         rules: Vec::new(),
         age_ms: None,
+        scrollback: None,
         lines: (0..120)
             .map(|r| {
                 (0..300)
@@ -4148,6 +4190,180 @@ fn output_is_rate_limited_per_connection() {
     );
     assert_eq!(got[..10], vec!["output".to_string(); 10]);
     assert_eq!(got[10], "ackrate");
+}
+
+// --- history ----------------------------------------------------------------
+
+impl Fake {
+    fn set_history(&self, pane: u64, epoch: u64, first: u64, lines: Vec<String>) {
+        self.0
+            .lock()
+            .unwrap()
+            .histories
+            .insert(pane, (epoch, first, lines));
+    }
+}
+
+/// The texts of a `history` answer's lines.
+fn history_texts(v: &Value) -> Vec<String> {
+    v["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l[0][0].as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
+#[test]
+fn history_pages_numbered_lines_keeping_the_end_of_a_long_range() {
+    let env = start(|_| {});
+    env.fake.set_history(
+        12,
+        7,
+        100,
+        (100..1000).map(|n| format!("line {n}")).collect(),
+    );
+    let (_k, mut ch, welcome) = env.pair(Permission::View);
+    let features = welcome["features"].as_array().unwrap();
+    assert!(features.contains(&json!("history")), "{features:?}");
+    put(
+        &mut ch,
+        json!({"t":"history","id":"h1","pane":12,"epoch":7,"from":118,"to":121}),
+    );
+    let v = recv_t(&mut ch, "history");
+    assert_eq!(
+        v,
+        json!({"t":"history","id":"h1","pane":12,"epoch":7,"first":100,"from":118,
+               "lines":[[["line 118",null,null,0]],[["line 119",null,null,0]],[["line 120",null,null,0]]],
+               "rules":[[2,"3fb950"]]})
+    );
+    // longer than a page: the lines nearest `to`
+    put(
+        &mut ch,
+        json!({"t":"history","id":"h2","pane":12,"epoch":7,"from":0,"to":900}),
+    );
+    let v = recv_t(&mut ch, "history");
+    assert_eq!(v["from"], 700);
+    let texts = history_texts(&v);
+    assert_eq!(texts.len(), 200);
+    assert_eq!(texts.last().unwrap(), "line 899");
+    // lines gone from the scrollback: from the first held one
+    put(
+        &mut ch,
+        json!({"t":"history","id":"h3","pane":12,"epoch":7,"from":90,"to":102}),
+    );
+    let v = recv_t(&mut ch, "history");
+    assert_eq!((&v["from"], history_texts(&v).len()), (&json!(100), 2));
+    // another numbering: no lines, the current epoch
+    put(
+        &mut ch,
+        json!({"t":"history","id":"h4","pane":12,"epoch":6,"from":200,"to":210}),
+    );
+    let v = recv_t(&mut ch, "history");
+    assert_eq!(
+        (&v["epoch"], &v["first"], history_texts(&v).len()),
+        (&json!(7), &json!(100), 0)
+    );
+    // an empty range, an unknown pane
+    for (msg, want) in [
+        (
+            json!({"t":"history","id":"e","pane":12,"epoch":7,"from":300,"to":300}),
+            "bad_request",
+        ),
+        (
+            json!({"t":"history","id":"p","pane":77,"epoch":7,"from":0,"to":5}),
+            "no_pane",
+        ),
+    ] {
+        put(&mut ch, msg);
+        assert_eq!(ack(&recv_t(&mut ch, "ack")), (false, want));
+    }
+}
+
+#[test]
+fn history_over_a_gateway_frame_drops_lines_from_its_start() {
+    let env = start(|_| {});
+    // 200 lines of 10 000 characters: two megabytes
+    env.fake.set_history(
+        12,
+        1,
+        0,
+        (0..200)
+            .map(|n| format!("{n:05}{}", "x".repeat(9_995)))
+            .collect(),
+    );
+    let (_k, mut ch, _) = env.pair(Permission::View);
+    put(
+        &mut ch,
+        json!({"t":"history","id":"h","pane":12,"epoch":1,"from":0,"to":200}),
+    );
+    let v = recv_t(&mut ch, "history");
+    let texts = history_texts(&v);
+    assert!(v.to_string().len() <= rift_remote::MAX_GATEWAY_MESSAGE);
+    assert!((50..200).contains(&texts.len()), "{}", texts.len());
+    assert_eq!(v["from"], 200 - texts.len());
+    assert!(texts.last().unwrap().starts_with("00199"));
+    // the rules follow their lines: line 190 carries one
+    let rules = v["rules"].as_array().unwrap();
+    assert!(
+        rules.contains(&json!([texts.len() - 10, "3fb950"])),
+        "{rules:?}"
+    );
+}
+
+#[test]
+fn history_is_rate_limited_per_connection() {
+    let env = start(|_| {});
+    env.fake.set_history(12, 1, 0, vec!["a".into()]);
+    let (_k, mut ch, _) = env.pair(Permission::View);
+    let t = Instant::now();
+    let mut got = Vec::new();
+    for i in 0..11 {
+        put(
+            &mut ch,
+            json!({"t":"history","id":format!("h{i}"),"pane":12,"epoch":1,"from":0,"to":1}),
+        );
+        let v = loop {
+            let v = recv(&mut ch);
+            if v["t"] != "topology" {
+                break v;
+            }
+        };
+        got.push(v["t"].as_str().unwrap().to_string() + v["error"].as_str().unwrap_or(""));
+    }
+    assert!(
+        t.elapsed() < Duration::from_millis(900),
+        "{:?}",
+        t.elapsed()
+    );
+    assert_eq!(got[..10], vec!["history".to_string(); 10]);
+    assert_eq!(got[10], "ackrate");
+}
+
+#[test]
+fn a_change_of_scrollback_alone_sends_a_screen() {
+    let env = start(|_| {});
+    let at = |top| Scrollback {
+        epoch: 3,
+        first: 0,
+        top,
+    };
+    let mut s = screen(&["a", "b"], false, None);
+    s.scrollback = Some(at(40));
+    env.fake.set_screen(12, s);
+    let (_k, mut ch, _) = env.pair(Permission::View);
+    put(&mut ch, json!({"t":"subscribe","pane":12,"after":null}));
+    recv_t(&mut ch, "snapshot");
+    put(&mut ch, json!({"t":"screen","pane":12,"mode":"on"}));
+    let v = recv_screen(&mut ch);
+    assert_eq!(v["scrollback"], json!({"epoch":3,"first":0,"top":40}));
+    // same rows, the lines numbered anew: a frame with no row
+    env.fake.edit_screen(12, |s| s.scrollback = Some(at(41)));
+    let v = recv_screen(&mut ch);
+    assert_eq!(
+        (&v["full"], &v["lines"], &v["scrollback"]["top"]),
+        (&json!(false), &json!([]), &json!(41))
+    );
 }
 
 // --- scroll -----------------------------------------------------------------

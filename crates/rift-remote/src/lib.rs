@@ -158,6 +158,10 @@ impl ImageKind {
 }
 /// `output` requests per second per connection.
 pub const OUTPUT_RATE: usize = 10;
+/// `history` requests per second per connection, and the most lines one
+/// answers (a longer range keeps its end).
+pub const HISTORY_RATE: usize = 10;
+pub const MAX_HISTORY_LINES: u64 = 200;
 /// `fit` requests per second per connection (the app re-sends its fit every
 /// [`FIT_LEASE`] / 3).
 pub const FIT_RATE: usize = 4;
@@ -265,6 +269,28 @@ pub struct Screen {
     /// seconds ([`Screen`]s of a window in use; `docs/remote-protocol.md`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub age_ms: Option<u64>,
+    /// Where Rift's own view of the pane (a primary screen) sits among the
+    /// pane's numbered lines, which `history` reads (feature `history`);
+    /// `None` for the alternate screen and captures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scrollback: Option<protocol::Scrollback>,
+}
+
+/// Lines of Rift's view of a pane above its screen ([`Source::history`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryPage {
+    /// The numbering the lines belong to; another than the one asked for
+    /// means the asker's lines are out of date (and `lines` is empty).
+    pub epoch: u64,
+    /// The oldest line still held.
+    pub first: u64,
+    /// Number of `lines[0]`.
+    pub from: u64,
+    /// One entry per line, styled as `screen` rows.
+    pub lines: Vec<Vec<protocol::Run>>,
+    /// Lines carrying a block rule, by their index in `lines`.
+    #[serde(default)]
+    pub rules: Vec<(u16, String)>,
 }
 
 /// Lines of a block's output ([`Source::output`]).
@@ -949,6 +975,19 @@ pub trait Source: Send + Sync + 'static {
         limit: usize,
     ) -> Result<OutputPage, OutputError> {
         let _ = (pane, block, from, limit);
+        Err(OutputError::NoPane)
+    }
+    /// Lines `from` … `to - 1` of Rift's view of `pane` in numbering
+    /// `epoch` (feature `history`): what lies above its `screen`, at most
+    /// [`MAX_HISTORY_LINES`] of them. Defaults to `NoPane`.
+    fn history(
+        &self,
+        pane: u64,
+        epoch: u64,
+        from: u64,
+        to: u64,
+    ) -> Result<HistoryPage, OutputError> {
+        let _ = (pane, epoch, from, to);
         Err(OutputError::NoPane)
     }
     /// A prompt chip's menu for `pane` (feature `chips`): what the

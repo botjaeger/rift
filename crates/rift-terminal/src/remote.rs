@@ -624,11 +624,16 @@ impl Source for ControlSource {
             return self
                 .background
                 .with(pane, |s| {
-                    // no window holds it: no scrolled view
+                    // no window holds it: no scrolled view, and no numbering
+                    // that lasts from one read to the next (no `history`)
                     let mut view = crate::views::terminal::RemoteView::default();
                     crate::views::terminal::remote_screen(s, &theme, force, None, &mut view)
                         .1
                         .flatten()
+                        .map(|mut screen| {
+                            screen.scrollback = None;
+                            screen
+                        })
                 })
                 .ok_or(SourceError::NoPane);
         }
@@ -710,6 +715,36 @@ impl Source for ControlSource {
         match self.ask(pane, &req) {
             Ok(Some(r)) if r.ok => Ok(r.output.unwrap_or_default()),
             Ok(Some(r)) if r.error.as_deref() == Some(NO_BLOCK) => Err(OutputError::NoBlock),
+            Ok(Some(r)) => Err(OutputError::Unavailable(r.error.unwrap_or_default())),
+            Ok(None) => Err(OutputError::NoPane),
+            Err(e) => Err(OutputError::Unavailable(e.to_string())),
+        }
+    }
+
+    /// A shell kept while Rift is closed has no lasting numbering: its
+    /// screens carry no `scrollback`, so no phone asks.
+    fn history(
+        &self,
+        pane: u64,
+        epoch: u64,
+        from: u64,
+        to: u64,
+    ) -> Result<rift_remote::HistoryPage, OutputError> {
+        if is_background(pane) {
+            return Err(OutputError::Unavailable(
+                "a shell kept while Rift is closed has no history to scroll".into(),
+            ));
+        }
+        let req = Request::History {
+            pane: local_pane(pane),
+            epoch,
+            from,
+            to,
+        };
+        match self.ask(pane, &req) {
+            Ok(Some(r)) if r.ok => r
+                .history
+                .ok_or_else(|| OutputError::Unavailable("no lines in the answer".into())),
             Ok(Some(r)) => Err(OutputError::Unavailable(r.error.unwrap_or_default())),
             Ok(None) => Err(OutputError::NoPane),
             Err(e) => Err(OutputError::Unavailable(e.to_string())),

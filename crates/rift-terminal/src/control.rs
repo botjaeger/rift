@@ -161,6 +161,15 @@ pub enum Request {
         from: u64,
         limit: usize,
     },
+    /// Lines `from` … `to - 1` of the styled view of `pane` (a paired
+    /// phone's `history`), numbered as its screens' `scrollback` in
+    /// numbering `epoch`. Read-only.
+    History {
+        pane: u64,
+        epoch: u64,
+        from: u64,
+        to: u64,
+    },
     /// A prompt chip's menu for `pane` (a paired phone's chips): what the
     /// folder and branch chip menus and the code review panel list.
     /// Read-only.
@@ -332,6 +341,7 @@ impl Request {
             | Request::Blocks { .. }
             | Request::Screen { .. }
             | Request::Output { .. }
+            | Request::History { .. }
             | Request::Menu { .. }
             | Request::Diff { .. }
             | Request::Complete { .. }
@@ -467,6 +477,9 @@ pub struct Response {
     /// `output`: the requested lines.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<rift_remote::OutputPage>,
+    /// `history`: the requested lines of the pane's styled view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history: Option<rift_remote::HistoryPage>,
     /// `menu`: the chip menu.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub menu: Option<rift_remote::Menu>,
@@ -1222,6 +1235,18 @@ mod tests {
                 rules: vec![(0, "3fb950".into())],
                 lines: vec![vec![rift_remote::protocol::Run::plain("vim")]],
                 age_ms: Some(4000),
+                scrollback: Some(rift_remote::protocol::Scrollback {
+                    epoch: 3,
+                    first: 10,
+                    top: 40,
+                }),
+            }),
+            history: Some(rift_remote::HistoryPage {
+                epoch: 3,
+                first: 10,
+                from: 38,
+                lines: vec![vec![rift_remote::protocol::Run::plain("a")]; 2],
+                rules: vec![(1, "3fb950".into())],
             }),
             generation: Some(7),
             output: Some(rift_remote::OutputPage {

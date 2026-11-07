@@ -42,8 +42,8 @@ use crate::{
     RUN_RATE, Screen, Source, SourceError, TOPOLOGY_POLL,
 };
 use crate::{
-    ImageKind, MAX_SCROLL_LINES, MAX_UPLOAD_BYTES, MAX_UPLOAD_CHUNK, MAX_UPLOAD_EXT,
-    MAX_UPLOAD_MESSAGE, MAX_UPLOADS, UPLOAD_RATE, valid_upload_ext,
+    ImageKind, MAX_HISTORY_LINES, MAX_SCROLL_LINES, MAX_UPLOAD_BYTES, MAX_UPLOAD_CHUNK,
+    MAX_UPLOAD_EXT, MAX_UPLOAD_MESSAGE, MAX_UPLOADS, UPLOAD_RATE, valid_upload_ext,
 };
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::ErrorKind;
@@ -84,7 +84,7 @@ const DONE_RUNNING: usize = 64;
 /// after the 45 s idle timeout.
 pub const FOLLOW_FRESH: Duration = Duration::from_secs(20);
 /// What this gateway serves beyond Phase 2 (`welcome.features`).
-const FEATURES: [&str; 23] = [
+const FEATURES: [&str; 24] = [
     "screen",
     "text",
     "output",
@@ -108,6 +108,7 @@ const FEATURES: [&str; 23] = [
     "paste",
     "mouse",
     "clipboard",
+    "history",
 ];
 
 /// Gateway settings. [`Config::new`] takes the limits from the protocol;
@@ -1556,8 +1557,23 @@ fn screen_frame(
     if !full
         && lines.is_empty()
         && prev.is_some_and(|p| {
-            (p.alt, p.cursor, &p.fg, &p.bg, &p.rules, p.age_ms)
-                == (s.alt, s.cursor, &s.fg, &s.bg, &s.rules, s.age_ms)
+            (
+                p.alt,
+                p.cursor,
+                &p.fg,
+                &p.bg,
+                &p.rules,
+                p.age_ms,
+                p.scrollback,
+            ) == (
+                s.alt,
+                s.cursor,
+                &s.fg,
+                &s.bg,
+                &s.rules,
+                s.age_ms,
+                s.scrollback,
+            )
         })
     {
         return None;
@@ -1575,6 +1591,7 @@ fn screen_frame(
             rules: s.rules.clone(),
             lines,
             age_ms: s.age_ms,
+            scrollback: s.scrollback,
         })
     };
     let f = msg(full, lines);
@@ -1603,6 +1620,7 @@ fn screen_frame(
         bg: s.bg.clone(),
         rules: s.rules.clone(),
         age_ms: s.age_ms,
+        scrollback: s.scrollback,
     };
     // the client has it already (an unstyled screen went out before)
     if prev == Some(&plain) {
@@ -2057,6 +2075,7 @@ fn session<S: Source, T: Socket>(
     let mut opens = Rate::new(OPEN_RATE);
     let mut moves = Rate::new(FIT_RATE);
     let mut outputs = Rate::new(OUTPUT_RATE);
+    let mut histories = Rate::new(crate::HISTORY_RATE);
     let mut scrolls = Rate::new(crate::SCROLL_RATE);
     let mut uploads = Rate::new(UPLOAD_RATE);
     let mut upload = Uploads::default();
@@ -2216,6 +2235,13 @@ fn session<S: Source, T: Socket>(
                 from,
                 limit,
             }) => Some(output(shared, &mut outputs, rid, pane, block, from, limit)),
+            Ok(ClientMsg::History {
+                id: rid,
+                pane,
+                epoch,
+                from,
+                to,
+            }) => Some(history(shared, &mut histories, rid, pane, epoch, from, to)),
             Ok(ClientMsg::Dirs { id: rid, pane }) => {
                 Some(menu(shared, &mut outputs, rid, pane, MenuKind::Dirs))
             }
@@ -2427,6 +2453,7 @@ fn fit_reply(reply: &ServerMsg) -> Arc<str> {
     }
     let id = match reply {
         ServerMsg::Output { id, .. }
+        | ServerMsg::History { id, .. }
         | ServerMsg::Dirs { id, .. }
         | ServerMsg::Branches { id, .. }
         | ServerMsg::Changes { id, .. }
@@ -3305,6 +3332,81 @@ fn output<S: Source>(
     }
 }
 
+/// `history`: the id's bound, the rate, then lines `from` … `to - 1` of the
+/// pane's numbered lines, at most [`MAX_HISTORY_LINES`] (a longer range
+/// keeps its end, the lines nearest the screen) and at most a gateway
+/// frame (lines leave from the start until it fits).
+fn history<S: Source>(
+    shared: &Shared<S>,
+    rate: &mut Rate,
+    rid: String,
+    pane: u64,
+    epoch: u64,
+    from: u64,
+    to: u64,
+) -> ServerMsg {
+    if rid.chars().count() > MAX_REQUEST_ID {
+        return ServerMsg::error(
+            ErrorCode::BadRequest,
+            format!("id is longer than {MAX_REQUEST_ID} characters"),
+        );
+    }
+    if !rate.allow(Instant::now()) {
+        return ServerMsg::ack_err(rid, ErrorCode::Rate, "too many requests; slow down");
+    }
+    if from >= to {
+        return ServerMsg::ack_err(rid, ErrorCode::BadRequest, "from must be below to");
+    }
+    let from = from.max(to - to.min(MAX_HISTORY_LINES));
+    match shared.source.history(pane, epoch, from, to) {
+        Ok(mut page) => {
+            // a source answering more than asked keeps the lines nearest `to`
+            let over = page.lines.len().saturating_sub(MAX_HISTORY_LINES as usize);
+            cut_history(&mut page, over);
+            loop {
+                let msg = ServerMsg::History {
+                    id: rid.clone(),
+                    pane,
+                    epoch: page.epoch,
+                    first: page.first,
+                    from: page.from,
+                    lines: page.lines.clone(),
+                    rules: page.rules.clone(),
+                };
+                if page.lines.len() <= 1 || frame(&msg).len() <= MAX_GATEWAY_MESSAGE {
+                    return msg;
+                }
+                let half = page.lines.len() / 2;
+                cut_history(&mut page, half);
+            }
+        }
+        Err(OutputError::NoPane | OutputError::NoBlock) => {
+            ServerMsg::ack_err(rid, ErrorCode::NoPane, format!("no pane {pane}"))
+        }
+        Err(OutputError::Unavailable(e)) => ServerMsg::ack_err(
+            rid,
+            ErrorCode::NoPane,
+            format!("pane {pane} unavailable: {e}"),
+        ),
+    }
+}
+
+/// Drop the first `n` lines of `page`, its rules following them.
+fn cut_history(page: &mut crate::HistoryPage, n: usize) {
+    if n == 0 {
+        return;
+    }
+    let n = n.min(page.lines.len());
+    page.lines.drain(..n);
+    page.from += n as u64;
+    page.rules = page
+        .rules
+        .iter()
+        .filter(|(i, _)| *i as usize >= n)
+        .map(|(i, c)| (*i - n as u16, c.clone()))
+        .collect();
+}
+
 /// The `ack` for a chip request the window could not answer.
 fn chip_error(rid: String, pane: u64, e: OutputError) -> ServerMsg {
     match e {
@@ -3892,6 +3994,7 @@ mod tests {
             rules: Vec::new(),
             lines: vec![vec![Run::plain(big.clone())], vec![Run::plain(big)]],
             age_ms: None,
+            scrollback: None,
         };
         let (f, plain) = screen_frame(1, None, &s).unwrap();
         assert!(f.len() <= MAX_GATEWAY_MESSAGE, "{} bytes", f.len());

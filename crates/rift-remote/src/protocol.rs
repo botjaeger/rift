@@ -153,6 +153,17 @@ pub enum ClientMsg {
         from: u64,
         limit: usize,
     },
+    /// Lines `from` … `to - 1` of the subscribed pane's numbered lines in
+    /// numbering `epoch` (its `screen`'s `scrollback`, feature `history`):
+    /// the phone scrolls them itself. At most
+    /// [`crate::MAX_HISTORY_LINES`]; a longer range keeps its end.
+    History {
+        id: String,
+        pane: u64,
+        epoch: u64,
+        from: u64,
+        to: u64,
+    },
     /// The pane's folder chip menu: its directory's sub-directories
     /// (feature `chips`).
     Dirs {
@@ -352,6 +363,21 @@ pub struct ChangedFile {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiffLine(pub String, pub String);
 
+/// Where a styled `screen` sits among its pane's numbered lines (feature
+/// `history`). Lines are numbered in the order Rift shows them, and a line
+/// keeps its number while the numbering (`epoch`) lasts: the oldest ones
+/// leave (scrollback trimmed, `first` grows), new ones come at the end. A
+/// change in the middle (a block folded, the width reflowed) starts a new
+/// numbering.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Scrollback {
+    pub epoch: u64,
+    /// The oldest line still held.
+    pub first: u64,
+    /// The number of screen row 0.
+    pub top: u64,
+}
+
 /// `screen` modes: never, while the pane shows the alternate screen, or
 /// always.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -516,6 +542,23 @@ pub enum ServerMsg {
         /// A capture the pane's output has moved on from, by this much.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         age_ms: Option<u64>,
+        /// Rift's view of a primary screen: where its rows sit among the
+        /// pane's numbered lines (feature `history`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scrollback: Option<Scrollback>,
+    },
+    /// The answer to `history`: lines from `from` on, one per entry of
+    /// `lines` (their rules by index). Another `epoch` than the one asked
+    /// for: the asker's numbered lines are out of date (`lines` is empty).
+    History {
+        id: String,
+        pane: u64,
+        epoch: u64,
+        first: u64,
+        from: u64,
+        lines: Vec<Vec<Run>>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        rules: Vec<(u16, String)>,
     },
     /// Screens of `pane` stopped (left the alternate screen in `auto`, or
     /// `off`).
@@ -1023,7 +1066,7 @@ mod tests {
     #[test]
     fn every_client_fixture_round_trips() {
         let all = fixtures("client");
-        assert_eq!(all.len(), 40, "client fixtures");
+        assert_eq!(all.len(), 41, "client fixtures");
         for (name, value) in all {
             let msg: ClientMsg =
                 serde_json::from_value(value.clone()).unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -1034,7 +1077,7 @@ mod tests {
     #[test]
     fn every_server_fixture_round_trips() {
         let all = fixtures("server");
-        assert_eq!(all.len(), 35, "server fixtures");
+        assert_eq!(all.len(), 37, "server fixtures");
         for (name, value) in all {
             let msg: ServerMsg =
                 serde_json::from_value(value.clone()).unwrap_or_else(|e| panic!("{name}: {e}"));

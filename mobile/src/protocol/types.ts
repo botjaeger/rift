@@ -170,7 +170,8 @@ export type Feature =
   | "paste"
   | "mouse"
   | "clipboard"
-  | "theme";
+  | "theme"
+  | "history";
 
 /** `complete` bounds: line bytes, entries per list, bytes per entry. */
 export const MAX_COMPLETE_LINE = 1024;
@@ -223,6 +224,8 @@ export const MAX_COMMAND_BYTES = 2048;
 export const MAX_TEXT_BYTES = 1024;
 /** Lines one `output` request may ask for. */
 export const MAX_OUTPUT_LINES = 500;
+/** Lines one `history` answer holds at most (a longer range keeps its end). */
+export const MAX_HISTORY_LINES = 200;
 /** The largest screen a gateway sends (a larger one is cut to its top-left part). */
 export const MAX_SCREEN_COLS = 300;
 export const MAX_SCREEN_ROWS = 120;
@@ -426,6 +429,15 @@ export interface OutputRequestMsg {
   from: number;
   limit: number;
 }
+/** Lines `from` … `to - 1` of the pane's numbered lines in numbering `epoch` (feature `history`). */
+export interface HistoryRequestMsg {
+  t: "history";
+  id: string;
+  pane: number;
+  epoch: number;
+  from: number;
+  to: number;
+}
 /** A prompt chip's menu (feature `chips`): the folder's directories, the branches, the changed files. */
 export interface ChipRequestMsg {
   t: "dirs" | "branches" | "changes";
@@ -489,7 +501,8 @@ export type ClientMsg =
   | ScrollMsg
   | UploadMsg
   | ScreenModeMsg
-  | OutputRequestMsg;
+  | OutputRequestMsg
+  | HistoryRequestMsg;
 
 // Gateway → client.
 export interface WelcomeMsg {
@@ -624,6 +637,31 @@ export interface ScreenMsg {
   lines: [number, ScreenRun[]][];
   /** A capture the pane's output has moved on from, this long ago; absent from a live frame and from older desktops. */
   age_ms?: number;
+  /** Rift's view of a primary screen: where its rows sit among the pane's numbered lines (feature `history`). */
+  scrollback?: Scrollback;
+}
+/**
+ * Where a screen sits among its pane's numbered lines: a line keeps its number while the numbering
+ * (`epoch`) lasts; the oldest leave (`first` grows), new ones come at the end.
+ */
+export interface Scrollback {
+  epoch: number;
+  /** The oldest line still held. */
+  first: number;
+  /** The number of screen row 0. */
+  top: number;
+}
+/** The answer to `history`: lines from `from` on; another `epoch` than asked: out of date, no lines. */
+export interface HistoryMsg {
+  t: "history";
+  id: string;
+  pane: number;
+  epoch: number;
+  first: number;
+  from: number;
+  lines: ScreenRun[][];
+  /** `[index in lines, colour]`: the lines carrying a block rule. */
+  rules?: [number, string][];
 }
 /** Screens stopped (mode `auto` and the pane left the alternate screen, or mode `off`). */
 export interface ScreenEndMsg {
@@ -745,7 +783,7 @@ export type ChipMsg =
   | (ChipAnswer & { kind: "python" | "php"; current: string | null; versions: RuntimeVersion[] })
   | (ChipAnswer & { kind: "docker"; project: string | null; error: string | null; containers: ComposeContainer[] })
   | (ChipAnswer & { kind: "elapsed"; seconds: number; counting: boolean; line: string });
-export type ChipAnswerMsg = DirsMsg | BranchesMsg | ChangesMsg | ChipMsg | DiffMsg | CompleteMsg;
+export type ChipAnswerMsg = DirsMsg | BranchesMsg | ChangesMsg | ChipMsg | DiffMsg | CompleteMsg | HistoryMsg;
 export type ServerMsg =
   | ChipAnswerMsg
   | WelcomeMsg
@@ -941,6 +979,28 @@ function rowChars(runs: ScreenRun[], max: number): number {
   return n;
 }
 
+/** A screen's place among its pane's numbered lines: its first row at or past the oldest held. */
+function isScrollback(v: unknown): v is Scrollback {
+  return isObj(v) && isUint(v.epoch) && isUint(v.first) && isUint(v.top) && v.top >= v.first;
+}
+
+/**
+ * A `history` answer inside its bounds: at most MAX_HISTORY_LINES lines, each no longer than a
+ * screen row may be (two characters per column of the widest screen), rules on its own lines.
+ */
+function isHistory(m: Obj): boolean {
+  if (!(isStr(m.id) && isUint(m.pane) && isUint(m.epoch) && isUint(m.first) && isUint(m.from))) return false;
+  if (!(Array.isArray(m.lines) && m.lines.length <= MAX_HISTORY_LINES)) return false;
+  const n = m.lines.length;
+  const max = MAX_SCREEN_COLS * 2;
+  if (!m.lines.every((l) => arrayOf(isRun)(l) && rowChars(l as ScreenRun[], max) <= max)) return false;
+  return (
+    m.rules === undefined ||
+    (Array.isArray(m.rules) &&
+      m.rules.every((r) => Array.isArray(r) && r.length === 2 && isUint(r[0]) && r[0] < n && isStr(r[1]) && /^[0-9a-f]{6}$/.test(r[1])))
+  );
+}
+
 /**
  * A screen inside its own bounds: the cursor on the screen, and no row with more than two
  * characters per column (a wide character is one character in two columns; combining marks
@@ -958,6 +1018,7 @@ function isScreen(m: Obj): boolean {
   if (m.fg !== undefined && !colour(m.fg)) return false;
   if (m.bg !== undefined && !colour(m.bg)) return false;
   if (m.age_ms !== undefined && !isUint(m.age_ms)) return false;
+  if (m.scrollback !== undefined && !isScrollback(m.scrollback)) return false;
   if (
     m.rules !== undefined &&
     !(
@@ -1046,6 +1107,8 @@ export function decodeServer(json: unknown): ServerMsg | null {
       return isStr(m.id) && isUint(m.pane) && isUint(m.block) && isUint(m.from) && isStr(m.text) && isUint(m.total)
         ? (m as unknown as OutputMsg)
         : null;
+    case "history":
+      return isHistory(m) ? (m as unknown as HistoryMsg) : null;
     case "dirs":
       return isStr(m.id) &&
         isUint(m.pane) &&
@@ -1276,6 +1339,8 @@ export function isClientMsg(v: unknown): v is ClientMsg {
         v.limit >= 1 &&
         v.limit <= MAX_OUTPUT_LINES
       );
+    case "history":
+      return isId(v.id) && isUint(v.pane) && isUint(v.epoch) && isUint(v.from) && isUint(v.to) && v.from < v.to;
     case "dirs":
     case "branches":
     case "changes":

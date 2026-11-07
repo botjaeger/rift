@@ -551,6 +551,7 @@ impl App {
             R::Blocks { pane, .. }
             | R::Screen { pane, .. }
             | R::Output { pane, .. }
+            | R::History { pane, .. }
             | R::Menu { pane, .. }
             | R::Diff { pane, .. }
             | R::Complete { pane, .. }

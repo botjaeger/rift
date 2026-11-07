@@ -31,6 +31,7 @@ import {
   isPushToken,
   type AckMsg,
   type ChipAnswerMsg,
+  type HistoryMsg,
   type ChipDetailKind,
   type ChipMsg,
   type CompleteMsg,
@@ -1301,6 +1302,15 @@ export class Fleet {
     if (!client) return { ok: false, message: describeCode("disconnected", name, "") };
     const r = await client.chipMenu(pane, t);
     return r.ok ? r : { ok: false, message: describeShowCode(r.code, name, r.message) };
+  }
+
+  /**
+   * Lines `from` … `to - 1` of a pane's numbered lines in numbering `epoch` (feature `history`):
+   * the answer, or null (not connected, refused, no answer); the view asks again as it scrolls.
+   */
+  async history(host: string, pane: number, epoch: number, from: number, to: number): Promise<HistoryMsg | null> {
+    const r = await this.clients.get(host)?.history(pane, epoch, from, to);
+    return r?.ok ? r.msg : null;
   }
 
   /**

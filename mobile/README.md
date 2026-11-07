@@ -274,7 +274,14 @@ card cannot answer (a password, other input, a view-only device), and from an al
   pane always has the message input ("Message for claude") under its screen, on either screen
   (Claude Code picks its renderer per launch: the fullscreen one draws on the alternate screen,
   the classic one does not); its **⌃** shows the keys. Other full-screen programs keep the
-  keys. A vertical drag on the screen scrolls the pane on the computer (feature `scroll`, as the
+  keys. On the primary screen with feature `history` (Claude Code's classic renderer, a shell) the
+  view is one tall screen: the lines above it come from the computer a page at a time
+  (`src/history.ts`; every line numbered, so a line keeps its place while the scrollback is
+  trimmed; at most 5000 above the screen), drawn as one light text per line in chunks of 64 that
+  stay drawn (the rows near the view first, the rest in the background, so a fling finds them
+  there), and the platform's own scrolling and momentum
+  move it; a drag sends the computer nothing, and a finger on the view stops it following new
+  output until the drag ends at the bottom. Otherwise a vertical drag on the screen scrolls the pane on the computer (feature `scroll`, as the
   desktop's wheel: the agent's or vim's own scrolling, less's lines, or the shell's scrollback),
   counted in rows and sent at most every 30 ms (every 80 ms to a desktop that refuses that pace
   with `rate`, before 0.22.5; `src/scroll.ts`). A drag starts moving as soon as it clears the tap

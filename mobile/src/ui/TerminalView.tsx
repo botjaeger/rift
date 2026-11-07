@@ -50,6 +50,7 @@ import { RUN_BOLD, RUN_ITALIC, RUN_STRIKE, RUN_UNDERLINE, type ScreenRun } from 
 import { authenticate, fleet, useApp } from "@/runtime";
 import { useActionScope } from "./useActionScope";
 import { DRAG_SLOP, DragVelocity, dragLines, dragScrollsPane, Fling, ScrollCoalescer } from "@/scroll";
+import { composite, HISTORY_PAGE, missing, nextCache, withPage, type HistoryCache } from "@/history";
 import { draftKey } from "@/fleet";
 import { pending, PENDING_FULL, readClipboard, type AttachRules, type Attached } from "@/pending";
 import { programSend } from "@/paneView";
@@ -91,6 +92,15 @@ const ZOOM_SHOWN_MS = 2500;
 
 /** Within this many points of the end counts as "at the bottom": the screen follows its end. */
 const BOTTOM_SLOP = 24;
+/** A tall history draws its rows near the view in steps of this many rows. */
+const DRAWN_STEP = 32;
+/** The history is drawn in chunks of this many lines (by number). */
+const HISTORY_CHUNK = 64;
+/** History rows not drawn yet are drawn this many at a time, one step every MOUNT_MS. */
+const MOUNT_STEP = 256;
+const MOUNT_MS = 60;
+/** A `history` page that got no answer is asked for again after this long. */
+const HISTORY_RETRY_MS = 1000;
 
 /** One piece of a row on the cell grid: at its column, exactly its cells wide, a wide character centred in its two cells. */
 function PieceView({
@@ -157,11 +167,18 @@ const Row = memo(function Row({
   bg,
   links,
   onLink,
+  light,
 }: {
   runs: ScreenRun[];
   cursorCol: number | null;
   fontSize: number;
   width: number;
+  /**
+   * One text with a span per piece instead of a view per piece (a line of the history above the
+   * screen, drawn by the hundred during a fling): the mono font's advance is the cell, so the
+   * columns line up; a row with a wide character keeps the cell grid.
+   */
+  light?: boolean;
   /** `rrggbb` of the 2 px rule drawn at the row's left edge (a block's rule), or null. */
   rule: string | null;
   fg: string;
@@ -179,6 +196,8 @@ const Row = memo(function Row({
   const blank = spoken.trim() === "";
   const defaults = { fg, bg };
   const url = links[0]?.url;
+  const pieces = markLinks(rowPieces(segments), links);
+  const flat = light && !pieces.some((p) => p.wide);
   return (
     <View
       style={{ height: lineHeight, width }}
@@ -194,12 +213,106 @@ const Row = memo(function Row({
       onAccessibilityAction={url && onLink ? () => onLink(url) : undefined}
     >
       {rule ? <View style={[styles.rule, { height: lineHeight, backgroundColor: `#${rule}` }]} /> : null}
-      {markLinks(rowPieces(segments), links).map((piece) => (
-        <PieceView key={piece.col} piece={piece} cell={cell} fontSize={fontSize} lineHeight={lineHeight} defaults={defaults} link={piece.link} />
-      ))}
+      {flat ? (
+        <FlatRow pieces={pieces} fontSize={fontSize} lineHeight={lineHeight} width={width} defaults={defaults} />
+      ) : (
+        pieces.map((piece) => (
+          <PieceView key={piece.col} piece={piece} cell={cell} fontSize={fontSize} lineHeight={lineHeight} defaults={defaults} link={piece.link} />
+        ))
+      )}
     </View>
   );
 });
+
+/**
+ * HISTORY_CHUNK lines of the history above the screen, drawn light: it draws again only when one
+ * of its rows (by array), rules or the font changed, never for output arriving below it.
+ */
+const HistoryChunk = memo(
+  function HistoryChunk({
+    rows,
+    rules,
+    cols,
+    fontSize,
+    width,
+    fg,
+    bg,
+  }: {
+    rows: ScreenRun[][];
+    rules: (string | null)[];
+    cols: number;
+    fontSize: number;
+    width: number;
+    fg: string;
+    bg: string;
+  }) {
+    const links = useMemo(() => linksByRow(screenLinks(rows, cols), rows.length), [rows, cols]);
+    return (
+      <>
+        {rows.map((runs, i) => (
+          <Row key={i} runs={runs} cursorCol={null} fontSize={fontSize} width={width} rule={rules[i] ?? null} fg={fg} bg={bg} links={links[i] ?? NO_LINKS} light />
+        ))}
+      </>
+    );
+  },
+  (a, b) =>
+    a.cols === b.cols &&
+    a.fontSize === b.fontSize &&
+    a.width === b.width &&
+    a.fg === b.fg &&
+    a.bg === b.bg &&
+    a.rows.length === b.rows.length &&
+    a.rows.every((r, i) => r === b.rows[i] && a.rules[i] === b.rules[i]),
+);
+
+/** A row of narrow pieces as one text, a span per piece at its column (spaces between). */
+function FlatRow({
+  pieces,
+  fontSize,
+  lineHeight,
+  width,
+  defaults,
+}: {
+  pieces: readonly (Piece & { link: boolean })[];
+  fontSize: number;
+  lineHeight: number;
+  width: number;
+  defaults: { fg: string; bg: string };
+}) {
+  const colors = useColors();
+  const styles = useStyles();
+  let at = 0;
+  const spans: ReactNode[] = [];
+  for (const piece of pieces) {
+    if (piece.col > at) spans.push(" ".repeat(piece.col - at));
+    at = piece.col + piece.cells;
+    const { color, backgroundColor } = segmentColors(piece, defaults);
+    spans.push(
+      <Text
+        key={piece.col}
+        style={{
+          color: piece.link ? colors.accent : color,
+          backgroundColor,
+          ...(piece.flags & RUN_BOLD ? { fontFamily: monoBold } : null),
+          fontStyle: piece.flags & RUN_ITALIC ? "italic" : undefined,
+          textDecorationLine: piece.link ? (piece.flags & RUN_STRIKE ? "underline line-through" : "underline") : decoration(piece.flags),
+        }}
+      >
+        {drawnText(piece.text)}
+      </Text>,
+    );
+  }
+  return (
+    <Text
+      style={[styles.cell, { position: "absolute", left: 0, top: 0, width, fontSize, lineHeight, height: lineHeight, includeFontPadding: false }]}
+      numberOfLines={1}
+      ellipsizeMode="clip"
+      allowFontScaling={false}
+    >
+      {spans}
+    </Text>
+  );
+}
 
 /** A link's cells on one row, with the address it opens. */
 type RowLink = { col: number; cells: number; url: string };
@@ -290,10 +403,19 @@ function Grid({
   loupe,
   links,
   onLink,
+  lightAbove = 0,
+  historyOrigin = 0,
+  mountFrom = 0,
 }: {
   screen: ScreenState;
   zoom: number;
   fitted: boolean;
+  /** Rows before this one are the history above the live screen (drawn light, in chunks). */
+  lightAbove?: number;
+  /** The line number of row 0 (the history's first slot): chunks go by line number. */
+  historyOrigin?: number;
+  /** History rows before this one are not drawn (yet): blank space of their height. */
+  mountFrom?: number;
   /** The screen's links (`screenLinks`), drawn as links on their rows. */
   links: readonly ScreenLink[];
   /** Opens a link (a screen reader's action on its row). */
@@ -321,24 +443,57 @@ function Grid({
   const defaults = screenDefaults(screen, defaultColors(colors));
   const scroll = fit.scroll || rowWidth > width - PADDING_X * 2;
   const [cursorRow, cursorCol] = screen.cursor ?? [-1, -1];
-  const keys = rowKeys(screen.lines);
-  const rowLinks = useMemo(() => linksByRow(links, screen.lines.length), [links, screen.lines.length]);
+  // A tall history: its rows from `mountFrom` on stay drawn once drawn, in chunks of
+  // HISTORY_CHUNK lines by number (a chunk draws again only when one of its rows changed), so a
+  // fling runs over rows already there; blank space of their height holds the rows above. The
+  // screen's own rows are drawn one by one, as without a history.
+  const total = screen.lines.length;
+  const histEnd = Math.max(0, Math.min(lightAbove, total));
+  const from = Math.max(0, Math.min(mountFrom, histEnd));
+  const chunks: ReactNode[] = [];
+  for (let i = from; i < histEnd; ) {
+    const n = historyOrigin + i;
+    const end = Math.min(histEnd, i + HISTORY_CHUNK - (n % HISTORY_CHUNK));
+    const rules: (string | null)[] = [];
+    for (let r = i; r < end; r++) rules.push(screen.rules.get(r) ?? null);
+    chunks.push(
+      <HistoryChunk
+        key={Math.floor(n / HISTORY_CHUNK)}
+        rows={screen.lines.slice(i, end)}
+        rules={rules}
+        cols={screen.cols}
+        fontSize={fontSize}
+        width={rowWidth}
+        fg={defaults.fg}
+        bg={defaults.bg}
+      />,
+    );
+    i = end;
+  }
+  const liveLines = histEnd === 0 ? screen.lines : screen.lines.slice(histEnd);
+  const keys = rowKeys(liveLines);
+  const rowLinks = useMemo(() => linksByRow(links, total), [links, total]);
   const rows = (
     <View ref={rowsRef} collapsable={false}>
-      {screen.lines.map((runs, r) => (
-        <Row
-          key={keys[r]}
-          runs={runs}
-          cursorCol={r === cursorRow ? cursorCol : null}
-          fontSize={fontSize}
-          width={rowWidth}
-          rule={screen.rules.get(r) ?? null}
-          fg={defaults.fg}
-          bg={defaults.bg}
-          links={rowLinks[r] ?? NO_LINKS}
-          onLink={onLink}
-        />
-      ))}
+      {from > 0 ? <View style={{ height: from * rowHeight }} /> : null}
+      {chunks}
+      {liveLines.map((runs, k) => {
+        const r = histEnd + k;
+        return (
+          <Row
+            key={keys[k]}
+            runs={runs}
+            cursorCol={r === cursorRow ? cursorCol : null}
+            fontSize={fontSize}
+            width={rowWidth}
+            rule={screen.rules.get(r) ?? null}
+            fg={defaults.fg}
+            bg={defaults.bg}
+            links={rowLinks[r] ?? NO_LINKS}
+            onLink={onLink}
+          />
+        );
+      })}
       {selection ? <SelectionMarks a={selection.a} b={selection.b} cols={screen.cols} cell={fontSize * CELL_RATIO} rowHeight={rowHeight} /> : null}
       {selection && loupe ? <Loupe row={loupe.row} edge={loupe.edge} screen={screen} rowHeight={rowHeight} cell={fontSize * CELL_RATIO} /> : null}
     </View>
@@ -369,14 +524,15 @@ function Grid({
 export function TerminalView({
   hostKey,
   paneId,
-  screen,
+  screen: liveScreen,
   operate,
   canType,
   online,
   running,
   bare,
   canFit,
-  canScroll,
+  canScroll: canScrollPane,
+  canHistory,
   canUpload,
   canUploadFiles,
   canPaste,
@@ -401,6 +557,11 @@ export function TerminalView({
   canFit?: boolean;
   /** A drag scrolls the pane on the computer (feature `scroll`). */
   canScroll?: boolean;
+  /**
+   * The lines above Rift's view of a pane come to the phone (feature `history`): over a primary
+   * screen the view scrolls them itself, as a native list, and a drag sends the computer nothing.
+   */
+  canHistory?: boolean;
   /** Paste takes the clipboard's image (feature `upload`). */
   canUpload?: boolean;
   /** Paste takes the clipboard's file (feature `upload_files`). */
@@ -556,6 +717,88 @@ export function TerminalView({
   // on every scroll event: the view shrinking under the keyboard also reports a scroll).
   const scroller = useRef<ScrollView>(null);
   const stick = useRef(true);
+
+  // Over a primary screen with `history`: the lines above it come to the phone, which scrolls them
+  // itself (history.ts) as one tall screen with the platform's own scrolling; a drag then sends the
+  // computer nothing. Its rows are drawn only near the view (`drawn`).
+  const historyOn = !!canHistory && !!liveScreen?.scrollback && !liveScreen.alt;
+  // the user follows the end (`stick`, as of the last drag or fling that ended), for rendering
+  const [following, setFollowing] = useState(true);
+  // the cache follows the screen it was made for: worked out while rendering the next one
+  const [hist, setHist] = useState<{ cache: HistoryCache | null; live: ScreenState | null }>({ cache: null, live: null });
+  let cache = hist.cache;
+  if (hist.live !== liveScreen) {
+    cache = historyOn ? nextCache(hist.cache, hist.live, liveScreen, following) : null;
+    setHist({ cache, live: liveScreen });
+  }
+  // a page that got no answer is asked for again when this changes
+  const [retry, setRetry] = useState(0);
+  const { screen, above } = useMemo(
+    () => (historyOn && liveScreen ? composite(cache, liveScreen) : { screen: liveScreen, above: 0 }),
+    [historyOn, liveScreen, cache],
+  );
+  const canScroll = !!canScrollPane && !historyOn;
+  const [drawnAt, setDrawnAt] = useState<{ from: number; to: number } | null>(null);
+  const totalRows = screen?.lines.length ?? 0;
+  // before the first scroll, and while following the end: down to the last row
+  const drawn = !historyOn
+    ? null
+    : drawnAt
+      ? { from: drawnAt.from, to: following ? totalRows : drawnAt.to }
+      : { from: Math.max(0, totalRows - 3 * (liveScreen?.rows ?? 0)), to: totalRows };
+  // The history rows drawn so far: from near the view down to the end, growing upward a step at a
+  // time in the background until every row is drawn, so a fling finds them there
+  const [mountAt, setMountAt] = useState<{ epoch: number; from: number } | null>(null);
+  const epochNow = cache?.epoch ?? 0;
+  const viewFrom = drawn?.from ?? 0;
+  const mountFrom = mountAt && mountAt.epoch === epochNow ? Math.min(mountAt.from, viewFrom) : viewFrom;
+  useEffect(() => {
+    if (!historyOn || mountFrom <= 0) return;
+    const t = setTimeout(() => setMountAt({ epoch: epochNow, from: Math.max(0, mountFrom - MOUNT_STEP) }), MOUNT_MS);
+    return () => clearTimeout(t);
+  }, [historyOn, mountFrom, epochNow]);
+  // the rows in view and two screens either side (a fling outruns one), in steps (a scroll redraws only at a step)
+  const placeDrawn = (y: number, viewH: number) => {
+    if (!historyOn) return;
+    const h = rowHeight.current;
+    const inView = Math.ceil(viewH / h);
+    const first = Math.floor((y - PADDING) / h);
+    const from = Math.max(0, Math.floor((first - 2 * inView) / DRAWN_STEP) * DRAWN_STEP);
+    const to = Math.ceil((first + 3 * inView) / DRAWN_STEP) * DRAWN_STEP;
+    setDrawnAt((d) => (d && d.from === from && d.to === to ? d : { from, to }));
+  };
+  // the lines that have not come yet, a page at a time: those near the view first, then the rest
+  // above (at most MAX_HISTORY_ROWS), so a fast fling finds them there
+  const fetching = useRef(false);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  const sbTop = liveScreen?.scrollback?.top;
+  const drawnFrom = drawn?.from;
+  const drawnTo = drawn?.to;
+  useEffect(() => {
+    const c = cache;
+    if (!historyOn || !online || !c || sbTop === undefined || drawnFrom === undefined || drawnTo === undefined) return;
+    if (fetching.current) return;
+    const want = missing(c, sbTop, drawnFrom - HISTORY_PAGE / 2, drawnTo) ?? missing(c, sbTop, 0, sbTop - c.origin);
+    if (!want) return;
+    fetching.current = true;
+    void fleet.history(hostKey, paneId, c.epoch, want.from, want.to).then((msg) => {
+      fetching.current = false;
+      if (!mounted.current) return;
+      if (!msg) {
+        // not connected or refused (the gateway's rate): again in a moment
+        setTimeout(() => setRetry((t) => t + 1), HISTORY_RETRY_MS);
+        return;
+      }
+      setHist((h) => (h.cache && h.cache.epoch === c.epoch ? { ...h, cache: withPage(h.cache, msg, want) } : h));
+    });
+  }, [historyOn, online, cache, drawnFrom, drawnTo, sbTop, retry, hostKey, paneId]);
+
   const toEnd = () => {
     const go = () => {
       if (!stick.current) return;
@@ -577,7 +820,14 @@ export function TerminalView({
   const onScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
     stick.current = contentOffset.y + layoutMeasurement.height >= contentSize.height - BOTTOM_SLOP;
+    setFollowing(stick.current);
     trackLocal(e);
+  };
+  // a finger on the scroller is reading, not following: new output must not pull the view back
+  // to the end under it (judged again where the drag or its fling ends)
+  const onDragStart = () => {
+    stick.current = false;
+    setFollowing(false);
   };
 
   // A vertical drag scrolls the pane on the computer (feature `scroll`: Claude Code, vim, less,
@@ -591,6 +841,7 @@ export function TerminalView({
   };
   const trackLocal = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
     local.current.y = e.nativeEvent.contentOffset.y;
+    placeDrawn(e.nativeEvent.contentOffset.y, e.nativeEvent.layoutMeasurement.height);
   };
   const rowHeight = useRef(16);
   const cellWidth = useRef(16 / LINE_RATIO * CELL_RATIO);
@@ -681,8 +932,18 @@ export function TerminalView({
   // row off its row, so moving by the knob without this would jump the end a row up or down
   const grab = useRef({ x: 0, y: 0 });
   const shown = frozen ?? screen;
-  // the links on the screen: drawn as links, and a tap on one opens it
-  const links = useMemo(() => (shown ? screenLinks(shown.lines, shown.cols) : []), [shown]);
+  // the links on the screen: drawn as links, and a tap on one opens it (a tall history: on the
+  // rows drawn, which are the ones a finger reaches)
+  const linkFrom = drawn?.from ?? 0;
+  const linkTo = drawn?.to ?? Infinity;
+  const links = useMemo(() => {
+    if (!shown) return [];
+    if (linkFrom === 0 && linkTo >= shown.lines.length) return screenLinks(shown.lines, shown.cols);
+    return screenLinks(shown.lines.slice(linkFrom, linkTo), shown.cols).map((l) => ({
+      ...l,
+      spans: l.spans.map((sp) => ({ ...sp, row: sp.row + linkFrom })),
+    }));
+  }, [shown, linkFrom, linkTo]);
   const openLink = useCallback((url: string) => {
     if (openableLink(url)) void Linking.openURL(url);
   }, []);
@@ -775,9 +1036,9 @@ export function TerminalView({
   };
   // a screen reader has no hold: it copies the whole screen
   const copyScreen = () => {
-    if (!screen) return;
-    const last = { row: screen.lines.length - 1, col: screen.cols - 1 };
-    void Clipboard.setStringAsync(selectionText(screen.lines, { row: 0, col: 0 }, last)).then(
+    if (!liveScreen) return;
+    const last = { row: liveScreen.lines.length - 1, col: liveScreen.cols - 1 };
+    void Clipboard.setStringAsync(selectionText(liveScreen.lines, { row: 0, col: 0 }, last)).then(
       () => AccessibilityInfo.announceForAccessibility("Copied"),
       () => AccessibilityInfo.announceForAccessibility("Could not copy"),
     );
@@ -786,7 +1047,7 @@ export function TerminalView({
     accessibilityActions: [{ name: "copy", label: "Copy the screen" }],
     onAccessibilityAction: () => copyScreen(),
   };
-  const dragMove = (x: number, y: number) => {
+  const dragMove = (x: number, y: number, when: number) => {
     const d = drag.current;
     if (!d) return;
     if (d.vertical === null) {
@@ -801,7 +1062,7 @@ export function TerminalView({
     const edges = { overflow: contentH - viewH > 1, atTop: at <= 1, atBottom: at + viewH >= contentH - 1 };
     if (dragScrollsPane(dy, edges)) {
       const lines = dragLines(dy, rowHeight.current);
-      velocity.current.add(lines, Date.now());
+      velocity.current.add(lines, when);
       remote.current?.add(lines);
     }
   };
@@ -907,7 +1168,7 @@ export function TerminalView({
         tap.current.moved = true;
         cancelHold();
       }
-      dragMove(t[0]!.pageX, t[0]!.pageY);
+      dragMove(t[0]!.pageX, t[0]!.pageY, e.nativeEvent.timestamp);
     }
   };
   const onTouchEnd = (e: GestureResponderEvent) => {
@@ -926,7 +1187,7 @@ export function TerminalView({
       const flicked = drag.current?.vertical === true && !pinch.current;
       drag.current = null;
       // a flick goes on (and flushes when it stops); otherwise what waits goes out now
-      if (!(flicked && fling.current?.start(velocity.current.speed(Date.now())))) remote.current?.flush();
+      if (!(flicked && fling.current?.start(velocity.current.speed(e.nativeEvent.timestamp)))) remote.current?.flush();
       velocity.current.clear();
     }
     if (pinch.current && left < 2) {
@@ -949,7 +1210,8 @@ export function TerminalView({
             const c = cellOf(x, y, shown);
             const url = linkAt(links, c);
             if (url) openLink(url);
-            else if (canMouse) void fleet.sendMouse(hostKey, paneId, c.col, c.row);
+            // a click lands on the program's screen, never on a line above it
+            else if (canMouse && c.row >= above) void fleet.sendMouse(hostKey, paneId, c.col, c.row - above);
           });
         }
       }
@@ -1095,7 +1357,7 @@ export function TerminalView({
   // a desktop in use keeps its size: then the phone fits what comes to its width
   const fittedHere = held && (shown?.cols ?? 0) <= (cols ?? 0);
   const grid = shown ? (
-    <Grid screen={shown} zoom={zoom} fitted={fittedHere} onRowHeight={onRowHeight} rowsRef={rowsView} selection={selection} loupe={loupe} links={links} onLink={openLink} />
+    <Grid screen={shown} zoom={zoom} fitted={fittedHere} onRowHeight={onRowHeight} rowsRef={rowsView} selection={selection} loupe={loupe} links={links} onLink={openLink} lightAbove={above} historyOrigin={cache?.origin ?? 0} mountFrom={mountFrom} />
   ) : (
     // the pane's steps card (PaneLoading) says what is awaited; these are the rows to come
     <ScreenSkeleton />
@@ -1124,7 +1386,7 @@ export function TerminalView({
             onPaste={() => void onPaste()}
             style={styles.fill}
           >
-            <ScrollView ref={scroller} style={styles.fill} accessibilityLabel={label} {...a11yCopy} scrollEnabled={localScroll && !selecting} bounces={!canScroll} onLayout={onArea} onScroll={trackLocal} scrollEventThrottle={16} onScrollEndDrag={onScroll} onMomentumScrollEnd={onScroll} onContentSizeChange={onContent}>
+            <ScrollView ref={scroller} style={styles.fill} accessibilityLabel={label} {...a11yCopy} scrollEnabled={localScroll && !selecting} bounces={!canScroll} onLayout={onArea} onScroll={trackLocal} scrollEventThrottle={16} onScrollBeginDrag={onDragStart} onScrollEndDrag={onScroll} onMomentumScrollEnd={onScroll} onContentSizeChange={onContent}>
               {/* not one element for screen readers: they read the rows */}
               {/* a tap on a link opens it and leaves the keyboard down */}
               <Pressable onPress={(e) => { if (focusOnTap.current && !linkUnder(e.nativeEvent.pageX, e.nativeEvent.pageY)) capture.current?.focus(); }} accessible={false}>
@@ -1133,7 +1395,7 @@ export function TerminalView({
             </ScrollView>
           </KeyCaptureView>
         ) : (
-          <ScrollView ref={scroller} style={styles.fill} accessibilityLabel={label} {...a11yCopy} scrollEnabled={localScroll && !selecting} bounces={!canScroll} onLayout={onArea} onScroll={trackLocal} scrollEventThrottle={16} onScrollEndDrag={onScroll} onMomentumScrollEnd={onScroll} onContentSizeChange={onContent}>
+          <ScrollView ref={scroller} style={styles.fill} accessibilityLabel={label} {...a11yCopy} scrollEnabled={localScroll && !selecting} bounces={!canScroll} onLayout={onArea} onScroll={trackLocal} scrollEventThrottle={16} onScrollBeginDrag={onDragStart} onScrollEndDrag={onScroll} onMomentumScrollEnd={onScroll} onContentSizeChange={onContent}>
             {grid}
           </ScrollView>
         )}

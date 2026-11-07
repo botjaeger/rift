@@ -346,7 +346,7 @@ describe("the program screen and its selection (the New Screen and selection boa
       react: { ...react, memo: (c: unknown) => c },
       "expo-router": {},
       "react-native": { ...(uiDeps("ios")["react-native"] as object) },
-      "@/runtime": {}, "@/scroll": {}, "@/terminal": terminal, "@/paneView": paneView, "@/selection": {}, "@/haptics": {},
+      "@/runtime": {}, "@/scroll": {}, "@/history": {}, "@/terminal": terminal, "@/paneView": paneView, "@/selection": {}, "@/haptics": {},
       "@/keyboard": {}, "@/lock": {}, "@/pending": {}, "@/fleet": {}, "@/protocol/types": {}, "@/controlKeys": {},
       "./useActionScope": {}, "./useOpenShell": {}, "./Icon": {}, "./SelectionBar": {}, "./ControlRow": {}, "./PaneLoading": {}, "./Notice": {},
       "./theme": themeStub, "../../modules/rift-keys": {}, "expo-clipboard": {},
