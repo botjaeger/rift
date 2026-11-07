@@ -241,9 +241,9 @@ card cannot answer (a password, other input, a view-only device), and from an al
   screen). It is on to start with for a pane that runs a coding agent (Claude Code, Codex: the
   desktop's `running.agent`, its session title, or the program's name), and off for a plain
   shell; the button turns it on or off for that pane until the screen closes. A coding agent's
-  pane always has the message input ("Type to claude") under its screen, on either screen
+  pane always has the message input ("Message for claude") under its screen, on either screen
   (Claude Code picks its renderer per launch: the fullscreen one draws on the alternate screen,
-  the classic one does not); its **⌨** shows the keys. Other full-screen programs keep the
+  the classic one does not); its **⌃** shows the keys. Other full-screen programs keep the
   keys. A vertical drag on the screen scrolls the pane on the computer (feature `scroll`, as the
   desktop's wheel: the agent's or vim's own scrolling, less's lines, or the shell's scrollback),
   counted in rows and sent at most every 30 ms (every 80 ms to a desktop that refuses that pace
@@ -276,9 +276,8 @@ card cannot answer (a password, other input, a view-only device), and from an al
   its full value; a tap opens the chip's menu, Change folder or Switch branch). A timer (Time on
   tab, the date or clock) is plain text after the chips ("· 2m"), still opening its card. A
   desktop without the feature gets the folder, branch and changed-files chips from `cwd` and `git`.
-  Then one line, one job each side: **+** (the **Attach** sheet), the round field with its run
-  button, and **⌨**, which shows the keys under the field (held, it opens Settings › Keys); the ^
-  that opened the keys is gone, since it read as "go up". Then the keys (below), and last, closest
+  Then one line: **+** (the **Attach** sheet), **⌃**, which shows the keys under the field, and
+  the round field with its run button; empty, it says "Command" in the command's mono. Then the keys (below), and last, closest
   to the keyboard, the suggestions while typing (the desktop's completions for what is typed and
   this pane's history, feature `complete`; else its recent commands), the first marked in the
   accent: at a prompt the phone keyboard's Return takes it (`src/chips.ts` `returnTakes`). Paste
@@ -286,9 +285,8 @@ card cannot answer (a password, other input, a view-only device), and from an al
   runs; a hardware keyboard's Return runs and Shift+Return is a new line (told apart by the key event
   in modules/rift-keys). The gateway refuses a `run` with a line break (`bad_request`, nothing runs),
   so a command with line breaks says "A command runs as one line" under the field and Run stays off.
-  While a program runs (Claude Code, a build) the line changes: **Stop ⌃C** comes first (it sends
-  ctrl+c), and the field talks to the program and says who it types to: "Type to claude" (the
-  program's name alone, or "Type here", where that does not fit), a **Send** button (all lines go as one message), and Send sends the line as typed text
+  While a program runs (Claude Code, a build) the field talks to the program and says who it
+  types to: "Message for claude" ("Message" where that does not fit; ⌃C is ⌃ then C), a **Send** button (all lines go as one message), and Send sends the line as typed text
   and then Return as a key, a second request so the program reads it as a message (feature
   `text`; an older Rift is told to update; authentication as for any key that submits; no
   Confirm sheet). The keyboard's smart dashes and quotes are undone in
@@ -333,7 +331,7 @@ card cannot answer (a password, other input, a view-only device), and from an al
   them (`src/chips.ts` `shellQuote`), never run unquoted. The commands run as the command line's
   Run does (the Confirm sheet first with Ask before running), without a "Notify me".
 - **Keys under the command line** (Settings › Panes, off by default): whether the pane
-  opens with the keys shown (**⌨** switches them; ^C is Stop ⌃C on the line while a program runs); under a
+  opens with the keys shown (**⌃** switches them); under a
   full-screen program the keys always show.
 - **Running**: Run sends at once; Settings › Running commands › Ask before running (off by
   default) shows the Confirm sheet first ("Run this?", "Ask before running is on", the command,
@@ -444,13 +442,13 @@ against an older Rift the app hides what needs them.
   Tab / Shift+Tab too while a program runs or the line holds text (otherwise Tab moves the
   focus). Mapping: `src/keyboard.ts`.
 - **The keys** (the Keys redesign board; `src/ui/ControlRow.tsx`): one strip for the command line
-  (shown by **⌨**) and a full-screen program alike, 88 pt high so the program keeps its size and
+  (shown by **⌃**) and a full-screen program alike, 88 pt high so the program keeps its size and
   the screen does not move: the key block, two rows of 41 pt keys with 8 pt corners (three
   columns for six keys, more when Settings › Keys holds more), the keyboard key always last (Hide
   keyboard while it is up, else Show keyboard), and beside it the 132 x 88 arrow pad, ↑ above ← ↓
   →. A held arrow repeats (after 400 ms, then every 80 ms) until the finger lifts, the touch is
   cancelled, the keys go away or the app leaves the foreground; a screen reader's activation sends it once.
-- **Keys** (Settings › Panes › Choose keys, or **⌨** held on the command line; the New Settings
+- **Keys** (Settings › Panes › Choose keys; the New Settings
   board): the header says how many of the block's 8 places are used (the keyboard key is one), a
   preview of the key block and arrow pad, the block's keys (drag the ≡ grip to reorder, the shared
   reorder row; − in red removes; screen readers get Move up / Move down / Remove), and Add a key,

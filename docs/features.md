@@ -1989,7 +1989,7 @@ on the desktop (also for shells a phone started while no window is open).
   row under the tab row, which opens the tab's *Panes* page in the same rows,
   with *New pane* (**+**) (a screen reader has *Next pane* / *Previous pane* on the pane row and
   *Next tab* / *Previous tab* on the tab row). Both pages leave with ‹ *Back*,
-  top left. The pane's ⋯ is grouped, a gap between the groups: settings (*Wrap long lines*,
+  top left. The pane's ⋯ is in order, one hairline between every row: settings (*Wrap long lines*,
   *Notifications*; over a full-screen program *Notifications* and *Text size*, "Pinch the screen,
   or here", whose − / size / + and *Reset* change the zoom a pinch changes, 60 to 200 %, kept the
   same way; one adjustable control for a screen reader), new things (*Split pane*, *New tab*),
@@ -2023,11 +2023,11 @@ on the desktop (also for shells a phone started while no window is open).
   tracks the mouse gets the click, and without raising the keyboard), and a screen reader's row with
   a link opens it on activate. The command line, top to bottom: the
   context (the folder and branch as chips that open the chip menus, a timer as plain text after
-  them); one line with one job each side (**+** attaches, the round field with its run button
-  runs, **⌨** shows the keys, and held opens Settings › Keys); the keys; then the suggestions,
+  them); one line: **+** attaches, **⌃** shows the keys, and the round field with its run button
+  runs (an empty field says "Command"); the keys; then the suggestions,
   closest to the keyboard, the first marked: at a prompt the phone keyboard's Return takes it
-  (a command is one line). While a program runs the line changes: *Stop ⌃C* comes first and the
-  field says who it types to ("Type to npm"). The keys are one strip for the command line and a
+  (a command is one line). While a program runs the field says who it types to ("Message for
+  npm", or "Message" where that does not fit); ⌃C is ⌃ then C. The keys are one strip for the command line and a
   full-screen program alike, 88 pt high: the key block (Settings › Keys; Esc, Tab, ⌃, Return,
   Paste and the keyboard key by default, two rows) beside an arrow pad (↑ above ← ↓ →; a held
   arrow repeats after 400 ms, every 80 ms, until let go). ⌃ ⌥ ⇧ stay lit until the next key, so

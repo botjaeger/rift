@@ -27,7 +27,6 @@ import { boxImages, commandNote, fieldKey, isOneLineRefusal, MAX_FIELD_PASTE_BYT
 import type { ChipItem, ChipOpen } from "@/promptChips";
 import { rowWithPaste } from "@/controlKeys";
 import { showsKeyRow } from "@/terminal";
-import { Button } from "./Button";
 import { ChipRow } from "./ChipRow";
 import { ControlRow, NO_STICKY, type Sticky } from "./ControlRow";
 import { usePending } from "./usePending";
@@ -52,14 +51,13 @@ const COMPLETE_DELAY_MS = 200;
  * The pane's command line (operate permission only; the command line redesign board), top to
  * bottom: the context above the field (the desktop's prompt chips, in its order, as many as fit and
  * "+N" for the rest; folder and branch are chips that open their menus, a timer is plain text);
- * one line, one job each side: + (the Attach sheet: paste, photo, camera, file), the round field
- * with its run button, and ⌨, which shows the keys (the key block and arrow pad, ControlRow.tsx;
- * held, it opens Settings › Keys) under the field, so the field stays in sight above them while the
- * keyboard is up; then the completions, closest to the keyboard (the desktop's, feature `complete`,
+ * one line: + (the Attach sheet: paste, photo, camera, file), ⌃, which shows the control keys (the
+ * key block and arrow pad, ControlRow.tsx) under the field, so the field stays in sight above them
+ * while the keyboard is up, and the round field with its run button; then the completions, closest to the keyboard (the desktop's, feature `complete`,
  * and this pane's history, typed part bright, the rest dim, with where each comes from), the first
  * marked: the phone keyboard's Return takes it at a prompt. Run runs; through the Confirm sheet only
- * with Settings › Ask before running on. While a program runs (`running`) the line changes: Stop ⌃C
- * comes first and the field says who it types to; Send sends the
+ * with Settings › Ask before running on. While a program runs (`running`) the field says who it
+ * types to; Send sends the
  * line as text, then Return as a key (feature `text`), with no Confirm sheet. The phone keyboard's Return is a new line; only Run or Send sends. A hardware
  * keyboard's Return sends and Shift+Return is a new line; its ctrl/alt combinations, Escape, Tab and F-keys in the field go to the pane as keys.
  * What Attach or Paste brings waits in the field: an image, a file or a long text is a token at the cursor
@@ -595,18 +593,6 @@ export function Composer({
         </Text>
       ) : null}
       <View style={[styles.inputRow, waiting && styles.waiting]}>
-        {running !== null ? (
-          // a running program changes the line: Stop comes first
-          <Button
-            label="Stop ⌃C"
-            variant="destructive"
-            accessibilityLabel="Stop, sends control C"
-            accessibilityHint={`Stops ${program}`}
-            disabled={waiting || !online}
-            onPress={() => void sendKeys(["ctrl+c"])}
-            style={styles.stop}
-          />
-        ) : null}
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Attach"
@@ -617,6 +603,17 @@ export function Composer({
           style={({ pressed }) => [styles.round, pressed && styles.pressed]}
         >
           <Icon name="add" size={20} color={colors.text} />
+        </Pressable>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Control keys"
+          accessibilityHint="Shows the control keys under the command line"
+          accessibilityState={{ expanded: keys, disabled: waiting }}
+          disabled={waiting}
+          onPress={() => setKeys((k) => !k)}
+          style={({ pressed }) => [styles.round, keys && styles.roundOn, pressed && styles.pressed]}
+        >
+          <Icon name="control" size={18} weight="medium" color={keys ? colors.accent : colors.text} />
         </Pressable>
         <View style={styles.field}>
           <TextInput
@@ -645,7 +642,7 @@ export function Composer({
                   ? `Type a letter for ${stickyName}+letter`
                   : running !== null
                     ? messagePlaceholder(program, windowWidth)
-                    : "Run a command"
+                    : "Command"
             }
             placeholderTextColor={colors.textMuted}
             autoCapitalize="none"
@@ -674,21 +671,6 @@ export function Composer({
             <Icon name="run" size={18} color={colors.onAccent} />
           </Pressable>
         </View>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Keys"
-          accessibilityHint="Shows the keys under the command line. Hold to choose them in Settings"
-          accessibilityState={{ expanded: keys, disabled: waiting }}
-          disabled={waiting}
-          onPress={() => setKeys((k) => !k)}
-          onLongPress={() => {
-            Keyboard.dismiss();
-            router.push("/control-keys");
-          }}
-          style={({ pressed }) => [styles.round, keys && styles.roundOn, pressed && styles.pressed]}
-        >
-          <Icon name="keyboard" size={20} color={keys ? colors.accent : colors.text} />
-        </Pressable>
       </View>
       {keys ? (
         <ControlRow
@@ -756,10 +738,8 @@ const useStyles = makeStyles((colors) => ({
     alignItems: "center",
     justifyContent: "center",
   },
-  // ⌨ while the keys show: the accent tint and rim
+  // ⌃ while the keys show: the accent tint and rim
   roundOn: { borderColor: colors.accent, backgroundColor: colors.tints.accentBadge },
-  // Stop ⌃C: as tall as the field, before it
-  stop: { minHeight: TOUCH, paddingHorizontal: 14 },
   field: {
     flex: 1,
     minWidth: 0,
@@ -776,8 +756,7 @@ const useStyles = makeStyles((colors) => ({
   },
   // grows with the message, up to five lines, then scrolls
   input: { flex: 1, minWidth: 0, minHeight: 36, maxHeight: 108, paddingTop: 9, paddingBottom: 9, paddingHorizontal: 0, color: colors.textBright, fontFamily: mono, fontSize: 14, lineHeight: 18, textAlignVertical: "top" },
-  // empty, the field shows its placeholder: words, so Inter (a command typed in it is mono)
-  inputEmpty: { height: 36, fontFamily: ui(400) },
+  inputEmpty: { height: 36 },
   // the board dims the run button to 40 % while the field is empty
   send: { width: 36, height: 36, borderRadius: 18, backgroundColor: `${colors.accent}66`, alignItems: "center", justifyContent: "center" },
   sendOn: { backgroundColor: colors.accent },

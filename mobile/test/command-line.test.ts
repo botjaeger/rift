@@ -92,26 +92,27 @@ describe("the command line's order", () => {
     expect(i, s).toBeGreaterThan(0);
     return i;
   };
-  it("context, then Stop, +, the field and ⌨ on one line, then the keys, then the completions", () => {
+  it("context, then +, ⌃ and the field on one line, then the keys, then the completions", () => {
     expect(pos("<ChipRow")).toBeLessThan(pos("styles.inputRow"));
-    expect(pos('label="Stop ⌃C"')).toBeLessThan(pos('accessibilityLabel="Attach"'));
-    expect(pos('accessibilityLabel="Attach"')).toBeLessThan(pos("<TextInput"));
-    expect(pos("<TextInput")).toBeLessThan(pos('accessibilityLabel="Keys"'));
-    expect(pos('accessibilityLabel="Keys"')).toBeLessThan(pos("<ControlRow"));
+    expect(pos('accessibilityLabel="Attach"')).toBeLessThan(pos('accessibilityLabel="Control keys"'));
+    expect(pos('accessibilityLabel="Control keys"')).toBeLessThan(pos("<TextInput"));
+    expect(pos("<TextInput")).toBeLessThan(pos("<ControlRow"));
     expect(pos("<ControlRow")).toBeLessThan(pos("{completions}"));
   });
-  it("the ^ that read as “go up” is gone; ⌨ says whether the keys show and holds to Settings › Keys", () => {
-    expect(source).not.toContain('accessibilityLabel="Control keys"');
-    expect(source).not.toContain('name="control"');
-    const keys = source.slice(at('accessibilityLabel="Keys"') - 200, at('<Icon name="keyboard"'));
+  it("⌃ shows the keys and says whether they show; no ⌨ beside the field", () => {
+    const keys = source.slice(at('accessibilityLabel="Control keys"') - 100, at('<Icon name="control"'));
     expect(keys).toContain("accessibilityState={{ expanded: keys, disabled: waiting }}");
-    expect(keys).toContain('router.push("/control-keys")');
+    expect(keys).toContain("onPress={() => setKeys((k) => !k)}");
+    expect(view).not.toContain('accessibilityLabel="Keys"');
+    expect(view).not.toContain('<Icon name="keyboard"');
   });
-  it("Stop sends ⌃C, only while a program runs", () => {
-    const stop = view.slice(pos("{running !== null ? ("), pos('accessibilityLabel="Attach"'));
-    expect(stop).toContain('label="Stop ⌃C"');
-    expect(stop).toContain('onPress={() => void sendKeys(["ctrl+c"])}');
-    expect(stop).toContain('variant="destructive"');
+  it("no Stop button on the command line, running or not", () => {
+    expect(source).not.toContain("Stop ⌃C");
+    expect(view.slice(0, pos('accessibilityLabel="Attach"'))).not.toContain('sendKeys(["ctrl+c"])');
+  });
+  it("an empty field says Command, in the command's mono", () => {
+    expect(source).toContain(': "Command"');
+    expect(source).toContain("inputEmpty: { height: 36 },");
   });
 });
 

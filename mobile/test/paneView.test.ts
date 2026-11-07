@@ -352,14 +352,10 @@ describe("the command line while a program runs", () => {
 });
 
 describe("messagePlaceholder", () => {
-  it("says who the field types to, as far as it fits on one line", () => {
-    expect(messagePlaceholder("claude", 393)).toBe("Type to claude");
-    expect(messagePlaceholder("npm", 375)).toBe("Type to npm");
-    // narrower: the program's name alone, then no name
-    expect(messagePlaceholder("claude", 340)).toBe("claude");
-    expect(messagePlaceholder("claude", 300)).toBe("Type here");
-    expect(messagePlaceholder("a-program-with-a-long-name", 402)).toBe("Type here");
-    expect(messagePlaceholder("", 600)).toBe("Type here");
+  it("names the program only when it fits on the box's one line", () => {
+    expect(messagePlaceholder("claude", 390)).toBe("Message for claude");
+    expect(messagePlaceholder("claude", 320)).toBe("Message");
+    expect(messagePlaceholder("a-program-with-a-long-name", 402)).toBe("Message");
   });
 });
 

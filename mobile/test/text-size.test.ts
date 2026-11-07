@@ -116,8 +116,11 @@ describe("Text size in the menu", () => {
 describe("the pane's ⋯ menu", () => {
   const route = readFileSync(new URL("../src/app/host/[key]/pane/[id].tsx", import.meta.url), "utf8");
   it("shows Text size only over a full-screen program, where it has no Wrap long lines", () => {
-    expect(route).toContain("{fullScreen ? <TextSizeMenu last /> : null}");
-    expect(route).toContain("last={!fullScreen}");
+    expect(route).toContain("{fullScreen ? <TextSizeMenu last={!canSplit && !canOpenTab && !closeable} /> : null}");
+    expect(route).toContain("last={!fullScreen && !canSplit && !canOpenTab && !closeable}");
+  });
+  it("draws one hairline between every row: no dark band between its groups", () => {
+    expect(route).not.toContain("menuGap");
     // Wrap long lines is the blocks' (not fullScreen) branch
     expect(route).toMatch(/\{fullScreen \? \([\s\S]*?\) : \(\s*<MenuSwitch\s+icon="wrapOn"/);
   });

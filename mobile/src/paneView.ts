@@ -171,16 +171,12 @@ export function screenView(p: Pane, alt: boolean, blocksHoldRunning: boolean, no
 export const fieldKey = (name: string): "send" | "newline" | null => (name === "enter" ? "send" : name === "shift+enter" ? "newline" : null);
 
 /**
- * The field's placeholder while `program` runs, in a screen `width` wide: who it types to ("Type
- * to npm"), when that fits on the field's one line (Inter 14, about 7.5 pt a character; the line
- * leaves about 284 pt for Stop ⌃C, +, ⌨, Send and the gutters), else the program's name alone, else "Type here".
+ * The message box's placeholder for `program` in a screen `width` wide: the program's name only when
+ * it fits on the box's one line (14 pt mono; the box leaves about 184 pt for the +, ⌃, Send and gutters).
  */
 export function messagePlaceholder(program: string, width: number): string {
-  const room = width - 284;
-  const fits = (t: string) => t.length * 7.5 <= room;
-  const full = `Type to ${program}`;
-  if (program === "") return "Type here";
-  return fits(full) ? full : fits(program) ? program : "Type here";
+  const full = `Message for ${program}`;
+  return full.length * 8.4 <= width - 184 ? full : "Message";
 }
 
 /**

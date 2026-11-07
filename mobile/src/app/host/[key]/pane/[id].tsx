@@ -780,23 +780,21 @@ export default function PaneScreen() {
               hint="Finished, failed and questions here"
               on={notifOn}
               disabled={alerts.saving}
-              last={!fullScreen}
+              last={!fullScreen && !canSplit && !canOpenTab && !closeable}
               onPress={() => alerts.change(!notifOn)}
             />
             {/* over a program's screen: the zoom a pinch changes, from here too (no Wrap there) */}
-            {fullScreen ? <TextSizeMenu last /> : null}
-            {/* grouped: settings above, then new things, then what closes (in red), a gap between */}
-            {canSplit || canOpenTab ? <View style={styles.menuGap} /> : null}
+            {fullScreen ? <TextSizeMenu last={!canSplit && !canOpenTab && !closeable} /> : null}
+            {/* settings above, then new things, then what closes (in red); one hairline between every row */}
             {/* the New pane / New tab sheets (the program to run), as the Tabs page's header */}
             {canSplit ? (
-              <MenuItem icon="newPane" title="Split pane" hint="Another program beside this one" last={!canOpenTab} onPress={() => { setMenu(false); router.push({ pathname: "/new-pane", params: { key, pane: String(paneId) } }); }} />
+              <MenuItem icon="newPane" title="Split pane" hint="Another program beside this one" last={!canOpenTab && !closeable} onPress={() => { setMenu(false); router.push({ pathname: "/new-pane", params: { key, pane: String(paneId) } }); }} />
             ) : null}
             {canOpenTab ? (
-              <MenuItem icon="add" title="New tab" hint={`On ${hostName}`} last onPress={() => { setMenu(false); router.push({ pathname: "/new-tab", params: { key } }); }} />
+              <MenuItem icon="add" title="New tab" hint={`On ${hostName}`} last={!closeable} onPress={() => { setMenu(false); router.push({ pathname: "/new-tab", params: { key } }); }} />
             ) : null}
             {closeable ? (
               <>
-                <View style={styles.menuGap} />
                 <MenuAction title="Close pane" onPress={() => { setMenu(false); onClose(paneId, "pane"); }} />
                 <MenuAction title="Close tab" last onPress={() => { setMenu(false); onClose(paneId, "tab"); }} />
               </>
@@ -973,7 +971,6 @@ const useStyles = makeStyles((colors) => ({
   menuRow: { minHeight: 56, flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 14 },
   menuRule: { borderBottomWidth: 1, borderBottomColor: colors.hairline },
   // between the menu's groups: a band of the page's ground, as iOS menus part theirs
-  menuGap: { height: 6, backgroundColor: colors.bg, borderTopWidth: 1, borderBottomWidth: 1, borderColor: colors.hairline },
   menuNote: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12, lineHeight: 17, paddingHorizontal: 14, paddingVertical: 12 },
   // the text column of the rows with icons (14 + the 20 pt icon + 12)
   menuAction: { minHeight: 48, justifyContent: "center", paddingLeft: 46, paddingRight: 14 },

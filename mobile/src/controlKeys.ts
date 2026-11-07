@@ -94,8 +94,7 @@ const isArrow = (id: string) => ARROW_KEYS.includes(id);
 
 /**
  * The default key block (the Keys redesign board): Esc Tab ⌃ Return Paste, then the keyboard key,
- * which is always the block's last. ⌃C is ⌃ then C, and Stop ⌃C leads the command line while a
- * program runs; New line is in Settings › Keys, not here: the phone keyboard's Return is a new line.
+ * which is always the block's last. ⌃C is ⌃ then C; New line is in Settings › Keys, not here: the phone keyboard's Return is a new line.
  */
 export const DEFAULT_CONTROL_KEYS: readonly string[] = ["esc", "tab", "ctrl", "enter", "paste"];
 /** The default before the arrows joined: a row stored as exactly this moves to the new default. */

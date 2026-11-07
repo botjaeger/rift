@@ -6,6 +6,17 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.8.0 · update 1 — 2026-11-07
+
+The command line is back to + ⌃ and the field, and the ⋯ menu has no dark bands.
+
+### Fixed
+
+- **Command line** — Back to + and ⌃ before the field, which says "Command"; the Stop ⌃C and ⌨
+  buttons are gone (⌃C is ⌃ then C on the keys). While a program runs the field says "Message
+  for claude" again.
+- **⋯ menu** — No dark bands between its groups: one thin line between every row.
+
 ## 0.8.0 — 2026-11-07
 
 Themes, the same look on every page, and easier keys and selection.
