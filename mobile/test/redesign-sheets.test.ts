@@ -102,9 +102,14 @@ describe("the key row", () => {
     expect(keys).toMatch(/id: "shift\+tab",[^\n]*lead: "shift"/);
     expect(row).toContain('<Icon name={def.icon} size={keyIconSize(def.icon)} weight="medium" color={fg} />');
     expect(row).toContain('Platform.OS !== "ios" ? 18 : icon === "control" ? 12 : 14');
-    // the boards' JetBrains Mono Bold 14, the word Paste too
+    // the boards' JetBrains Mono Bold 14
     expect(row).toContain("label: { fontFamily: monoBold, fontSize: 14 },");
-    expect(row).toContain("word: { fontFamily: monoBold, fontSize: 14 }");
+    // Paste is our paste icon on every key row, not the word nor iOS's own control (user, 2026-11-07)
+    expect(keys).toMatch(/id: "paste",[^\n]*icon: "paste"/);
+    expect(row).not.toContain("{def.label}</Text>");
+    expect(row).not.toContain("SystemPasteButton");
+    // Settings › Keys' Add a key chip draws it the same way
+    expect(src("src/app/control-keys.tsx")).toContain("{k.icon ? (");
     expect(row).toContain("keyActive: { backgroundColor: colors.accent, borderColor: colors.accent }");
     // the system Paste takes the key's ground instead of drawing a black circle: the theme's,
     // handed in by the key row (Dark Default's only when none is)
@@ -112,7 +117,6 @@ describe("the key row", () => {
     // the key says "Paste" (the Keys boards), the Attach row its icon and the word
     expect(paste).toContain("config.displayMode = labelled ? .iconAndLabel : .labelOnly");
     expect(paste).toContain("config.baseBackgroundColor = ground ?? keyGround");
-    expect(row).toContain("ground={colors.surface} ink={colors.text}");
     // the Attach sheet's Paste row: the list's ground and the accent of its sibling rows' icons
     expect(paste).toContain("config.baseBackgroundColor = ground ?? rowGround");
     expect(paste).toContain("config.baseForegroundColor = ink ?? accent");

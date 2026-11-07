@@ -18,7 +18,7 @@ import {
   type NativeSyntheticEvent,
   type TextStyle,
 } from "react-native";
-import { clipboardFiles, KeyCaptureView, type KeyCaptureHandle, type KeyEvent, type PastedFile } from "../../modules/rift-keys";
+import { clipboardFiles, KeyCaptureView, type KeyCaptureHandle, type KeyEvent } from "../../modules/rift-keys";
 import {
   applySticky,
   keyEventToAction,
@@ -51,7 +51,7 @@ import { authenticate, fleet, useApp } from "@/runtime";
 import { useActionScope } from "./useActionScope";
 import { DRAG_SLOP, DragVelocity, dragLines, dragScrollsPane, Fling, ScrollCoalescer } from "@/scroll";
 import { draftKey } from "@/fleet";
-import { nativeAttached, pending, PENDING_FULL, readClipboard, type AttachRules, type Attached } from "@/pending";
+import { pending, PENDING_FULL, readClipboard, type AttachRules, type Attached } from "@/pending";
 import { programSend } from "@/paneView";
 import { promptText, textToCopy } from "@/selection";
 import { SelectionBar } from "./SelectionBar";
@@ -546,12 +546,6 @@ export function TerminalView({
     const current = scope.capture();
     const a = await readClipboard(Clipboard, clipboardFiles, rules);
     if (current()) deliver(a);
-  };
-  // what iOS's own paste button read, with no prompt: no reading here
-  const systemPaste = {
-    onText: (text: string) => deliver(nativeAttached({ text }, rules)),
-    onImage: (image: string) => deliver(nativeAttached({ image }, rules)),
-    onFile: (file: PastedFile) => deliver(nativeAttached({ file }, rules)),
   };
   const onOpen = useOpenShell(hostKey, paneId, setError);
 
@@ -1182,7 +1176,6 @@ export function TerminalView({
               onKey={onRowKey}
               onOpen={onOpen}
               onPaste={canType || canUpload ? () => void onPaste() : undefined}
-              systemPaste={canUpload ? systemPaste : undefined}
               // the keyboard key: hide the keyboard, or open it (a tap on the screen opens it too)
               onHideKeyboard={typing && focused ? () => capture.current?.blur() : undefined}
               onShowKeyboard={typing && !focused ? () => capture.current?.focus() : undefined}

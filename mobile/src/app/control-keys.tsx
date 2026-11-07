@@ -193,7 +193,7 @@ export default function ControlKeysScreen() {
                   style={({ pressed }) => [styles.addChip, full && styles.disabled, pressed && styles.pressed]}
                 >
                   {/* the key as the block draws it: its icon, or its label in mono (⇧Tab leads with the shift icon) */}
-                  {k.icon && !k.paste ? (
+                  {k.icon ? (
                     <Icon name={k.icon} size={14} weight="medium" color={colors.textBright} />
                   ) : k.label !== word ? (
                     <>

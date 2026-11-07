@@ -13,7 +13,7 @@ import {
   useWindowDimensions,
   View,
 } from "react-native";
-import { clipboardFiles, KeyCaptureView, type KeyEvent, type PastedFile } from "../../modules/rift-keys";
+import { clipboardFiles, KeyCaptureView, type KeyEvent } from "../../modules/rift-keys";
 import { commandProblem, utf8Length, type CompleteMsg } from "@/protocol/types";
 import { draftKey, type ActionResult } from "@/fleet";
 import { applySticky, keyEventToAction, splitText, stickyKey } from "@/keyboard";
@@ -21,7 +21,7 @@ import { keysNeedAuth } from "@/lock";
 import { authenticate, fleet, useApp } from "@/runtime";
 import { AT_PROMPT } from "@/upload";
 import { cursorOutOfToken, insertedBy, pastesAsToken, spokenLabel, staleField } from "@/draftTokens";
-import { isImageItem, nativeAttached, outHead, outParts, UPLOAD_GAP_MS, waitForImage, pending, PENDING_FULL, plainDraft, readClipboard, sendParts, type AttachRules, type Attached } from "@/pending";
+import { isImageItem, outHead, outParts, UPLOAD_GAP_MS, waitForImage, pending, PENDING_FULL, plainDraft, readClipboard, sendParts, type AttachRules, type Attached } from "@/pending";
 import { chipRowMode, completionRows, NO_COMPLETIONS, NO_COMPLETIONS_PROGRAM, returnTakes } from "@/chips";
 import { boxImages, commandNote, fieldKey, fitPlaceholder, isOneLineRefusal, MAX_FIELD_PASTE_BYTES, messageLines, messagePlaceholder, partSend, programSend } from "@/paneView";
 import type { ChipItem, ChipOpen } from "@/promptChips";
@@ -522,7 +522,6 @@ export function Composer({
   const stickyName = [sticky.ctrl ? "ctrl" : null, sticky.alt ? "alt" : null, sticky.shift ? "shift" : null].filter(Boolean).join("+");
   const note = commandNote(draft, running !== null);
   const canRun = online && !waiting && draft.trim() !== "" && note === null;
-  const canPasteHere = !waiting && online && (canType || canUpload || running === null);
   // the computer's answer for this draft (or the last one, while the next is on its way), then the pane's history
   const typing = chipRowMode(draft) === "completions" && !agent;
   const answer = complete && online ? completed : null;
@@ -686,15 +685,6 @@ export function Composer({
           onKey={onRowKey}
           onOpen={onOpen}
           onPaste={canType || canUpload || running === null ? () => void onPaste() : undefined}
-          systemPaste={
-            canPasteHere
-              ? {
-                  onText: (text) => accept({ kind: "text", text }),
-                  onImage: (image) => accept(nativeAttached({ image }, rules)),
-                  onFile: (file: PastedFile) => accept(nativeAttached({ file }, rules)),
-                }
-              : undefined
-          }
           onHideKeyboard={keyboardUp ? () => Keyboard.dismiss() : undefined}
           onShowKeyboard={keyboardUp || waiting ? undefined : () => input.current?.focus()}
         />

@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import { AccessibilityInfo, AppState, Platform, Pressable, Text, View, type StyleProp, type ViewStyle } from "react-native";
-import { hasSystemPasteButton, SystemPasteButton, type PastedFile } from "../../modules/rift-keys";
 import { ARROW_KEYS, blockColumns, controlKey, KeyRepeat, keyTipTitle, PressGate, type ControlKey } from "@/controlKeys";
 import type { OpenKind } from "@/protocol/types";
 import { Icon, type IconName } from "./Icon";
@@ -34,7 +33,7 @@ const modOf = (id: string): keyof Sticky => (id === "alt" ? "alt" : id === "shif
 /**
  * A key's face (the Keys redesign board): the surface ground, a glass rim and 8 pt corners; an
  * 18 pt icon from the one set (arrows, ⌃ ⌥ ⇧, Return, the keyboard), its label in JetBrains Mono
- * Bold 14 ("Esc", "⌃D", "F5"), a word too (Paste). A modifier before a word (⇧Tab) is its
+ * Bold 14 ("Esc", "⌃D", "F5"), the paste icon too. A modifier before a word (⇧Tab) is its
  * icon at 13 pt. Colour means a state only: a held modifier is lit, the accent with dark ink.
  * `style` sizes it (the block's cells fill their place; Settings › Keys' list draws 44 x 34).
  */
@@ -61,9 +60,7 @@ export function KeyCap({
   const text = def.lead ? [...def.label].slice(1).join("") : def.label;
   return (
     <View style={[styles.key, { backgroundColor: ground }, style, active && styles.keyActive]}>
-      {def.paste ? (
-        <Text style={[styles.word, { color: fg }]}>{def.label}</Text>
-      ) : def.icon ? (
+      {def.icon ? (
         <Icon name={def.icon} size={keyIconSize(def.icon)} weight="medium" color={fg} />
       ) : (
         <>
@@ -224,7 +221,6 @@ export function ControlRow({
   onKey,
   onOpen,
   onPaste,
-  systemPaste,
   onHideKeyboard,
   onShowKeyboard,
   tipBelow,
@@ -236,8 +232,6 @@ export function ControlRow({
   onKey: (key: string) => void;
   onOpen?: (kind: OpenKind) => void;
   onPaste?: () => void;
-  /** Where iOS's own paste button takes the key's place: it reads with no prompt. */
-  systemPaste?: { onText: (text: string) => void; onImage: (b64: string) => void; onFile: (file: PastedFile) => void };
   onHideKeyboard?: () => void;
   /** The keyboard is down: the keyboard key opens it. */
   onShowKeyboard?: () => void;
@@ -290,13 +284,6 @@ export function ControlRow({
       ];
     }
     if (def.paste) {
-      if (hasSystemPasteButton && systemPaste && onPaste && !disabled) {
-        return [
-          <View key={id} style={styles.cell}>
-            <SystemPasteButton {...systemPaste} ground={colors.surface} ink={colors.text} style={[styles.key, styles.fill, { backgroundColor: colors.surface }]} />
-          </View>,
-        ];
-      }
       return [
         <Key
           key={id}
@@ -412,7 +399,6 @@ const useStyles = makeStyles((colors) => ({
   // a held modifier: lit, the accent ground and rim, its icon in the accent's ink
   keyActive: { backgroundColor: colors.accent, borderColor: colors.accent },
   label: { fontFamily: monoBold, fontSize: 14 },
-  word: { fontFamily: monoBold, fontSize: 14 },
   disabled: { opacity: 0.45 },
   pressed: { opacity: 0.7 },
 }));
