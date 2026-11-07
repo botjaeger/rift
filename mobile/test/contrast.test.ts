@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { AVATAR_COLORS } from "../src/avatar";
-import { CLAUDE_COLOR } from "../src/paneView";
 import { BUILTIN_THEMES } from "../src/themes.data";
 import {
   CAMERA_TEXT,
@@ -45,13 +44,15 @@ describe("Dark Default is the palette the app always had", () => {
       borderStrong: "#ffffff24",
       glass: "#ffffff14",
       glassRim: "#ffffff1f",
+      rim: "#ffffff3d",
       floating: "#1e1e1ef0",
       camera: "#000000",
       viewfinder: "#121212",
       faint: "#ffffff0f",
-      switchOff: "#ffffff29",
+      switchOff: "#ffffff20",
       raised: "#262626",
       menu: "#2b2b2b",
+      popover: "#282828",
       segmentOn: "#373737",
       askGround: "#201808",
       dark: true,
@@ -64,12 +65,13 @@ describe("Dark Default is the palette the app always had", () => {
       errorBadge: "#ff827233",
       chipFill: "#ffffff0a",
       running: "#19aad814",
+      selected: "#19aad80f",
       bellOn: "#19aad833",
       diffAdded: "#1ca05a1f",
       diffRemoved: "#ff827226",
       answerAdded: "#1ca05a1f",
       answerRemoved: "#ff82721f",
-      match: "#e5a01a55",
+      match: "#ffd70055",
     });
   });
 });
@@ -149,24 +151,13 @@ describe("avatars", () => {
     expect(avatarInk("#fefdc2", paletteFrom(LIGHT_DEFAULT))).not.toBe("#fefdc2");
   });
 
-  it("the coding agent's ✳ shows on its tile's tint and the page in every theme", () => {
-    for (const t of BUILTIN_THEMES) {
-      const p = paletteFrom(t);
-      const ink = avatarInk(CLAUDE_COLOR, p);
-      for (const under of [p.bg, p.surface])
-        for (const ground of [under, over(`${CLAUDE_COLOR}1f`, under)])
-          expect(contrast(ink, ground), `${t.name} on ${ground}`).toBeGreaterThanOrEqual(MARK_CONTRAST);
-    }
-    // the brand colour itself falls short on Light Default's tile
-    const light = paletteFrom(LIGHT_DEFAULT);
-    expect(contrast(CLAUDE_COLOR, over(`${CLAUDE_COLOR}1f`, light.bg))).toBeLessThan(MARK_CONTRAST);
-    expect(avatarInk(CLAUDE_COLOR, dark)).toBe(CLAUDE_COLOR);
-    // every ✳ the app draws takes the held colour (the tile, the pane picker; the Panes list draws the tile)
-    for (const f of ["ui/Avatar.tsx", "app/host/[key]/pane/[id].tsx"]) {
-      const src = readFileSync(new URL(`../src/${f}`, import.meta.url), "utf8");
-      expect(src, f).toContain("avatarInk(CLAUDE_COLOR, colors)");
-      expect(src, f).not.toMatch(/\? CLAUDE_COLOR :|color: (CLAUDE_COLOR|AGENT_COLOR)\b/);
-    }
+  it("a coding agent's logo keeps its own colours (a brand mark is never recoloured), on its tile's tint", () => {
+    // the logos are images (ui/AgentLogo.tsx): only OpenCode's one-colour mark takes a colour, the accent
+    const logo = readFileSync(new URL("../src/ui/AgentLogo.tsx", import.meta.url), "utf8");
+    expect(logo).toContain('logo === "opencode" ? colors.accent : undefined');
+    expect(logo).not.toContain("avatarInk");
+    const avatar = readFileSync(new URL("../src/ui/Avatar.tsx", import.meta.url), "utf8");
+    expect(avatar).toContain('logo === "claude" ? `${CLAUDE_COLOR}1f`');
     const panes = readFileSync(new URL("../src/app/panes.tsx", import.meta.url), "utf8");
     expect(panes).toContain("lead={<Tile ");
     expect(panes).not.toContain("CLAUDE_COLOR");
@@ -213,5 +204,16 @@ describe("other grounds", () => {
   it("the excluded pair really falls short in Dark Default (so it stays excluded)", () => {
     expect(contrast(dark.textDim, dark.surface)).toBeLessThan(4.5);
     expect(TEXT_ON.surface).not.toContain("textDim");
+  });
+
+  it("a field's placeholder is the boards' grey (text_muted), lifted only as far as it must to read on the surface", () => {
+    // Dark Default's #828282 is 4.33:1 on the surface: a step lighter
+    expect(contrast("#828282", dark.surface)).toBeLessThan(MIN_CONTRAST);
+    expect(dark.placeholder).not.toBe("#828282");
+    expect(luminance(dark.placeholder)).toBeLessThan(luminance(dark.textMuted));
+    for (const t of BUILTIN_THEMES) {
+      const c = paletteFrom(t);
+      expect(contrast(c.placeholder, c.surface), t.name).toBeGreaterThanOrEqual(MIN_CONTRAST);
+    }
   });
 });

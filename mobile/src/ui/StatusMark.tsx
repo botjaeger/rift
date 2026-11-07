@@ -43,20 +43,17 @@ export function Spinner({ size = 14, style }: { size?: number; style?: StyleProp
 }
 
 /**
- * A tab's or pane's status, as the desktop's tab bar draws it: the spinner while it works, else a
- * dot in its state's colour, ringed while it needs you. Decorative: rows say the state in words.
+ * A tab's or pane's status on a list row (the New Lists and New Portals boards): a plain 8 pt dot
+ * in its state's colour, the accent while it works (not a spinner). Decorative: rows say the
+ * state in words.
  */
 export function StatusMark({ kind, size = 8 }: { kind: TabKind; size?: number }) {
   const colors = useColors();
-  if (kind === "working") return <Spinner size={size + 5} />;
   return (
     <View
       accessibilityElementsHidden
       importantForAccessibility="no-hide-descendants"
-      style={[
-        { width: size, height: size, borderRadius: size / 2, backgroundColor: colors[KIND_COLOR[kind]] },
-        kind === "needs" && { borderWidth: 0, shadowColor: colors.warning, shadowOpacity: 0.6, shadowRadius: 3, shadowOffset: { width: 0, height: 0 } },
-      ]}
+      style={{ width: size, height: size, borderRadius: size / 2, backgroundColor: colors[KIND_COLOR[kind]] }}
     />
   );
 }

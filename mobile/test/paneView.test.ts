@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   answerLabel,
+  fitPlaceholder,
   messagePlaceholder,
   askContext,
   bareScreen,
@@ -99,9 +100,9 @@ describe("the picker and the Panes sheet", () => {
   });
   it("lists the tab's panes with their marks", () => {
     const rows = paneRows(tab([pane(7, { job: "claude", waiting: waiting(["Yes"]) }), pane(9, { last_command: "psql" })]));
-    expect(rows.map((r) => [r.id, r.number, r.name, r.mark, r.claude, r.tone])).toEqual([
-      [7, 1, "claude", "\u2733\uFE0E", true, "needs"],
-      [9, 2, "psql", ">_", false, "idle"],
+    expect(rows.map((r) => [r.id, r.number, r.name, r.mark, r.logo, r.claude, r.tone])).toEqual([
+      [7, 1, "claude", null, "claude", true, "needs"],
+      [9, 2, "psql", ">_", null, false, "idle"],
     ]);
   });
   it("counts the other panes that wait, not the open one", () => {
@@ -242,10 +243,10 @@ describe("fitting the program to the view", () => {
     expect(fitFontSize(0.1)).toBe(6.6);
   });
   it("columns and rows are what fill the view at that font", () => {
-    // 11 pt: 6.6 pt a cell, a 14 pt line
-    expect(fitSize(396, 560, 11)).toEqual({ cols: 60, rows: 40 });
+    // 11 pt: 6.6 pt a cell, a 15 pt line (the program screen board)
+    expect(fitSize(396, 560, 11)).toEqual({ cols: 60, rows: 37 });
     // a bigger font fits fewer
-    expect(fitSize(396, 560, 16.5)).toEqual({ cols: 40, rows: 26 });
+    expect(fitSize(396, 560, 16.5)).toEqual({ cols: 40, rows: 24 });
   });
   it("stays within the desktop's bounds, and waits for a measured view", () => {
     expect(fitSize(60, 30, 11)).toEqual({ cols: 20, rows: 5 });
@@ -343,11 +344,11 @@ describe("the command line while a program runs", () => {
     expect(programSend("a\u001b[2Jb", true, true)).toMatchObject({ ok: false });
     expect(programSend("x".repeat(48 * 1024 + 1), true, true)).toMatchObject({ ok: false, message: expect.stringMatching(/too long/) });
   });
-  it("names each program's mark, Claude's ✳ only for Claude", async () => {
+  it("names each program's mark: an agent's own logo, Claude's only for Claude, >_ for the rest", async () => {
     const { programMark } = await import("../src/paneView");
     expect(programMark("claude").claude).toBe(true);
     for (const p of ["codex", "opencode", "vim", null]) expect(programMark(p).claude).toBe(false);
-    expect(new Set(["claude", "codex", "opencode", "vim"].map((p) => programMark(p).mark)).size).toBe(4);
+    expect(new Set(["claude", "codex", "opencode", "vim"].map((p) => programMark(p).logo ?? programMark(p).mark)).size).toBe(4);
   });
 });
 
@@ -356,6 +357,16 @@ describe("messagePlaceholder", () => {
     expect(messagePlaceholder("claude", 390)).toBe("Message for claude");
     expect(messagePlaceholder("claude", 320)).toBe("Message");
     expect(messagePlaceholder("a-program-with-a-long-name", 402)).toBe("Message");
+  });
+});
+
+describe("fitPlaceholder", () => {
+  // 15 pt mono, 9 pt a character: the 402 pt phone leaves 218 pt, 24 characters
+  it("keeps the whole placeholder only when it fits on the field's line", () => {
+    expect(fitPlaceholder("Waiting for your computer…", "Waiting…", 402)).toBe("Waiting…");
+    expect(fitPlaceholder("Waiting for your computer…", "Waiting…", 834)).toBe("Waiting for your computer…");
+    expect(fitPlaceholder("x".repeat(24), "short", 402)).toBe("x".repeat(24));
+    expect(fitPlaceholder("x".repeat(25), "short", 402)).toBe("short");
   });
 });
 

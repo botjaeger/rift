@@ -13,6 +13,8 @@ import { Icon } from "@/ui/Icon";
 import { Field } from "@/ui/Field";
 import { ErrorText } from "@/ui/Notice";
 import type { ColorName } from "@/ui/palette";
+import { SheetFrame } from "@/ui/SheetFrame";
+import { CardBox, NavRow } from "@/ui/Rows";
 import { SheetHeader } from "@/ui/SheetHeader";
 import { mono, radius, ui, makeStyles, useColors } from "@/ui/theme";
 
@@ -45,7 +47,6 @@ function Row({
   detail,
   health,
   dimLabel,
-  words,
 }: {
   icon: React.ReactNode;
   label: string;
@@ -64,8 +65,6 @@ function Row({
   health?: { word: string; color: ColorName } | null;
   /** The label is dimmed (a stopped container). */
   dimLabel?: boolean;
-  /** The label is words, not a command or name (Parent folder, a folder: the Change folder board): Inter. */
-  words?: boolean;
 }) {
   const colors = useColors();
   const styles = useStyles();
@@ -80,7 +79,7 @@ function Row({
       style={({ pressed }) => [styles.row, !first && styles.divider, pressed && styles.pressed, dim && styles.disabled]}
     >
       <View style={styles.icon}>{icon}</View>
-      <Text style={[styles.label, words && styles.wordsLabel, accent ? styles.accentLabel : null, danger ? styles.dangerLabel : null, dimLabel && styles.dimLabel]} numberOfLines={1}>
+      <Text style={[styles.label, accent ? styles.accentLabel : null, danger ? styles.dangerLabel : null, dimLabel && styles.dimLabel]} numberOfLines={1}>
         {label}
       </Text>
       {detail ? (
@@ -308,21 +307,25 @@ export default function ChipsScreen() {
     if (answer.t === "dirs") {
       const rows = dirRows(answer.parent, answer.dirs, query);
       if (rows.length === 0) return <Text style={styles.empty}>{query ? "No matches" : "No folders here"}</Text>;
+      // the Change folder board: settings rows, a 28 pt grey tile, the name in Inter, a ›
       return (
-        <View style={styles.card}>
+        <CardBox>
           {rows.map((d, i) => (
-            <Row
+            <NavRow
               key={d}
               first={i === 0}
-              icon={d === ".." ? <Text style={styles.glyph}>↑</Text> : <Icon name="folder" size={14} color={colors.textMuted} />}
+              leading={
+                <View style={styles.tile}>
+                  {d === ".." ? <Text style={styles.tileGlyph}>↑</Text> : <Icon name="folder" size={14} color={colors.textMuted} />}
+                </View>
+              }
               label={d === ".." ? "Parent folder" : d}
-              words
-              spoken={d === ".." ? "cd .. (parent folder)" : `cd into ${d}`}
+              accessibilityLabel={d === ".." ? "cd .. (parent folder)" : `cd into ${d}`}
               disabled={!operate || sending}
               onPress={() => void act({ kind: "cd", name: d })}
             />
           ))}
-        </View>
+        </CardBox>
       );
     }
     if (answer.t === "branches") {
@@ -416,6 +419,42 @@ export default function ChipsScreen() {
     );
   };
 
+  const close = () => {
+    if (scope.leave()) router.back();
+  };
+
+  // Change folder (the Change folder board): its board's height, the field and what a pick runs
+  // 8 pt apart, then the folders
+  if (menu === "dirs")
+    return (
+      <SheetFrame board="folder" title={title} subtitle={subtitle ?? undefined} subtitleMono onClose={close}>
+        {answer ? (
+          <View style={styles.fieldGroup}>
+            <Field
+              icon="search"
+              value={query}
+              onChangeText={setQuery}
+              autoCapitalize="none"
+              autoCorrect={false}
+              spellCheck={false}
+              placeholder="Search folders"
+              label="Search folders"
+            />
+            {runs && operate ? <Text style={styles.runs}>{runs}</Text> : null}
+          </View>
+        ) : null}
+        {!operate && host ? <Text style={styles.note}>View only: this device cannot run commands here.</Text> : null}
+        {error ? <ErrorText>{error}</ErrorText> : null}
+        {!answer && !error ? (
+          <View style={styles.loading} accessible accessibilityLabel="Loading">
+            <ActivityIndicator color={colors.accent} />
+          </View>
+        ) : null}
+        {list()}
+        {answer && "more" in answer && answer.more ? <Text style={styles.note}>Some were left out: the list holds 500 at most.</Text> : null}
+      </SheetFrame>
+    );
+
   return (
     // One scroll view for the whole sheet: a native sheet takes its first scroll view over as
     // the sheet's own, so the header must scroll with the list rather than sit above it.
@@ -438,13 +477,11 @@ export default function ChipsScreen() {
             subtitle
           )
         }
-        subtitleMono={menu === "dirs" || menu === "branches"}
-        onClose={() => {
-          if (scope.leave()) router.back();
-        }}
+        subtitleMono={menu === "branches"}
+        onClose={close}
       />
       <View style={styles.content}>
-        {(menu === "dirs" || menu === "branches") && answer ? (
+        {menu === "branches" && answer ? (
           <Field
             icon="search"
             value={query}
@@ -452,8 +489,8 @@ export default function ChipsScreen() {
             autoCapitalize="none"
             autoCorrect={false}
             spellCheck={false}
-            placeholder={menu === "dirs" ? "Search folders" : "Search or name a new branch"}
-            label={menu === "dirs" ? "Search folders" : "Search branches"}
+            placeholder="Search or name a new branch"
+            label="Search branches"
           />
         ) : null}
         {runs && operate ? <Text style={styles.note}>{runs}</Text> : null}
@@ -476,6 +513,11 @@ const useStyles = makeStyles((colors) => ({
   content: { paddingHorizontal: 16, gap: 14 },
   hidden: { opacity: 0 },
   note: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13, lineHeight: 18, paddingHorizontal: 4 },
+  // Change folder's field and the line under it (the board: 8 pt apart, the line not indented)
+  fieldGroup: { gap: 8 },
+  runs: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13, lineHeight: 18 },
+  tile: { width: 28, height: 28, borderRadius: 8, backgroundColor: colors.faint, alignItems: "center", justifyContent: "center" },
+  tileGlyph: { fontFamily: ui(400), color: colors.textMuted, fontSize: 14 },
   // the header's line counts (its subtitle's runs)
   added: { fontFamily: ui(400), color: colors.success },
   removed: { fontFamily: ui(400), color: colors.textBright },
@@ -489,7 +531,6 @@ const useStyles = makeStyles((colors) => ({
   icon: { width: 20, alignItems: "center" },
   glyph: { fontFamily: mono, color: colors.textMuted, fontSize: 14 },
   label: { fontFamily: mono, flex: 1, color: colors.text, fontSize: 14 },
-  wordsLabel: { fontFamily: ui(400), fontSize: 15 },
   accentLabel: { fontFamily: ui(400), color: colors.accent },
   dangerLabel: { fontFamily: ui(400), color: colors.error },
   dimLabel: { color: colors.textMuted },

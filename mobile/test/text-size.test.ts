@@ -59,13 +59,15 @@ const byLabel = (tree: unknown, label: string): Node => {
 };
 
 describe("Text size in the menu", () => {
-  it("is a menu row with the board's words and the size, closed until tapped", () => {
+  it("is a menu row with the board's words, no size on it, closed until tapped", () => {
     const tree = draw(false);
     const row = byLabel(tree, "Text size");
     expect(row.props.accessibilityRole).toBe("menuitem");
     expect(row.props.accessibilityHint).toBe("Pinch the screen, or here");
     expect(row.props.accessibilityState).toEqual({ expanded: false });
-    expect(textOf(row)).toContain("Text sizePinch the screen, or here100%");
+    expect(textOf(row)).toBe("Text sizePinch the screen, or here");
+    // the size is still spoken (and shown once the row opens)
+    expect(row.props.accessibilityValue).toEqual({ text: "100%" });
     expect(findAll(tree, (n) => n.props.accessibilityRole === "adjustable")).toHaveLength(0);
   });
 
@@ -121,7 +123,18 @@ describe("the pane's ⋯ menu", () => {
   });
   it("draws one hairline between every row: no dark band between its groups", () => {
     expect(route).not.toContain("menuGap");
-    // Wrap long lines is the blocks' (not fullScreen) branch
-    expect(route).toMatch(/\{fullScreen \? \([\s\S]*?\) : \(\s*<MenuSwitch\s+icon="wrapOn"/);
+    expect(route).toContain('menuRule: { minHeight: 61, borderBottomWidth: 1, borderBottomColor: colors.hairline },');
+    // Wrap long lines is the blocks' (not over a program, not on a closed pane), and no note row over a program
+    expect(route).toMatch(/\{fullScreen \|\| closed \? null : \(\s*<MenuSwitch\s+icon="wrapOn"/);
+    expect(route).not.toContain("programs wrap their own lines.</Text>");
+  });
+  it("is the board's menu: scrim, 270 wide 16 from the right on #28282a, rows of 48 + 6 / 6", () => {
+    expect(route).toContain('scrim: { backgroundColor: "#00000066" },');
+    expect(route).toContain("style={[StyleSheet.absoluteFill, styles.scrim]}");
+    expect(route).toMatch(/menu: \{\s*position: "absolute",\s*right: 16,\s*width: 270,\s*borderRadius: 14,\s*backgroundColor: colors\.popover,\s*borderWidth: 1,\s*borderColor: colors\.borderStrong,/);
+    expect(route).toContain('menuRow: { minHeight: 60, flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 14, paddingVertical: 6 },');
+    // Close pane / Close tab line up with the titles; a closed pane has nothing to close
+    expect(route).toContain("menuAction: { paddingLeft: 44 },");
+    expect(route).toContain("const closeable = canClose(host) && !closed;");
   });
 });

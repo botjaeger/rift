@@ -51,20 +51,25 @@ describe("the message box and the Attach sheet", () => {
     expect(composer).not.toContain("SystemPasteButton");
     expect(composer).not.toContain("ImagePicker");
   });
-  it("iOS's Paste from clipboard row is the system paste control, not a clipboard read", () => {
+  it("iOS's Paste row is an ordinary row whose word is the system paste control, not a clipboard read", () => {
     const attach = src("src/app/attach.tsx");
     const at = attach.indexOf("hasSystemPasteButton ? (");
     expect(at).toBeGreaterThan(0);
     const native = attach.slice(at, attach.indexOf(") : (", at));
     expect(native).toContain("<SystemPasteButton");
-    expect(native).toContain("labelled");
+    // the system's word "Paste" (label mode) in the row's title place, on the row's own ground
+    expect(native).not.toContain("labelled");
+    expect(native).toMatch(/<SystemPasteButton\s+ground=\{colors\.surface\}\s+ink=\{colors\.text\}/);
+    expect(native).toContain("<Text style={styles.pasteLine}>{PASTE_LINE}</Text>");
+    expect(native).toContain('<Icon name="forward" size={CHEVRON}');
     expect(native).not.toContain("Clipboard.");
     expect(native).not.toContain("readClipboard");
     expect(src("modules/rift-keys/ios/RiftPasteButton.swift")).toContain("UIPasteControl(configuration: config)");
   });
   it("Attach has the four routes and returns through the pane's own store, never a draft write", () => {
     const attach = src("src/app/attach.tsx");
-    for (const t of ["Paste from clipboard", "Photo library", "Take a photo", "File"]) expect(attach).toContain(`"${t}"`);
+    for (const t of ["Paste", "Photo library", "Take a photo", "File"]) expect(attach).toContain(`"${t}"`);
+    expect(attach).toContain('const PASTE_LINE = "Text, an image or a file from the clipboard";');
     expect(attach).toContain("pending.add(box, a.item)");
     expect(attach).toContain("pending.giveText(box, a.text)");
     expect(attach).not.toContain("setDraft");
@@ -89,25 +94,30 @@ describe("the key row", () => {
     expect(row).toContain("export const BLOCK_H = 88;");
     expect(row).toMatch(/key: \{\s*borderRadius: 8,/);
   });
-  it("draws every symbol from the one icon set, keys in mono, words in Inter, colour only for a state", () => {
+  it("draws every symbol from the one icon set, keys and words in mono bold, colour only for a state", () => {
     // ⌃ ⌥ ⇧ are icons now, not font glyphs; ⇧Tab leads with the shift icon
     expect(keys).toMatch(/id: "ctrl",[^\n]*icon: "control"/);
     expect(keys).toMatch(/id: "alt",[^\n]*icon: "option"/);
     expect(keys).toMatch(/id: "shift",[^\n]*icon: "shift"/);
     expect(keys).toMatch(/id: "shift\+tab",[^\n]*lead: "shift"/);
-    expect(row).toContain('<Icon name={def.icon} size={18} weight="medium" color={fg} />');
-    expect(row).toContain("label: { fontFamily: monoMedium, fontSize: 13,");
-    expect(row).toContain("word: { fontFamily: ui(500), fontSize: 12 }");
+    expect(row).toContain('<Icon name={def.icon} size={keyIconSize(def.icon)} weight="medium" color={fg} />');
+    expect(row).toContain('Platform.OS !== "ios" ? 18 : icon === "control" ? 12 : 14');
+    // the boards' JetBrains Mono Bold 14, the word Paste too
+    expect(row).toContain("label: { fontFamily: monoBold, fontSize: 14 },");
+    expect(row).toContain("word: { fontFamily: monoBold, fontSize: 14 }");
     expect(row).toContain("keyActive: { backgroundColor: colors.accent, borderColor: colors.accent }");
     // the system Paste takes the key's ground instead of drawing a black circle: the theme's,
     // handed in by the key row (Dark Default's only when none is)
     expect(paste).toContain("config.cornerStyle = .fixed");
+    // the key says "Paste" (the Keys boards), the Attach row its icon and the word
+    expect(paste).toContain("config.displayMode = labelled ? .iconAndLabel : .labelOnly");
     expect(paste).toContain("config.baseBackgroundColor = ground ?? keyGround");
     expect(row).toContain("ground={colors.surface} ink={colors.text}");
     // the Attach sheet's Paste row: the list's ground and the accent of its sibling rows' icons
     expect(paste).toContain("config.baseBackgroundColor = ground ?? rowGround");
     expect(paste).toContain("config.baseForegroundColor = ink ?? accent");
-    expect(src("src/app/attach.tsx")).toMatch(/<SystemPasteButton\s+labelled\s+ground=\{colors\.bg\}\s+ink=\{colors\.accent\}/);
+    // the Attach sheet's Paste row: the word alone, on the card's ground in the row's text colour
+    expect(src("src/app/attach.tsx")).toMatch(/<SystemPasteButton\s+ground=\{colors\.surface\}\s+ink=\{colors\.text\}/);
     expect(src("modules/rift-keys/ios/RiftPasteModule.swift")).toContain('Prop("ground")');
   });
   it("never scrolls: two rows of keys, so the screen above keeps its size", () => {

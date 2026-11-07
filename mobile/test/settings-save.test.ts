@@ -32,6 +32,7 @@ function harness() {
         states[index] = typeof next === "function" ? next(states[index]) : next;
       }];
     },
+    useRef: (initial: unknown) => ({ current: initial }),
   };
   let source = readFileSync(new URL("../src/app/settings.tsx", import.meta.url), "utf8");
   if (process.env.RIFT_SETTINGS_NAME_NEGATIVE_CONTROL) {
@@ -53,7 +54,7 @@ function harness() {
     module, exports: module.exports, React: react,
     require: (name: string) => {
       if (name === "react") return react;
-      if (name === "react-native") return { TextInput: "TextInput", Text: "Text", View: "View", StyleSheet: { create: (s: unknown) => s } };
+      if (name === "react-native") return { TextInput: "TextInput", Text: "Text", View: "View", Pressable: "Pressable", StyleSheet: { create: (s: unknown) => s } };
       if (name === "@/runtime") return { fleet: { updateSettings } };
       if (name === "@/ui/theme") return themeStub;
       return leaves;

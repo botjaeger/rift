@@ -13,7 +13,6 @@ import {
   dockerTitle,
   elapsedBody,
   fitChips,
-  folderName,
   isPrUrl,
   moreSpoken,
   moreWidth,
@@ -64,15 +63,17 @@ describe("the desktop's chips on the phone", () => {
     expect(items.map((c) => c.name)).toEqual(["Folder", "Branch", "Docker", "User", "Time on tab"]);
   });
 
-  it("draws the short value, with the full one for the sheet", () => {
+  it("draws the short value, with the full one for the sheet; the folder as its whole path (the New Blocks board)", () => {
     const [cwd, branch] = chipItems(pane(chips), null, ON);
-    expect(cwd!.short.map((p) => p.text)).toEqual(["flow"]);
+    expect(cwd!.short.map((p) => p.text)).toEqual(["~/xxx/flow"]);
     expect(cwd!.full.map((p) => p.text)).toEqual(["~/xxx/flow"]);
     expect(branch!.short.map((p) => p.text)).toEqual(["release/3.16.0", "•"]);
   });
 
   it("styles each part by its tone in the app's palette (the desktop's dim / muted are this palette's textMuted / textDim)", () => {
-    const [, branch, docker] = chipItems(pane(chips), null, ON);
+    const [cwd, branch, docker] = chipItems(pane(chips), null, ON);
+    // the folder's glyph is the accent whatever tone the desktop gives it (the New Blocks board)
+    expect(cwd!.iconColor).toBe("accent");
     expect(branch!.iconColor).toBe("success");
     expect(branch!.short.map((p) => p.color)).toEqual(["text", "textDim"]);
     expect(docker!.iconColor).toBe("accent");
@@ -132,7 +133,7 @@ describe("a desktop without prompt_chips", () => {
   it("falls back to the folder, the branch and the changes, styled like the desktop's chips", () => {
     const items = chipItems(pane(undefined, { git }), null, old);
     expect(items.map((c) => c.id)).toEqual(["cwd", "git_branch", "git_diff"]);
-    expect(items.map((c) => c.short.map((p) => p.text).join(" "))).toEqual(["flow", "release/3.16.0 •", "102 +2.1k −970"]);
+    expect(items.map((c) => c.short.map((p) => p.text).join(" "))).toEqual(["~/xxx/flow", "release/3.16.0 •", "102 +2.1k −970"]);
     expect(items[0]!.full[0]!.text).toBe("~/xxx/flow");
     expect(items[1]!.full.map((p) => p.text)).toEqual(["release/3.16.0", "↑2 •"]);
     expect(items[2]!.short[1]!.color).toBe("success");
@@ -158,9 +159,6 @@ describe("a desktop without prompt_chips", () => {
 describe("short values", () => {
   it("compacts line counts", () => {
     expect([970, 999, 1000, 2086, 9999, 10_000, 12_400].map(compact)).toEqual(["970", "999", "1.0k", "2.1k", "10.0k", "10k", "12k"]);
-  });
-  it("names a folder by its last component", () => {
-    expect([folderName("~/xxx/flow"), folderName("~"), folderName("/"), folderName("/usr/")]).toEqual(["flow", "~", "/", "usr"]);
   });
 });
 

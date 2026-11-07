@@ -2,12 +2,11 @@ import { useRouter } from "expo-router";
 import { useCallback, useEffect, type ReactNode } from "react";
 import { Platform, Pressable, Text, View } from "react-native";
 import { Icon } from "./Icon";
-import { mono, TOUCH, ui, makeStyles, useColors } from "./theme";
+import { mono, tint, ui, makeStyles, useColors } from "./theme";
 
 /**
  * The one sheet header (the Standard board): the grabber, the title (a header for screen
- * readers), a subtitle under it and the round ✕, always. iOS draws the grabber itself
- * (`sheetGrabberVisible`); Android and the web get this one. On the web, where a sheet is a plain
+ * readers), a subtitle under it and the round ✕, always. On the web, where a sheet is a plain
  * page, Escape closes it too. `onClose` defaults to Back (Portals when there is nothing behind).
  */
 export function SheetHeader({
@@ -19,7 +18,6 @@ export function SheetHeader({
   accessory,
   onClose,
   closeLabel = "Close",
-  docked,
 }: {
   title: string;
   /** Text, or Text runs (Changes' "+12 −3" in their colours). */
@@ -34,8 +32,6 @@ export function SheetHeader({
   onClose?: () => void;
   /** What the ✕ says when it does not close (a question's ✕ folds it). */
   closeLabel?: string;
-  /** In a card docked in a page, not a native sheet: iOS draws no grabber there, so this one does. */
-  docked?: boolean;
 }) {
   const colors = useColors();
   const styles = useStyles();
@@ -58,8 +54,9 @@ export function SheetHeader({
   }, [close]);
   return (
     <View>
-      {/* iOS draws the grabber over this room */}
-      {Platform.OS === "ios" && !docked ? <View style={styles.grabberRoom} /> : <View style={styles.grabber} importantForAccessibility="no" accessibilityElementsHidden />}
+      {/* the boards' 36 × 5 grabber, drawn here on every platform: the system's (`sheetGrabberVisible`) is off, iOS 27 draws a wider one */}
+      <View style={styles.grabber} importantForAccessibility="no" accessibilityElementsHidden />
+
       <View style={styles.row}>
         <View style={styles.titles}>
           <Text style={[styles.title, titleMono && styles.titleMono]} numberOfLines={1} ellipsizeMode={titleMono ? "head" : "tail"} accessibilityRole="header">
@@ -76,10 +73,10 @@ export function SheetHeader({
           ) : null}
         </View>
         {accessory}
-        <Pressable accessibilityRole="button" accessibilityLabel={closeLabel} onPress={close} style={({ pressed }) => [styles.closeSlot, pressed && styles.pressed]}>
-          <View style={styles.close}>
-            <Icon name="close" size={15} color={colors.text} />
-          </View>
+        {/* the 36 pt ✕, 44 to the touch */}
+        <Pressable accessibilityRole="button" accessibilityLabel={closeLabel} onPress={close} hitSlop={4} style={({ pressed }) => [styles.close, pressed && styles.pressed]}>
+          {/* the boards' ✕: a 7 pt mark in the 36 pt circle */}
+          <Icon name="close" size={10} color={colors.text} />
         </Pressable>
       </View>
     </View>
@@ -87,17 +84,14 @@ export function SheetHeader({
 }
 
 const useStyles = makeStyles((colors) => ({
-  grabber: { alignSelf: "center", width: 36, height: 5, borderRadius: 3, marginTop: 8, backgroundColor: colors.switchOff },
-  grabberRoom: { height: 13 },
-  // the board: 10 pt over, 14 under, 18 pt in on the left; the ✕'s 44 pt slot sits 8 pt from the edge
-  row: { flexDirection: "row", alignItems: "center", gap: 8, paddingTop: 6, paddingBottom: 10, paddingLeft: 18, paddingRight: 8 },
+  grabber: { alignSelf: "center", width: 36, height: 5, borderRadius: 3, marginTop: 8, backgroundColor: tint(colors.textBright, 0x33) },
+  // the board: 10 pt over, 14 under, 18 pt in on the left, 14 on the right, 12 between
+  row: { flexDirection: "row", alignItems: "center", gap: 12, paddingTop: 10, paddingBottom: 14, paddingLeft: 18, paddingRight: 14 },
   titles: { flex: 1, minWidth: 0 },
   title: { fontFamily: ui(600), color: colors.textBright, fontSize: 18, lineHeight: 22 },
   titleMono: { fontFamily: mono, fontSize: 17 },
   subtitle: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13, lineHeight: 17 },
-  subtitleMono: { fontFamily: mono, fontSize: 12 },
-  // the 36 pt round ✕ in its 44 pt slot
-  closeSlot: { width: TOUCH, height: TOUCH, alignItems: "center", justifyContent: "center" },
+  subtitleMono: { fontFamily: mono, fontSize: 13 },
   close: { width: 36, height: 36, borderRadius: 18, backgroundColor: colors.glass, borderWidth: 1, borderColor: colors.glassRim, alignItems: "center", justifyContent: "center" },
   pressed: { opacity: 0.6 },
 }));

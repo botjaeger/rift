@@ -92,19 +92,30 @@ describe("the command line's order", () => {
     expect(i, s).toBeGreaterThan(0);
     return i;
   };
-  it("context, then +, ⌃ and the field on one line, then the keys, then the completions", () => {
-    expect(pos("<ChipRow")).toBeLessThan(pos("styles.inputRow"));
+  it("context, then the completions, then +, ⌃ and the field on one line, then the keys (the New Blocks board)", () => {
+    expect(pos("<ChipRow")).toBeLessThan(pos("{completions}"));
+    expect(pos("{completions}")).toBeLessThan(pos("styles.inputRow"));
     expect(pos('accessibilityLabel="Attach"')).toBeLessThan(pos('accessibilityLabel="Control keys"'));
     expect(pos('accessibilityLabel="Control keys"')).toBeLessThan(pos("<TextInput"));
     expect(pos("<TextInput")).toBeLessThan(pos("<ControlRow"));
-    expect(pos("<ControlRow")).toBeLessThan(pos("{completions}"));
+  });
+  it("draws the board's metrics: 44 pt glass rounds, the 46 pt field, mono 15/20, the 34 pt run button", () => {
+    expect(source).toMatch(/round: \{\s*width: TOUCH,\s*height: TOUCH,[\s\S]*?borderColor: colors\.borderStrong,\s*backgroundColor: colors\.glass,/);
+    expect(source).toMatch(/field: \{[\s\S]*?minHeight: TOUCH \+ 2,[\s\S]*?paddingLeft: 14,\s*paddingRight: 5,[\s\S]*?backgroundColor: colors\.bg,/);
+    expect(source).toContain("fontFamily: mono, fontSize: 15, lineHeight: 20");
+    expect(source).toContain("send: { width: 34, height: 34,");
+    // the first completion bright, the others in the text colour, whole (no typed / rest split)
+    expect(source).toContain("<Text style={[styles.chipText, first && styles.firstText]} numberOfLines={1}>");
   });
   it("⌃ shows the keys and says whether they show; no ⌨ beside the field", () => {
-    const keys = source.slice(at('accessibilityLabel="Control keys"') - 100, at('<Icon name="control"'));
+    const keys = source.slice(at('accessibilityLabel="Control keys"') - 100, at('<Icon name={keys ? "chevronDown" : "control"}'));
     expect(keys).toContain("accessibilityState={{ expanded: keys, disabled: waiting }}");
     expect(keys).toContain("onPress={() => setKeys((k) => !k)}");
     expect(view).not.toContain('accessibilityLabel="Keys"');
     expect(view).not.toContain('<Icon name="keyboard"');
+  });
+  it("⌃ turns to ⌄ while the keys show: it folds them away", () => {
+    expect(source).toContain('<Icon name={keys ? "chevronDown" : "control"}');
   });
   it("no Stop button on the command line, running or not", () => {
     expect(source).not.toContain("Stop ⌃C");
@@ -112,7 +123,7 @@ describe("the command line's order", () => {
   });
   it("an empty field says Command, in the command's mono", () => {
     expect(source).toContain(': "Command"');
-    expect(source).toContain("inputEmpty: { height: 36 },");
+    expect(source).toContain("inputEmpty: { height: TOUCH },");
   });
 });
 
@@ -135,7 +146,9 @@ describe("context you can tap", () => {
   it("the timer is plain text after the chips, still opening its card", () => {
     const { tree, onOpen } = draw([chip("cwd", "project1", "dirs"), chip("elapsed", "2m", "elapsed"), chip("git_branch", "main", "branches")]);
     const timer = findAll(tree, (n) => n.type === "Pressable" && n.props.accessibilityLabel === "elapsed: 2m")[0]!;
-    expect(textOf(timer)).toBe("· 2m");
+    // Time on tab reads "last 2m" (the New Blocks board); the clock and the date as they are
+    expect(textOf(timer)).toBe("· last 2m");
+    expect(promptChips.timerText(chip("time24", "09:41", null))).toBe("09:41");
     // no chip's border or fill
     expect(flat(timer.props.style).borderWidth).toBeUndefined();
     (timer.props.onPress as () => void)();

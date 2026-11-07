@@ -17,7 +17,7 @@ export default function ChangelogScreen() {
   return (
     <>
       <PageHeader
-        title="What’s new"
+        title="What's new"
         back={() => (router.canGoBack() ? router.back() : router.replace("/settings"))}
         backLabel="Back"
       />
@@ -30,5 +30,6 @@ export default function ChangelogScreen() {
 
 const useStyles = makeStyles((colors) => ({
   fill: { flex: 1, backgroundColor: colors.bg },
-  content: { paddingHorizontal: 20, paddingTop: 16, maxWidth: 720, width: "100%", alignSelf: "center" },
+  // the board: 8 pt over the first release, 18 pt in
+  content: { paddingHorizontal: 18, paddingTop: 8, maxWidth: 720, width: "100%", alignSelf: "center" },
 }));

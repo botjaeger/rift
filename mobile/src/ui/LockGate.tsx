@@ -75,7 +75,8 @@ function LockScreen({ covered }: { covered: boolean }) {
   return (
     <ScrollView
       style={styles.lock}
-      contentContainerStyle={[styles.lockContent, { paddingTop: insets.top + 24, paddingBottom: insets.bottom + 24 }]}
+      // the same room over and under, so the mark and its lines sit in the middle of the screen (the board)
+      contentContainerStyle={[styles.lockContent, { paddingVertical: Math.max(insets.top, insets.bottom) + 24 }]}
       accessibilityViewIsModal
     >
       {/* the mark, one line, one button */}
@@ -102,8 +103,9 @@ const useStyles = makeStyles((colors) => ({
   fill: { flex: 1 },
   cover: { ...StyleSheet.absoluteFill, backgroundColor: colors.bg },
   lock: { ...StyleSheet.absoluteFill, backgroundColor: colors.bg },
-  lockContent: { flexGrow: 1, justifyContent: "center", padding: 24, gap: 16, maxWidth: 480, width: "100%", alignSelf: "center" },
-  mark: { alignItems: "center", marginBottom: 8 },
-  title: { fontFamily: ui(600), color: colors.textBright, fontSize: 22, textAlign: "center" },
-  text: { fontFamily: ui(400), color: colors.textMuted, fontSize: 15, lineHeight: 21, textAlign: "center" },
+  // the New Pairing board: centred, 16 pt apart, Unlock hugging its label
+  lockContent: { flexGrow: 1, justifyContent: "center", alignItems: "center", padding: 24, gap: 16, maxWidth: 480, width: "100%", alignSelf: "center" },
+  mark: { alignItems: "center" },
+  title: { fontFamily: ui(600), color: colors.textBright, fontSize: 20, lineHeight: 26, textAlign: "center" },
+  text: { fontFamily: ui(400), color: colors.textMuted, fontSize: 14, lineHeight: 20, textAlign: "center" },
 }));

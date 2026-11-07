@@ -4,9 +4,12 @@
 // text_bright, text = text_ui, textMuted = text_dim, textDim = text_muted, accent, success,
 // error, warning, fg = fg (terminal text, block output), magenta = ANSI magenta. Derived:
 // indigo (the accent mixed half with magenta, as the desktop mixes it), borderStrong / glass /
-// glassRim / chipFill (text_bright at 14 / 8 / 12 / 4 %), floating (surface at 94 %), the
-// raised grounds (text_bright laid over bg: faint 6 %, switchOff 16 %, skeleton 12 %, raised
-// 13 % for the loading card, menu 15 % for menus and pickers, segmentOn 20 %), the tints
+// glassRim / rim / chipFill (text_bright at 14 / 8 / 12 / 24 / 4 %; rim outlines a secondary
+// button and an unchosen filter), placeholder (a field's empty text: text_muted), floating
+// (surface at 94 %), the raised grounds (text_bright laid over bg: faint 6 %, skeleton 12 %,
+// raised 13 % for the loading card, popover 14 % for the pane's ⋯ menu, menu 15 % for menus,
+// pickers and toasts, segmentOn 20 %), switchOff
+// (a switch's off track: text_bright at 12.5 %, over whatever it sits on), the tints
 // (a token at low alpha) and onAccent (the ground's colour as text on a filled accent, success,
 // warning or error ground). Every text colour is then held to 4.5:1 on each ground it is drawn
 // on (TEXT_ON, TINTED_TEXT): one that falls short is lifted toward the text colour (`text`,
@@ -36,6 +39,8 @@ export type ColorName =
   | "borderStrong"
   | "glass"
   | "glassRim"
+  | "rim"
+  | "placeholder"
   | "floating"
   | "camera"
   | "viewfinder"
@@ -44,6 +49,7 @@ export type ColorName =
   | "switchOff"
   | "raised"
   | "menu"
+  | "popover"
   | "segmentOn"
   | "skeleton"
   | "askGround";
@@ -55,6 +61,7 @@ export type TintName =
   | "errorBadge"
   | "chipFill"
   | "running"
+  | "selected"
   | "bellOn"
   | "diffAdded"
   | "diffRemoved"
@@ -79,6 +86,7 @@ export type Ground =
   | "chrome"
   | "surface"
   | "menu"
+  | "popover"
   | "raised"
   | "askGround"
   | "accent"
@@ -95,11 +103,15 @@ export type Ground =
  * the theme (CAMERA_TEXT).
  */
 export const TEXT_ON: Readonly<Record<Exclude<Ground, "camera">, readonly ColorName[]>> = {
-  bg: ["textBright", "text", "fg", "textMuted", "textDim", "accent", "success", "warning", "error", "magenta", "indigo"],
+  // the command field's placeholder too (the field is the page's ground)
+  bg: ["textBright", "text", "fg", "textMuted", "textDim", "placeholder", "accent", "success", "warning", "error", "magenta", "indigo"],
   chrome: ["textBright", "text", "textMuted", "textDim", "accent", "success", "warning", "error", "magenta", "indigo"],
-  surface: ["textBright", "text", "textMuted", "accent", "success", "warning", "error"],
+  // a field's placeholder too (the boards' grey, lifted to read where it falls short)
+  surface: ["textBright", "text", "textMuted", "placeholder", "accent", "success", "warning", "error"],
   // menus and key tips (Close pane and Close tab in the destructive red)
   menu: ["textBright", "textMuted", "warning", "error"],
+  // the pane's ⋯ menu (the New Blocks board's #28282a): its titles, hints and Close in red
+  popover: ["textBright", "text", "textMuted", "error"],
   // the pane's loading card
   raised: ["textBright", "text", "textMuted", "accent", "error"],
   // a folded question
@@ -115,13 +127,16 @@ export const TEXT_ON: Readonly<Record<Exclude<Ground, "camera">, readonly ColorN
 /** What a camera page (Pair a computer) draws on the camera's black, in the Dark Default palette. */
 export const CAMERA_TEXT: readonly ColorName[] = ["textBright", "text", "textMuted", "warning"];
 
+/** The Search output's match colour: the boards' gold in every theme (no theme token holds it). */
+const MATCH_GOLD = "#ffd700";
+
 /**
  * The mockups' tinted grounds (a token at low alpha over a card or page): the accent pills
  * ("On screen", a running pane's time, step numbers) and the badges of the Host board. The
  * mockups' `#19aad822` puts accent text at 4.34:1 on a surface, so the accent tint is `1a`
  * (4.58:1). TINTED_TEXT lists each text drawn on one; test/contrast.test.ts checks them.
  */
-const TINT_OF: Readonly<Record<TintName, readonly [ColorName, number]>> = {
+const TINT_OF: Readonly<Record<TintName, readonly [ColorName | typeof MATCH_GOLD, number]>> = {
   accentBadge: ["accent", 0x1a],
   successBadge: ["success", 0x14],
   warningBadge: ["warning", 0x1f],
@@ -130,6 +145,8 @@ const TINT_OF: Readonly<Record<TintName, readonly [ColorName, number]>> = {
   chipFill: ["textBright", 0x0a],
   /** The running block's ground (on bg). */
   running: ["accent", 0x14],
+  /** A list's current row (Tabs, Panes) and Portals' needs-you row: the New Lists and New Portals boards' `#19aad80f`. */
+  selected: ["accent", 0x0f],
   /** The bell that is on (on the running block's ground). */
   bellOn: ["accent", 0x33],
   /** A diff's added and removed lines (on the chrome reading pane), as the desktop review panel. */
@@ -138,8 +155,8 @@ const TINT_OF: Readonly<Record<TintName, readonly [ColorName, number]>> = {
   /** The answer page's context diff (the P2 Reply board), on the chrome box. */
   answerAdded: ["success", 0x1f],
   answerRemoved: ["error", 0x1f],
-  /** A Search output match in a block's command or output (the New Blocks board's `#ffd70055`). */
-  match: ["warning", 0x55],
+  /** A Search output match in a block's command or output: the New Blocks board's `#ffd70055`, in every theme. */
+  match: [MATCH_GOLD, 0x55],
 };
 
 /** Text on a tint over a ground; `under`: a second tint between them (a mark on the running card). */
@@ -153,13 +170,22 @@ export const TINTED_TEXT: readonly { fg: ColorName; tint: TintName; ground: "bg"
   // the Run sheet's first completion (surface) and its kind
   { fg: "textBright", tint: "accentBadge", ground: "surface" },
   { fg: "textMuted", tint: "accentBadge", ground: "surface" },
+  // the command line's first completion and its source (on the chrome)
+  { fg: "textBright", tint: "accentBadge", ground: "chrome" },
+  { fg: "textMuted", tint: "accentBadge", ground: "chrome" },
   { fg: "success", tint: "successBadge", ground: "surface" },
   { fg: "warning", tint: "warningBadge", ground: "surface" },
   { fg: "textBright", tint: "errorBadge", ground: "surface" },
   { fg: "textBright", tint: "running", ground: "bg" },
   { fg: "fg", tint: "running", ground: "bg" },
+  // the running card's latest line
+  { fg: "text", tint: "running", ground: "bg" },
   { fg: "accent", tint: "running", ground: "bg" },
   { fg: "success", tint: "running", ground: "bg" },
+  // a list's current row (on the page) and Portals' needs-you row (on its card): title, line, mark's time
+  ...(["textBright", "textMuted", "accent", "success", "warning", "error"] as const).flatMap((fg) =>
+    (["bg", "surface"] as const).map((ground) => ({ fg, tint: "selected" as const, ground })),
+  ),
   { fg: "fg", tint: "diffAdded", ground: "chrome" },
   { fg: "success", tint: "diffAdded", ground: "chrome" },
   { fg: "fg", tint: "diffRemoved", ground: "chrome" },
@@ -291,23 +317,28 @@ export function paletteFrom(theme: Theme): Palette {
     borderStrong: withAlpha(textBright, 0x24),
     glass: withAlpha(textBright, 0x14),
     glassRim: withAlpha(textBright, 0x1f),
+    rim: withAlpha(textBright, 0x3d),
+    placeholder: opaque(tok("text_muted"), bg),
     floating: withAlpha(surface, 0xf0),
     // the camera is black in every theme
     camera: "#000000",
     viewfinder: "#121212",
     selection: tok("selection"),
     faint: withAlpha(textBright, 0x0f),
-    switchOff: withAlpha(textBright, 0x29),
+    // the boards' #3a3a3c on a card (Dark Default #3a3a3a there); a veil, so it shows on a menu too
+    switchOff: withAlpha(textBright, 0x20),
     // Dark Default: #232323, #262626, #2b2b2b, #373737 (the boards' greys)
     skeleton: over(withAlpha(textBright, 0x1f), bg),
     raised: over(withAlpha(textBright, 0x22), bg),
     menu: over(withAlpha(textBright, 0x27), bg),
+    // the pane's ⋯ menu: Dark Default #282828 (the board's #28282a)
+    popover: over(withAlpha(textBright, 0x24), bg),
     segmentOn: over(withAlpha(textBright, 0x33), bg),
     // a question card's ground: the warning badge over the page (Dark Default #201808)
     askGround: over(withAlpha(opaque(tok("warning"), bg), 0x1f), bg),
   };
   const tints = Object.fromEntries(
-    Object.entries(TINT_OF).map(([name, [color, alpha]]) => [name, withAlpha(raw[color], alpha)]),
+    Object.entries(TINT_OF).map(([name, [color, alpha]]) => [name, withAlpha(color === MATCH_GOLD ? color : raw[color], alpha)]),
   ) as Record<TintName, string>;
   // every opaque ground each text colour is drawn on: plain grounds, then tints over theirs
   const grounds = new Map<ColorName, string[]>();

@@ -2,12 +2,11 @@ import { readFileSync, readdirSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { paneSummary, type RowContext } from "../src/now";
 import type { Pane } from "../src/protocol/types";
-import { codeSpans } from "../src/ui/format";
 import { stubColors } from "./helpers/themeStub";
 import { findAll, flat, load, render, textOf, uiDeps, type Node } from "./helpers/render";
 
 // The Standard board's shared parts (Button, FilterChip, Field, PageHeader, SheetHeader, the
-// list rows' densities, mono only for code), run as the app's own modules: props in, the
+// list rows' densities, a row's line in words), run as the app's own modules: props in, the
 // rendered labels, roles, variants and handlers out. Pixels stay device checks.
 
 const router = () => ({ back: vi.fn(), replace: vi.fn(), canGoBack: () => true });
@@ -35,7 +34,9 @@ describe("Button: Primary, Secondary, Text, Destructive; regular and small; one 
   it("draws each variant in its own colours", () => {
     expect(box({ variant: "primary" }).backgroundColor).toBe(stubColors.accent);
     expect(label({ variant: "primary" }).color).toBe(stubColors.onAccent);
-    expect(box({}).borderColor).toBe(stubColors.borderStrong);
+    // the boards' outline: #ffffff3d, not the field's #ffffff24
+    expect(box({}).borderColor).toBe(stubColors.rim);
+    expect(stubColors.rim).toBe("#ffffff3d");
     expect(label({}).color).toBe(stubColors.text);
     expect(box({ variant: "text" }).borderWidth).toBeUndefined();
     expect(label({ variant: "text" }).color).toBe(stubColors.accent);
@@ -44,12 +45,14 @@ describe("Button: Primary, Secondary, Text, Destructive; regular and small; one 
     expect(box({ variant: "destructive" }).borderColor).toBe(`${stubColors.error}66`);
     for (const v of ["primary", "secondary", "text", "destructive"]) expect(JSON.stringify([box({ variant: v }), label({ variant: v })])).not.toContain(stubColors.warning);
   });
-  it("has one radius in both sizes; small is 32 pt with a 44 pt hit area", () => {
+  it("has one radius in both sizes: 48 pt in Inter 600 16, small 34 pt in 600 13 with a 44 pt hit area", () => {
     expect(box({}).borderRadius).toBe(10);
     expect(box({ size: "small" }).borderRadius).toBe(10);
-    expect(box({}).minHeight).toBe(44);
-    expect(box({ size: "small" }).minHeight).toBe(32);
-    expect((draw({ size: "small" }) as Node).props.hitSlop).toEqual({ top: 6, bottom: 6 });
+    expect([box({}).minHeight, box({}).paddingHorizontal]).toEqual([48, 18]);
+    expect([box({ size: "small" }).minHeight, box({ size: "small" }).paddingHorizontal]).toEqual([34, 12]);
+    expect([label({}).fontFamily, label({}).fontSize]).toEqual(["ui", 16]);
+    expect([label({ size: "small" }).fontFamily, label({ size: "small" }).fontSize]).toEqual(["ui", 13]);
+    expect((draw({ size: "small" }) as Node).props.hitSlop).toEqual({ top: 5, bottom: 5 });
     expect((draw({}) as Node).props.hitSlop).toBeUndefined();
   });
   it("reports disabled, and a toggle's state", () => {
@@ -77,13 +80,13 @@ describe("FilterChip: one filter, the chosen one filled", () => {
     const off = flat(draw({ count: 2, selected: false }).props.style);
     expect(on.backgroundColor).toBe(stubColors.textBright);
     expect(off.backgroundColor).toBeUndefined();
-    expect(off.borderColor).toBe(stubColors.borderStrong);
-    expect([on.height, on.borderRadius]).toEqual([32, 16]);
+    expect(off.borderColor).toBe(stubColors.rim);
+    expect([on.height, on.borderRadius, on.paddingHorizontal]).toEqual([32, 16, 11]);
     expect(draw({ count: 2, selected: true }).props.accessibilityState).toEqual({ checked: true, disabled: false });
   });
 });
 
-describe("Field: 44 pt, radius 10, an icon, Inter, a clear button while it holds text", () => {
+describe("Field: 46 pt, radius 10, an icon, Inter, the accent rim while focused, a clear button while it holds text", () => {
   const { Field } = load("ui/Field.tsx", uiDeps("ios")) as { Field: (p: object) => unknown };
   const draw = (p: object) => render({ type: Field, props: { icon: "search", label: "Search tabs", value: "", onChangeText: () => {}, children: [], ...p } });
   it("names the field and draws words in Inter, placeholder included", () => {
@@ -92,9 +95,27 @@ describe("Field: 44 pt, radius 10, an icon, Inter, a clear button while it holds
     expect(input.props.accessibilityLabel).toBe("Search tabs");
     expect(input.props.placeholder).toBe("Search by name");
     expect(flat(input.props.style).fontFamily).toBe("ui");
+    expect(input.props.placeholderTextColor).toBe(stubColors.placeholder);
     expect(findAll(tree, (n) => n.type === "Icon")[0]!.props.name).toBe("search");
     const box = flat((tree as Node).props.style);
-    expect([box.height, box.borderRadius, box.backgroundColor]).toEqual([44, 10, stubColors.surface]);
+    expect([box.height, box.borderRadius, box.backgroundColor, box.borderColor]).toEqual([46, 10, stubColors.surface, stubColors.borderStrong]);
+    expect([box.paddingLeft, box.paddingRight]).toEqual([12, 8]);
+  });
+  it("draws its rim in the accent while it has focus, and still calls the caller's focus handlers", () => {
+    // one render: the focus flag comes from useState, so a field drawn focused shows the accent rim
+    const { Field: Focused } = load("ui/Field.tsx", uiDeps("ios"), (s) => s.replace("useState(false)", "useState(true)")) as { Field: (p: object) => unknown };
+    const focused = render({ type: Focused, props: { icon: "search", label: "Search tabs", value: "", onChangeText: () => {}, children: [] } }) as Node;
+    expect(flat(focused.props.style).borderColor).toBe(stubColors.accent);
+    const onFocus = vi.fn();
+    const onBlur = vi.fn();
+    const input = findAll(draw({ onFocus, onBlur }), (n) => n.type === "TextInput")[0]!;
+    (input.props.onFocus as (e: unknown) => void)("f");
+    (input.props.onBlur as (e: unknown) => void)("b");
+    expect([onFocus.mock.calls, onBlur.mock.calls]).toEqual([[["f"]], [["b"]]]);
+  });
+  it("draws Clear as a 16 pt round mark in a 28 pt button, 44 to the touch", () => {
+    const clear = one(draw({ value: "proj" }), "Clear");
+    expect([flat(clear.props.style).width, flat(clear.props.style).height, clear.props.hitSlop]).toEqual([28, 28, 8]);
   });
   it("offers Clear only with text, and Clear empties it", () => {
     expect(byLabel(draw({}), "Clear")).toHaveLength(0);
@@ -121,10 +142,11 @@ describe("PageHeader: ‹ Back (✕ only for a camera or a lock), a title, a sub
     expect(header.map(textOf)).toEqual(["Tabs"]);
     expect(textOf(tree)).toContain("studio-mac · 30 tabs");
   });
-  it("says Close on a camera page's ✕", () => {
-    const tree = draw({ back: () => {}, backIcon: "close" });
-    expect(byLabel(tree, "Close")).toHaveLength(1);
-    expect(byLabel(tree, "Back")).toHaveLength(0);
+  it("goes Back with ‹ on every page, the camera page too (the New Pairing board)", () => {
+    const tree = draw({ back: () => {} });
+    expect(byLabel(tree, "Back")).toHaveLength(1);
+    expect(byLabel(tree, "Close")).toHaveLength(0);
+    expect(readFileSync(new URL("../src/ui/Screen.tsx", import.meta.url), "utf8")).not.toContain("backIcon");
   });
   it("cuts a long title once, and draws its actions", () => {
     const tree = draw({ title: "customer-portal-migration-2026-q4", back: () => {}, right: { type: "Action", props: { children: [] } } });
@@ -146,11 +168,12 @@ describe("SheetHeader: grabber, title, subtitle, round ✕, always", () => {
       expect(one(tree, "Close").props.accessibilityRole).toBe("button");
     }
   });
-  it("draws its own grabber where the system draws none (iOS draws one)", () => {
+  it("draws the boards' 36 × 5 grabber on every platform (the system's is off: iOS 27 draws a wider one)", () => {
     const grabbers = (platform: "ios" | "android" | "web") => findAll(draw(platform, {}), (n) => flat(n.props.style).width === 36 && flat(n.props.style).height === 5);
-    expect(grabbers("ios")).toHaveLength(0);
-    expect(grabbers("android")).toHaveLength(1);
-    expect(grabbers("web")).toHaveLength(1);
+    for (const platform of ["ios", "android", "web"] as const) expect(grabbers(platform), platform).toHaveLength(1);
+    const layout = readFileSync(new URL("../src/app/_layout.tsx", import.meta.url), "utf8");
+    expect(layout).not.toContain("sheetGrabberVisible: true");
+    expect(layout.match(/sheetGrabberVisible: false/g)?.length).toBe(layout.match(/presentation: "formSheet"/g)?.length);
   });
   it("closes through onClose, else goes back", () => {
     const onClose = vi.fn();
@@ -168,14 +191,25 @@ describe("list rows: one row in two densities", () => {
     ROW_HEIGHT: Record<string, number>;
     NavRow: (p: object) => unknown;
   };
-  it("is regular (56 pt) with a line under the label, compact (44 pt) without", () => {
-    expect(rows.ROW_HEIGHT).toEqual({ regular: 56, compact: 44 });
+  it("is 68 pt with or without a line under the label (the boards' 52 and 8 over and under); compact (44 pt) only when asked", () => {
+    expect(rows.ROW_HEIGHT).toEqual({ regular: 68, compact: 44 });
     expect(rows.densityOf("Opens the camera")).toBe("regular");
-    expect(rows.densityOf(undefined)).toBe("compact");
-    expect(rows.densityOf(undefined, "regular")).toBe("regular");
-    const minHeight = (p: object) => flat((render({ type: rows.NavRow, props: { label: "What's New", onPress: () => {}, children: [], ...p } }) as Node).props.style).minHeight;
-    expect(minHeight({})).toBe(44);
-    expect(minHeight({ detail: "The changes in each version" })).toBe(56);
+    expect(rows.densityOf(undefined)).toBe("regular");
+    expect(rows.densityOf(undefined, "compact")).toBe("compact");
+    const style = (p: object) => flat((render({ type: rows.NavRow, props: { label: "What's New", onPress: () => {}, children: [], ...p } }) as Node).props.style);
+    expect(style({ first: true }).minHeight).toBe(68);
+    expect(style({ first: true, detail: "The changes in each version" }).minHeight).toBe(68);
+    // a row under a hairline keeps its 68 pt under it, as the boards draw the rule outside the row
+    expect([style({}).minHeight, style({}).borderTopWidth]).toEqual([69, 1]);
+    expect([style({}).paddingVertical, style({}).paddingHorizontal]).toEqual([8, 16]);
+  });
+  it("draws the label in the text colour, a value in 15/20 and the chevron in the muted grey", () => {
+    const tree = render({ type: rows.NavRow, props: { label: "Appearance", value: "Same as the computer", onPress: () => {}, children: [] } });
+    const text = (s: string) => flat(findAll(tree, (n) => n.type === "Text" && textOf(n) === s)[0]!.props.style);
+    expect(text("Appearance")).toMatchObject({ color: stubColors.text, fontSize: 16, lineHeight: 21 });
+    expect(stubColors.text).toBe("#e6e6e6");
+    expect(text("Same as the computer")).toMatchObject({ color: stubColors.textMuted, fontSize: 15, lineHeight: 20 });
+    expect(findAll(tree, (n) => n.type === "Icon")[0]!.props).toMatchObject({ name: "forward", size: 8, color: stubColors.textMuted });
   });
   it("draws a destructive row in the error red, without a chevron", () => {
     const tree = render({ type: rows.NavRow, props: { label: "Unpair this computer", destructive: true, onPress: () => {}, children: [] } });
@@ -208,42 +242,77 @@ describe("list rows: one row in two densities", () => {
   });
 });
 
-describe("mono only for code: a row's line in runs", () => {
-  it("draws only the command and path of a line in mono", () => {
-    expect(codeSpans("~/code · idle · echo one ✓", ["~/code", "echo one"])).toEqual([
-      { text: "~/code", code: true },
-      { text: " · idle · ", code: false },
-      { text: "echo one", code: true },
-      { text: " ✓", code: false },
-    ]);
+describe("the boards' switch, glass buttons, sheet header and page ground", () => {
+  const deps = () => uiDeps("ios", { "expo-router": { useRouter: router } });
+  const rows = load("ui/Rows.tsx", deps()) as { Toggle: (p: object) => unknown; SwitchRow: (p: object) => unknown; SettingsPage: (p: object) => unknown };
+  it("draws a 51 × 31 track with a round 27 pt knob 2 pt in: accent when on, the off veil when off", () => {
+    const track = (on: boolean) => render({ type: rows.Toggle, props: { on, children: [] } }) as Node;
+    for (const on of [true, false]) {
+      const t = track(on);
+      expect(flat(t.props.style)).toMatchObject({ width: 51, height: 31, borderRadius: 16, backgroundColor: on ? stubColors.accent : stubColors.switchOff });
+      const knob = flat((t.props.children[0] as Node).props.style);
+      expect(knob).toMatchObject({ width: 27, height: 27, borderRadius: 14, top: 2, ...(on ? { right: 2 } : { left: 2 }) });
+    }
   });
-  it("keeps a line of words whole, and takes the longest code at a place", () => {
-    expect(codeSpans("waiting for you · Allow edits?", [])).toEqual([{ text: "waiting for you · Allow edits?", code: false }]);
-    expect(codeSpans("npm run dev · running", ["npm", "npm run dev", null, ""])).toEqual([
-      { text: "npm run dev", code: true },
-      { text: " · running", code: false },
-    ]);
-    expect(codeSpans("", ["x"])).toEqual([]);
+  it("a switch row is one switch to a screen reader and draws the drawn switch, not the system's", () => {
+    const row = render({ type: rows.SwitchRow, props: { label: "App lock", detail: "Face ID", value: true, onChange: () => {}, children: [] } }) as Node;
+    expect([row.props.accessibilityRole, row.props.accessibilityState]).toEqual(["switch", { checked: true, disabled: false }]);
+    expect(findAll(row, (n) => n.type === "Switch")).toHaveLength(0);
+    expect(findAll(row, (n) => flat(n.props.style).width === 51 && flat(n.props.style).height === 31)).toHaveLength(1);
+    // the pane menu's toggle is the same switch
+    const menu = readFileSync(new URL("../src/app/host/[key]/pane/[id].tsx", import.meta.url), "utf8");
+    expect(menu).toContain("<Toggle on={on} />");
+    expect(menu).not.toMatch(/track: \{ width: 40/);
   });
-  it("a pane's summary says it in words, its command the only code, never a question", () => {
+  it("puts a settings page on the bg under the header's chrome, groups 18 pt apart, captions 4 pt in", () => {
+    const tree = render({ type: rows.SettingsPage, props: { title: "Settings", children: [] } }) as Node;
+    expect(flat(tree.props.style).backgroundColor).toBe(stubColors.bg);
+    const scroll = findAll(tree, (n) => n.type === "ScrollView")[0]!;
+    expect(flat(scroll.props.style).backgroundColor).toBe(stubColors.bg);
+    const body = flat((scroll.props.children[0] as Node).props.style);
+    expect([body.paddingTop, body.paddingHorizontal, body.gap]).toEqual([18, 16, 18]);
+    const header = findAll(tree, (n) => flat(n.props.style).borderBottomWidth === 1)[0]!;
+    expect(flat(header.props.style).backgroundColor).toBe(stubColors.chrome);
+    const { Group } = load("ui/Rows.tsx", deps()) as { Group: (p: object) => unknown };
+    const group = render({ type: Group, props: { title: "Computers", children: [] } }) as Node;
+    const caption = findAll(group, (n) => n.props.accessibilityRole === "header")[0]!;
+    expect(flat(caption.props.style).paddingHorizontal).toBe(4);
+    // the caption's own 4 pt only: no second indent from the group
+    expect(flat((group.props.children[0] as Node).props.style).paddingHorizontal).toBeUndefined();
+  });
+  it("draws the header's glass buttons 38 pt round, 44 to the touch", () => {
+    const { IconButton } = load("ui/Screen.tsx", uiDeps("ios")) as { IconButton: (p: object) => unknown };
+    const b = render({ type: IconButton, props: { glass: true, icon: "back", label: "Back", onPress: () => {}, children: [] } }) as Node;
+    expect(flat(b.props.style)).toMatchObject({ width: 38, height: 38, borderRadius: 19, backgroundColor: stubColors.glass, borderColor: stubColors.glassRim });
+    expect(b.props.hitSlop).toBe(3);
+    // the boards' glyphs: ‹ at the default 18, + and the gear drawn smaller
+    const size = (icon: string) => findAll(render({ type: IconButton, props: { glass: true, icon, label: icon, onPress: () => {}, children: [] } }), (n) => n.type === "Icon")[0]!.props.size;
+    expect([size("back"), size("add"), size("settings")]).toEqual([undefined, 12, 16]);
+  });
+  it("lays the sheet header out as the boards: 10 over, 14 under, 18 / 14 in, a 36 pt ✕ 44 to the touch, a mono subtitle 13/17", () => {
+    const { SheetHeader } = load("ui/SheetHeader.tsx", uiDeps("android", { "expo-router": { useRouter: router } })) as { SheetHeader: (p: object) => unknown };
+    const tree = render({ type: SheetHeader, props: { title: "Change folder", subtitle: "~/code/project1", subtitleMono: true, children: [] } }) as Node;
+    const row = flat((tree.props.children[1] as Node).props.style);
+    expect([row.paddingTop, row.paddingBottom, row.paddingLeft, row.paddingRight, row.gap]).toEqual([10, 14, 18, 14, 12]);
+    const close = one(tree, "Close");
+    expect([flat(close.props.style).width, flat(close.props.style).height, close.props.hitSlop]).toEqual([36, 36, 4]);
+    expect(findAll(close, (n) => n.type === "Icon")[0]!.props).toMatchObject({ name: "close", size: 10 });
+    const sub = findAll(tree, (n) => n.type === "Text" && textOf(n) === "~/code/project1")[0]!;
+    expect(flat(sub.props.style)).toMatchObject({ fontFamily: "mono", fontSize: 13, lineHeight: 17 });
+    const grabber = findAll(tree, (n) => flat(n.props.style).width === 36 && flat(n.props.style).height === 5)[0]!;
+    expect(flat(grabber.props.style).backgroundColor).toBe("#ffffff33");
+  });
+});
+
+describe("a row's line says what a pane does, in words (the New Lists board: all Inter)", () => {
+  it("names the command it ran, failed at or runs, and the question it asks", () => {
     const pane = (extra: Partial<Pane>): Pane => ({ id: 1, active: false, cwd: null, job: null, last_command: null, last_exit: null, ...extra });
     const ctx: RowContext = { now: 0, multi: false, waitingSince: () => null, asked: [] };
-    const idle = paneSummary("h", pane({ cwd: "/tmp/project1", last_command: "echo one", last_exit: 0 }), ctx, new Map());
-    expect(idle.activity).toBe("Idle · last: echo one");
-    expect(codeSpans(idle.activity, idle.codes).filter((s) => s.code).map((s) => s.text)).toEqual(["echo one"]);
-    // nothing run yet: the folder, in mono
-    const fresh = paneSummary("h", pane({ cwd: "/tmp/project1" }), ctx, new Map());
-    expect(codeSpans(fresh.activity, fresh.codes)).toEqual([
-      { text: "Idle · ", code: false },
-      { text: "/tmp/project1", code: true },
-    ]);
-    const failed = paneSummary("h", pane({ last_command: "cargo test", last_exit: 101 }), ctx, new Map());
-    expect(codeSpans(failed.activity, failed.codes)).toEqual([
-      { text: "cargo test", code: true },
-      { text: " · failed with 101", code: false },
-    ]);
+    expect(paneSummary("h", pane({ cwd: "/tmp/project1", last_command: "echo one", last_exit: 0 }), ctx, new Map()).activity).toBe("Idle · last: echo one");
+    expect(paneSummary("h", pane({ cwd: "/tmp/project1" }), ctx, new Map()).activity).toBe("Idle · /tmp/project1");
+    expect(paneSummary("h", pane({ last_command: "cargo test", last_exit: 101 }), ctx, new Map()).activity).toBe("cargo test · failed with 101");
     const asking = paneSummary("h", pane({ last_command: "rm -rf build", waiting: { kind: "choice", prompt: "Run rm -rf build?", choices: ["Yes", "No"], context: [], numbered: false } as unknown as Pane["waiting"] }), ctx, new Map());
-    expect(asking.codes).toEqual([]);
+    expect(asking.activity).toBe("Waiting for you · Run rm -rf build?");
   });
 });
 
@@ -258,12 +327,14 @@ describe("the standard is wired into every page and sheet", () => {
     for (const r of routes) {
       const name = r.slice(4, -4);
       const text = src(r);
-      if (name === "connection") expect(src("ui/ConnectionSheet.tsx")).toContain("<SheetHeader");
-      else if (name === "new-tab" || name === "new-pane" || name === "attach") expect(text, r).toContain("<SheetFrame");
+      if (name === "connection") expect(src("ui/ConnectionSheet.tsx")).toContain("<SheetFrame");
+      else if (["new-tab", "new-pane", "attach", "block", "confirm", "whats-new"].includes(name)) expect(text, r).toContain("<SheetFrame");
+      // Change folder is a SheetFrame, the chips' other menus the header over one scroll view
+      else if (name === "chips") expect(text, r).toMatch(/<SheetFrame board="folder"[\s\S]*<SheetHeader/);
       else if (SHEETS.includes(name)) expect(text, r).toContain("<SheetHeader");
       else expect(text, r).toContain(PAGE_VIA[r] ? `<${PAGE_VIA[r]}` : "<PageHeader");
     }
-    expect(src("ui/NewSheet.tsx")).toContain("<SheetHeader");
+    expect(src("ui/SheetFrame.tsx")).toContain("<SheetHeader");
     expect(src("ui/Rows.tsx")).toContain("<PageHeader");
   });
   it("Tabs and Panes both go Back, top left; Diagnostics has the app's header, not the system's", () => {
@@ -273,9 +344,19 @@ describe("the standard is wired into every page and sheet", () => {
   });
   it("destructive actions are red, never the needs-you orange", () => {
     expect(src("app/host/[key]/pane/[id].tsx")).toContain("menuDestructive: { fontFamily: ui(400), color: colors.error");
-    expect(src("app/computer.tsx")).toMatch(/<NavRow[\s\S]*?destructive/);
+    expect(src("app/computer.tsx")).toMatch(/<Button\s+variant="destructive"/);
     expect(src("app/control-keys.tsx")).not.toContain("colors.warning");
     expect(src("ui/BlockCards.tsx")).not.toContain("colors.warning");
     expect(src("app/settings-ntfy.tsx")).toContain('variant="destructive"');
+  });
+  it("Paste link, Pair, Diagnostics and Keys sit on the bg under the header's chrome, as Settings does", () => {
+    for (const page of ["app/add.tsx", "app/pair.tsx", "app/diagnostics.tsx", "app/control-keys.tsx"]) {
+      expect(src(page), page).toContain("fill: { flex: 1, backgroundColor: colors.bg },");
+      expect(src(page), page).toContain("<PageHeader");
+    }
+  });
+  it("a selection draws in the theme's selection colour, in a block and on a program's screen", () => {
+    expect(src("ui/SelectableText.tsx")).toContain("selectionColor={colors.selection}");
+    expect(src("ui/TerminalView.tsx")).toContain('band: { position: "absolute", backgroundColor: colors.selection },');
   });
 });

@@ -40,7 +40,6 @@ export function TextSizeMenu({ last }: { last?: boolean }) {
           <Text style={styles.title}>Text size</Text>
           <Text style={styles.hint}>Pinch the screen, or here</Text>
         </View>
-        <Text style={styles.value}>{percent}</Text>
       </Pressable>
       {open ? (
         <View style={styles.controls}>
@@ -96,16 +95,15 @@ export function TextSizeMenu({ last }: { last?: boolean }) {
 
 const useStyles = makeStyles((colors) => ({
   // the menu's rows (the pane route's menuRow, menuText, menuTitle, menuHint)
-  row: { minHeight: 56, flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 14 },
+  row: { minHeight: 60, flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 14, paddingVertical: 6 },
   rule: { borderBottomWidth: 1, borderBottomColor: colors.hairline },
   pressed: { opacity: 0.7 },
   off: { opacity: 0.4 },
-  text: { flex: 1, gap: 2, paddingVertical: 8 },
-  title: { fontFamily: ui(400), color: colors.textBright, fontSize: 15 },
-  hint: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12 },
-  value: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13, fontVariant: ["tabular-nums"] },
+  text: { flex: 1 },
+  title: { fontFamily: ui(400), color: colors.text, fontSize: 15, lineHeight: 20 },
+  hint: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12, lineHeight: 16 },
   // under the row, lined up with its title: − size + then Reset
-  controls: { flexDirection: "row", alignItems: "center", gap: 10, paddingLeft: 46, paddingRight: 14, paddingBottom: 10 },
+  controls: { flexDirection: "row", alignItems: "center", gap: 10, paddingLeft: 44, paddingRight: 14, paddingBottom: 10 },
   stepper: { flexDirection: "row", alignItems: "center", gap: 8 },
   // the terminal view's zoom buttons (32 pt round, the hit slop makes 44)
   step: { width: 32, height: 32, borderRadius: 16, borderWidth: 1, borderColor: colors.borderStrong, alignItems: "center", justifyContent: "center" },

@@ -11,7 +11,8 @@ import { formatClock } from "./format";
 export const SLOW_MS = 15_000;
 
 export interface PaneStep {
-  mark: "✓" | "…" | "" | "✕";
+  /** The step's glyph (the New Blocks board): done ✓, current ◌, to do ○, failed ✕. */
+  mark: "✓" | "◌" | "○" | "✕";
   tone: "done" | "now" | "todo" | "bad";
   label: string;
   note: string;
@@ -53,25 +54,20 @@ export interface PaneLoadInput {
   heldSince: number | null;
 }
 
-/** "Opening “title”", or "Opening claude" for a coding agent's pane. */
+/** "Opening project1" (the tab's title, as the New Blocks board), or "Opening claude" for a coding agent's pane. */
 export function openingTitle(title: string | null, agent: string | null): string {
   if (agent) return `Opening ${agent}`;
-  return title ? `Opening “${title}”` : "Opening this pane";
+  return title ? `Opening ${title}` : "Opening this pane";
 }
 
 const step = (tone: PaneStep["tone"], label: string, note = ""): PaneStep => ({
   tone,
   label,
   note,
-  mark: tone === "done" ? "✓" : tone === "now" ? "…" : tone === "bad" ? "✕" : "",
+  mark: tone === "done" ? "✓" : tone === "now" ? "◌" : tone === "bad" ? "✕" : "○",
 });
 
 const viaPhrase = (conn: ConnState) => (conn.path?.kind === "relay" ? "through the relay" : "on this network");
-
-function latency(conn: ConnState): string {
-  const ms = conn.paths.find((p) => p.state === "ok")?.latencyMs;
-  return ms == null ? "" : ` · ${ms} ms`;
-}
 
 /** What the first step says while a path is being tried. */
 function reachNote(conn: ConnState): string {
@@ -117,13 +113,17 @@ export function paneLoad(i: PaneLoadInput): PaneLoad {
   const loadHint = i.view === "blocks" ? "Your blocks" : "Your screen";
 
   if (open) {
+    // the New Blocks board's wording: reached, the blocks loading, the screen still to come
+    const loading = i.view === "blocks" ? "Loading the pane’s blocks…" : "Loading the screen…";
     const steps = [
-      step("done", reach, `${conn.path?.kind === "relay" ? "Through the relay" : "On this network"}${latency(conn)}`),
-      i.paneKnown ? step("done", "Open this pane") : step("now", "Open this pane", "Waiting for the computer’s tab list"),
-      i.paneKnown ? step("now", loadLabel, i.view === "blocks" ? "Waiting for the computer to send them" : "Waiting for its next frame") : step("todo", loadLabel),
+      step("done", `Reached ${i.hostName} ${viaPhrase(conn)}`),
+      ...(i.paneKnown
+        ? [step("now", loading), ...(i.view === "blocks" ? [step("todo", "The screen")] : [])]
+        : [step("now", "Open this pane", "Waiting for the computer’s tab list"), step("todo", i.view === "blocks" ? "The pane’s blocks" : "The screen")]),
     ];
     return {
-      strip: { text: `Connected ${viaPhrase(conn)}${latency(conn)}`, tone: "quiet", busy: false, elapsed: "" },
+      // connected: no strip (the board), the card says what is left
+      strip: null,
       card: slow
         ? { title: "Taking longer than usual", steps, hint: "The computer is connected but has not sent this pane yet. This keeps trying.", actions: true }
         : { title: i.opening, steps, hint: null, actions: false },

@@ -46,7 +46,6 @@ export function matchesSearch(r: TabRow, q: string): boolean {
  * is the computer's.
  */
 export default function Switcher() {
-  const colors = useColors();
   const styles = useStyles();
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -167,6 +166,8 @@ export default function Switcher() {
       index={i}
       count={list.length}
       canDrag={movable && r.pane !== null && list.length > 1}
+      // the whole list shows its grips, a lone pinned tab's too (the New Lists board)
+      grip={movable && r.pane !== null}
       isHere={r.tab.panes.some((p) => p.id === here)}
       closeable={closeable}
       drag={reorder.drag}
@@ -181,7 +182,6 @@ export default function Switcher() {
       <PageHeader
         title="Tabs"
         subtitle={host ? `${host.record.name} · ${online ? `${rows.length} ${rows.length === 1 ? "tab" : "tabs"}` : "offline"}` : "Computer not found"}
-        dot={online ? colors.success : colors.textDim}
         back={close}
         // a view-only device has no way to open a tab
         right={operate ? <IconButton glass icon="add" label="New tab" disabled={!canOpen} onPress={() => router.push({ pathname: "/new-tab", params: { key } })} /> : null}
@@ -191,7 +191,7 @@ export default function Switcher() {
         <Field
           icon="search"
           label="Search tabs"
-          placeholder="Search by name, command or folder"
+          placeholder="Search tabs"
           value={query}
           onChangeText={setQuery}
           autoCapitalize="none"
@@ -231,7 +231,8 @@ export default function Switcher() {
         scrollEnabled={pinnedDrag.scrollEnabled && othersDrag.scrollEnabled}
         keyboardDismissMode="on-drag"
         keyboardShouldPersistTaps="handled"
-        contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 16) }}
+        // an empty filter's message centres in the room under the filters
+        contentContainerStyle={items.length === 0 ? styles.grow : { paddingBottom: Math.max(insets.bottom, 16) }}
         ListHeaderComponent={
           <>
             {toast}
@@ -251,7 +252,7 @@ export default function Switcher() {
                 {empty.title}
               </Text>
               <Text style={styles.empty}>{empty.line}</Text>
-              {filter !== "all" || query.trim() ? <Button label="Show all tabs" size="small" onPress={showAll} /> : null}
+              {filter !== "all" || query.trim() ? <Button label="Show all tabs" variant="text" onPress={showAll} /> : null}
             </View>
           ) : null
         }
@@ -299,6 +300,7 @@ interface TabsRowProps {
   index: number;
   count: number;
   canDrag: boolean;
+  grip: boolean;
   isHere: boolean;
   closeable: boolean;
   drag: Dragging;
@@ -308,7 +310,7 @@ interface TabsRowProps {
 
 // re-rendered only when what it draws changed: the page re-renders on every publish and clock tick
 const TabsRow = memo(
-  function TabsRow({ r, list, index, count, canDrag, isHere, closeable, drag, setDrag, acts }: TabsRowProps) {
+  function TabsRow({ r, list, index, count, canDrag, grip, isHere, closeable, drag, setDrag, acts }: TabsRowProps) {
     const colors = useColors();
     const styles = useStyles();
     const latest = () => acts.current.row(r.key) ?? r;
@@ -317,7 +319,7 @@ const TabsRow = memo(
         {(handle) => (
           <ListRow
             handle={handle}
-            movable={canDrag}
+            movable={grip}
             title={r.title}
             marks={
               <>
@@ -330,7 +332,6 @@ const TabsRow = memo(
               </>
             }
             line={r.paneLine}
-            lineCodes={r.codes}
             kind={r.kind}
             when={r.when}
             label={[r.title, isHere ? "current tab" : null, r.tab.pinned ? "pinned" : null, r.state, r.line].filter(Boolean).join(", ")}
@@ -348,6 +349,7 @@ const TabsRow = memo(
     a.index === b.index &&
     a.count === b.count &&
     a.canDrag === b.canDrag &&
+    a.grip === b.grip &&
     a.isHere === b.isHere &&
     a.closeable === b.closeable &&
     a.drag === b.drag &&
@@ -362,15 +364,17 @@ const useStyles = makeStyles((colors) => ({
   hidden: { opacity: 0 },
   pad: { paddingHorizontal: SIDE },
   // the search field and the filters, on the header's chrome
-  tools: { gap: 10, paddingTop: 12, paddingBottom: 12, paddingHorizontal: 14, backgroundColor: colors.chrome, borderBottomWidth: 1, borderBottomColor: colors.hairline },
+  // the field right under the header's hairline, the filters 10 under it (the New Lists board)
+  tools: { gap: 10, paddingBottom: 12, paddingHorizontal: 14, backgroundColor: colors.chrome, borderBottomWidth: 1, borderBottomColor: colors.hairline },
   filters: { gap: 6 },
-  cap: { fontFamily: ui(500), color: colors.textMuted, fontSize: 12, letterSpacing: 0.5, textTransform: "uppercase", paddingHorizontal: SIDE + 4, paddingTop: 18, paddingBottom: 8, borderBottomWidth: 1, borderBottomColor: colors.hairline },
+  cap: { fontFamily: ui(500), color: colors.textMuted, fontSize: 12, lineHeight: 16, letterSpacing: 0.5, textTransform: "uppercase", paddingHorizontal: SIDE + 4, paddingTop: 18, paddingBottom: 8 },
   cell: { zIndex: 0 },
   liftedCell: { zIndex: 2, elevation: 6 },
-  panes: { borderRadius: 6, borderWidth: 1, borderColor: colors.borderStrong, paddingHorizontal: 5, paddingVertical: 1 },
-  panesText: { fontFamily: ui(500), color: colors.textMuted, fontSize: 11 },
-  emptyBox: { alignItems: "center", gap: 8, paddingVertical: 32, paddingHorizontal: SIDE },
-  emptyTitle: { fontFamily: ui(600), color: colors.textBright, fontSize: 16, textAlign: "center" },
-  empty: { fontFamily: ui(400), color: colors.textMuted, fontSize: 14, lineHeight: 20, textAlign: "center", marginBottom: 4 },
-  note: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13, lineHeight: 18, paddingVertical: 16, paddingHorizontal: SIDE, textAlign: "center" },
+  panes: { borderRadius: 8, borderWidth: 1, borderColor: colors.hairline, paddingHorizontal: 6 },
+  panesText: { fontFamily: ui(500), color: colors.textMuted, fontSize: 11, lineHeight: 16 },
+  grow: { flexGrow: 1 },
+  emptyBox: { flex: 1, alignItems: "center", justifyContent: "center", gap: 8, padding: 24 },
+  emptyTitle: { fontFamily: ui(600), color: colors.textBright, fontSize: 17, lineHeight: 22, textAlign: "center" },
+  empty: { fontFamily: ui(400), color: colors.textMuted, fontSize: 14, lineHeight: 20, textAlign: "center" },
+  note: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13, lineHeight: 18, paddingVertical: 10, paddingHorizontal: SIDE },
 }));

@@ -54,7 +54,9 @@ describe("the selection bar", () => {
     expect(prompt.props.disabled).toBe(true);
     expect(prompt.props.accessibilityState).toEqual({ disabled: true });
     expect(prompt.props.accessibilityHint).toBe("This device cannot type here.");
-    expect(textOf(tree)).toContain("All selects the whole screen. This device cannot type here.");
+    // the board's one line under the keys; the reason is the disabled key's hint, not more words there
+    expect(textOf(tree)).toContain("All selects the whole screen.");
+    expect(textOf(tree)).not.toContain("This device cannot type here.");
     const on = draw({ of: "block", onPrompt: () => {}, promptOff: "x" }).tree;
     expect(keys(on).find((n) => n.props.accessibilityLabel === "To prompt")!.props.disabled).toBe(false);
     expect(textOf(on)).not.toContain(" x");

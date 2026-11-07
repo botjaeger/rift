@@ -9,6 +9,7 @@ import { fleet, useApp } from "@/runtime";
 import { Button } from "@/ui/Button";
 import { Icon } from "@/ui/Icon";
 import { ErrorText, WarningText } from "@/ui/Notice";
+import { ROW_HEIGHT } from "@/ui/Rows";
 import { PageHeader, SectionTitle } from "@/ui/Screen";
 import { mono, radius, ui, makeStyles, useColors } from "@/ui/theme";
 
@@ -81,7 +82,7 @@ export default function PairScreen() {
         <View style={styles.body}>
           <Text style={styles.text}>This link is not a valid Rift pairing link. Create a new code on your computer and try again.</Text>
         </View>
-        <View style={[styles.actions, { paddingBottom: Math.max(40, insets.bottom + 6) }]}>
+        <View style={[styles.actions, { paddingBottom: Math.max(16, insets.bottom) }]}>
           <Button label="Scan again" variant="primary" style={styles.flex} onPress={() => router.replace("/scan")} />
         </View>
       </View>
@@ -122,7 +123,7 @@ export default function PairScreen() {
               : "This phone will see its tabs and panes. It cannot run commands or send keys."}
           </Text>
         </View>
-        <SectionTitle>From the code</SectionTitle>
+        <SectionTitle style={styles.caption}>From the code</SectionTitle>
         <View style={styles.card}>
           <Detail label="Computer" first>
             {link.name}
@@ -138,20 +139,22 @@ export default function PairScreen() {
             {keyGroups(link.key)}
           </Detail>
         </View>
-        <Text style={styles.note}>Check the key matches the one on your computer’s screen.</Text>
-        {link.relay ? (
-          <Text style={styles.note}>Away from this network the phone connects through the relay, which forwards only encrypted traffic.</Text>
-        ) : null}
-        {already ? <WarningText>This computer is already paired. Pairing again replaces it.</WarningText> : null}
-        {phase.t === "failed" ? <ErrorText>{phase.message}</ErrorText> : null}
-        {phase.t === "pairing" ? (
-          <View style={styles.progress} accessible accessibilityLiveRegion="polite" accessibilityLabel={`Connecting to ${link.name}`}>
-            <ActivityIndicator color={colors.accent} />
-            <Text style={styles.text}>Connecting to {link.name}…</Text>
-          </View>
-        ) : null}
+        <View style={styles.notes}>
+          <Text style={styles.note}>Check the key matches the one on your computer&apos;s screen.</Text>
+          {link.relay ? (
+            <Text style={styles.note}>Away from this network the phone connects through the relay, which forwards only encrypted traffic.</Text>
+          ) : null}
+          {already ? <WarningText>This computer is already paired. Pairing again replaces it.</WarningText> : null}
+          {phase.t === "failed" ? <ErrorText>{phase.message}</ErrorText> : null}
+          {phase.t === "pairing" ? (
+            <View style={styles.progress} accessible accessibilityLiveRegion="polite" accessibilityLabel={`Connecting to ${link.name}`}>
+              <ActivityIndicator color={colors.accent} />
+              <Text style={styles.text}>Connecting to {link.name}…</Text>
+            </View>
+          ) : null}
+        </View>
       </ScrollView>
-      <View style={[styles.actions, { paddingBottom: Math.max(40, insets.bottom + 6) }]}>
+      <View style={[styles.actions, { paddingBottom: Math.max(16, insets.bottom) }]}>
         <Button label="Cancel" style={styles.cancel} onPress={cancel} />
         <Button
           label={phase.t === "failed" ? "Try again" : "Pair"}
@@ -166,9 +169,11 @@ export default function PairScreen() {
 }
 
 const useStyles = makeStyles((colors) => ({
-  fill: { flex: 1, backgroundColor: colors.chrome },
+  fill: { flex: 1, backgroundColor: colors.bg },
   flex: { flex: 1 },
-  body: { paddingTop: 20, paddingHorizontal: 16, gap: 18, maxWidth: 560, width: "100%", alignSelf: "center" },
+  // the New Pairing board: 16 pt under the header, the caption 18 over the card and 8 above it, the
+  // footnote 10 under it, 4 in from the card's edge
+  body: { paddingTop: 16, paddingHorizontal: 16, paddingBottom: 16, maxWidth: 560, width: "100%", alignSelf: "center" },
   tile: {
     width: 56,
     height: 56,
@@ -179,8 +184,10 @@ const useStyles = makeStyles((colors) => ({
     alignItems: "center",
     justifyContent: "center",
   },
-  intro: { flexDirection: "row", alignItems: "center", gap: 14 },
-  text: { fontFamily: ui(400), color: colors.textMuted, fontSize: 15, lineHeight: 22 },
+  intro: { flexDirection: "row", alignItems: "center", gap: 12 },
+  caption: { paddingTop: 18, paddingBottom: 8 },
+  text: { fontFamily: ui(400), color: colors.textMuted, fontSize: 14, lineHeight: 20 },
+  notes: { paddingTop: 10, paddingHorizontal: 4, gap: 10 },
   note: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13, lineHeight: 19 },
   card: {
     backgroundColor: colors.surface,
@@ -190,13 +197,16 @@ const useStyles = makeStyles((colors) => ({
     overflow: "hidden",
   },
   // the standard's value row (the Pair confirmation board): the label left, its value right
-  detail: { flexDirection: "row", alignItems: "center", minHeight: 48, paddingHorizontal: 14, gap: 12 },
-  divider: { borderTopWidth: 1, borderTopColor: colors.hairline },
-  dt: { fontFamily: ui(400), paddingVertical: 12, color: colors.text, fontSize: 15 },
-  dd: { fontFamily: ui(400), flex: 1, paddingVertical: 12, color: colors.textMuted, fontSize: 14, textAlign: "right" },
-  mono: { fontFamily: mono, fontSize: 12 },
+  // the board's 68 pt rows: label 16, value 15, the key mono 14 at full strength
+  detail: { flexDirection: "row", alignItems: "center", minHeight: ROW_HEIGHT.regular, paddingHorizontal: 16, paddingVertical: 8, gap: 12 },
+  // a hairline over a row adds its point, as the board draws it under the 68 pt row
+  divider: { borderTopWidth: 1, borderTopColor: colors.hairline, minHeight: ROW_HEIGHT.regular + 1 },
+  dt: { fontFamily: ui(400), color: colors.text, fontSize: 16, lineHeight: 21 },
+  dd: { fontFamily: ui(400), flex: 1, color: colors.textMuted, fontSize: 15, lineHeight: 20, textAlign: "right" },
+  mono: { fontFamily: mono, color: colors.textBright, fontSize: 14 },
   progress: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 10 },
-  actions: { flexDirection: "row", gap: 10, paddingTop: 16, paddingHorizontal: 16 },
+  actions: { flexDirection: "row", gap: 8, paddingTop: 16, paddingHorizontal: 16 },
+  // equal halves (the board)
   cancel: { flex: 1 },
-  pair: { flex: 2 },
+  pair: { flex: 1 },
 }));

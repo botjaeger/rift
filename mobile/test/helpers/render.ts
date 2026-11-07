@@ -33,6 +33,8 @@ export function uiDeps(platform: "ios" | "android" | "web", extra: Record<string
     ScrollView: "ScrollView",
     Switch: "Switch",
     KeyboardAvoidingView: "KeyboardAvoidingView",
+    // the boards' phone (402 × 874): the sheets' heights (ui/sheet.ts)
+    useWindowDimensions: () => ({ width: 402, height: 874, scale: 3, fontScale: 1 }),
   };
   return {
     react,

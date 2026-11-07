@@ -1,11 +1,12 @@
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useState } from "react";
-import { Text } from "react-native";
+import { Text, View } from "react-native";
 import { canOperate } from "@/fleet";
 import { fleet, useApp } from "@/runtime";
 import { pairedText } from "@/ui/connStatus";
 import { osName } from "@/ui/format";
 import { ErrorText } from "@/ui/Notice";
+import { Button } from "@/ui/Button";
 import { CardBox, Group, NavRow, SettingsPage, SwitchRow, ValueRow } from "@/ui/Rows";
 import { placeWord, unpairFooter } from "@/ui/settingsText";
 import { ui, makeStyles } from "@/ui/theme";
@@ -14,7 +15,8 @@ import { useNow } from "@/ui/useNow";
 
 /**
  * Settings › a computer (the Settings board): its system and when it was paired under the name,
- * where it is, what this phone may do, its theme, its alerts; Unpair in the error red.
+ * where it is, what this phone may do, its theme, its alerts; Unpair as an outlined red button
+ * (the New Portals board), what it means under it.
  */
 export default function ComputerScreen() {
   const styles = useStyles();
@@ -86,20 +88,18 @@ export default function ComputerScreen() {
         </CardBox>
       </Group>
 
-      <Group footer={unpairFooter(armed, name, connected)}>
-        <CardBox>
-          {/* destructive: the error red (palette.ts holds it to 4.5:1 on a surface) */}
-          <NavRow
-            first
-            destructive
-            label={busy ? "Unpairing…" : armed ? "Tap again to unpair" : "Unpair this computer"}
-            accessibilityLabel={busy ? "Unpairing" : armed ? "Tap again to unpair" : `Unpair ${name}`}
-            hint={armed ? undefined : "Asks you to tap again"}
-            disabled={busy}
-            onPress={() => void unpair()}
-          />
-        </CardBox>
-      </Group>
+      <View style={styles.unpair}>
+        {/* destructive: the error red (palette.ts holds it to 4.5:1 on the page) */}
+        <Button
+          variant="destructive"
+          label={busy ? "Unpairing…" : armed ? "Tap again to unpair" : "Unpair this computer"}
+          accessibilityLabel={busy ? "Unpairing" : armed ? "Tap again to unpair" : `Unpair ${name}`}
+          accessibilityHint={armed ? undefined : "Asks you to tap again"}
+          disabled={busy}
+          onPress={() => void unpair()}
+        />
+        <Text style={styles.footer}>{unpairFooter(armed, name, connected)}</Text>
+      </View>
     </SettingsPage>
   );
 }
@@ -107,4 +107,7 @@ export default function ComputerScreen() {
 const useStyles = makeStyles((colors) => ({
   error: { marginHorizontal: 16, marginBottom: 8 },
   empty: { fontFamily: ui(400), color: colors.textMuted, fontSize: 15 },
+  // the board: 24 pt under the card (the page's 18 pt gap and 6), the note 8 under the button
+  unpair: { marginTop: 6, gap: 8 },
+  footer: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13, lineHeight: 18 },
 }));

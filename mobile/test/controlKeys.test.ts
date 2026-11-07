@@ -13,6 +13,7 @@ import {
   OLD_DEFAULT_CONTROL_KEYS,
   PressGate,
   addChoices,
+  FKEYS_CHIP,
   canAddKey,
   controlKey,
   keyTipTitle,
@@ -50,12 +51,26 @@ describe("control keys", () => {
 
   it("Add a key: every key not in the block and not on the arrow pad, found by a search", () => {
     const add = addChoices(DEFAULT_CONTROL_KEYS);
-    expect(add.map((c) => c.label).slice(0, 4)).toEqual(["⌃C", "⇧Tab", "New line", "⌥"]);
+    // the Keys, adding board's order: its chips, then the keys the app had before it
+    expect(add.map((c) => c.ids[0])).toEqual([
+      "shift+tab", "alt", "shift", "home", "end", "pageup", "pagedown",
+      "ctrl+d", "ctrl+z", "ctrl+r", "ctrl+l", "ctrl+u", "f1",
+      "ctrl+c", "ctrl+j", "backspace", "delete", "insert", "ctrl+a", "ctrl+e", "ctrl+w", "new_tab", "new_pane",
+    ]);
     // the arrows are the pad's: never offered, never added
     for (const id of ARROW_KEYS) expect(add.some((c) => c.ids[0] === id)).toBe(false);
     expect(toggleKey(["esc"], "up", true)).toEqual(["esc"]);
-    expect(add.some((c) => c.label === "F1")).toBe(true);
-    expect(addChoices([...DEFAULT_CONTROL_KEYS, "f5"]).filter((c) => /^F\d+$/.test(c.label))).toHaveLength(11);
+    // the function keys: one F1–F12 chip holding the twelve; laid out one by one when it is tapped
+    const f = add.find((c) => c.label === FKEYS_CHIP)!;
+    expect(f.ids).toEqual(Array.from({ length: 12 }, (_, i) => `f${i + 1}`));
+    expect(add.some((c) => c.label === "F1")).toBe(false);
+    expect(addChoices(DEFAULT_CONTROL_KEYS, "", true).filter((c) => /^F\d+$/.test(c.label))).toHaveLength(12);
+    expect(addChoices([...DEFAULT_CONTROL_KEYS, "f5"]).find((c) => c.label === FKEYS_CHIP)!.ids).toHaveLength(11);
+    expect(addChoices([...DEFAULT_CONTROL_KEYS, "f5"], "", true).filter((c) => /^F\d+$/.test(c.label))).toHaveLength(11);
+    // a search finds each one
+    expect(addChoices(DEFAULT_CONTROL_KEYS, "f5").map((c) => c.label)).toEqual(["F5"]);
+    // a key taken out of the default block comes back first
+    expect(addChoices(["tab", "ctrl", "enter", "paste"]).map((c) => c.ids[0])[0]).toBe("esc");
     expect(addChoices(CONTROL_KEYS.map((k) => k.id))).toEqual([]);
     // the search: by name, short word or id, any case; nothing when nothing matches
     expect(addChoices(DEFAULT_CONTROL_KEYS, "back tab").map((c) => c.ids[0])).toEqual(["shift+tab"]);

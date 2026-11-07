@@ -15,7 +15,7 @@ interface PasteButtonProps {
   onImage: (b64: string) => void;
   /** A file that is neither: its name and bytes, or why it could not be read. */
   onFile: (file: PastedFile) => void;
-  /** The control draws its icon and the system's word "Paste" (a row of the Attach sheet), not the icon alone. */
+  /** The control draws its icon and the system's word "Paste" (a row of the Attach sheet), not the word alone (a key). */
   labelled?: boolean;
   /** The theme's ground and ink for the control (`#rrggbb` or `#rrggbbaa`). */
   ground?: string;

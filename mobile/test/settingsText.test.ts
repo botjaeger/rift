@@ -76,13 +76,13 @@ describe("Settings board colours", () => {
     }
   });
 
-  it("the off track keeps the switch visible on a surface, the on track is the accent (Warp)", () => {
-    expect(colors.switchOff).toBe("#ffffff29");
-    expect(rows).toContain("false: colors.switchOff");
+  it("the off track keeps the switch visible on a card and on a menu, the on track is the accent (Warp)", () => {
+    // the boards' #3a3a3c on a card, made from the theme
+    expect(over(colors.switchOff, colors.surface)).toBe("#3a3a3a");
+    expect(rows).toContain("backgroundColor: on ? colors.accent : colors.switchOff");
     for (const t of BUILTIN_THEMES) {
       const c = paletteFrom(t);
-      expect(contrast(over(c.switchOff, c.surface), c.surface), t.name).toBeGreaterThan(1.2);
+      for (const ground of [c.surface, c.menu]) expect(contrast(over(c.switchOff, ground), ground), t.name).toBeGreaterThan(1.2);
     }
-    expect(rows).toContain("true: colors.accent");
   });
 });

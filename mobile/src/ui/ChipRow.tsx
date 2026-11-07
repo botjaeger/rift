@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { Pressable, Text, View, type LayoutChangeEvent } from "react-native";
-import { CHIP_GAP, DOT_GAP, DOT_SIZE, fitChips, isTimer, moreSpoken, type ChipItem } from "@/promptChips";
+import { CHIP_GAP, DOT_GAP, DOT_SIZE, fitChips, isTimer, moreSpoken, timerText, type ChipItem } from "@/promptChips";
 import { Icon, type IconName } from "./Icon";
-import { mono, ui, makeStyles, useColors } from "./theme";
+import { monoMedium, ui, makeStyles, useColors } from "./theme";
 
 /** A chip's height (the command line redesign board's 28 pt pill); the touch target is 44 (hitSlop makes up the rest). */
 export const CHIP_HEIGHT = 28;
@@ -36,7 +36,7 @@ function ChipBody({ item }: { item: ChipItem }) {
  * The chips that fit (their real widths, measured from an invisible copy of the row) are drawn in
  * the pane's order; the rest fold into "+N" at the end, with a dot for each folded chip that needs
  * attention, which opens the "This pane" sheet listing all of them. A timer (time on tab, the clock)
- * is plain text after them ("· 2m"), still opening its card when it has one.
+ * is plain text after them ("· last 2m"), still opening its card when it has one.
  */
 export function ChipRow({
   items: all,
@@ -127,7 +127,7 @@ export function ChipRow({
           style={({ pressed }) => [styles.timer, pressed && styles.pressed]}
         >
           <Text style={styles.timerText} numberOfLines={1}>
-            · {timer.short.map((p) => p.text).join(" ")}
+            · {timerText(timer)}
           </Text>
         </Pressable>
       ) : null}
@@ -162,11 +162,11 @@ const useStyles = makeStyles((colors) => ({
     backgroundColor: colors.tints.chipFill,
     flexDirection: "row",
     alignItems: "center",
-    gap: 6,
+    gap: 5,
     flexShrink: 0,
   },
   more: { backgroundColor: colors.glass, gap: DOT_GAP },
-  part: { fontFamily: mono, fontSize: 12, flexShrink: 1 },
+  part: { fontFamily: monoMedium, fontSize: 12, flexShrink: 1 },
   // the timer: plain words after the chips, never cut
   timer: { flexShrink: 0, height: CHIP_HEIGHT, justifyContent: "center" },
   timerText: { fontFamily: ui(400), fontSize: 12, color: colors.textMuted },

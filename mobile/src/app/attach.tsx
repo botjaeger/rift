@@ -10,11 +10,13 @@ import { pickFile } from "@/pickFile";
 import { pickLibraryPhoto, takePhoto } from "@/pickPhoto";
 import { useApp, useLock } from "@/runtime";
 import { findPane, tabTitle } from "@/topology";
-import { SheetFrame } from "@/ui/NewSheet";
+import { SheetFrame } from "@/ui/SheetFrame";
 import { ErrorText } from "@/ui/Notice";
 import { Icon, type IconName } from "@/ui/Icon";
-import { CardBox, NavRow } from "@/ui/Rows";
-import { radius, TOUCH, ui, makeStyles, useColors } from "@/ui/theme";
+import { CardBox, CHEVRON, NavRow, ROW_HEIGHT } from "@/ui/Rows";
+import { radius, ui, makeStyles, useColors } from "@/ui/theme";
+
+const PASTE_LINE = "Text, an image or a file from the clipboard";
 
 /**
  * The Attach sheet (the Attach board), opened by the message box's +: Paste from clipboard,
@@ -103,24 +105,33 @@ export default function AttachSheet() {
 
   const name = host?.record.name ?? "";
   return (
-    <SheetFrame title="Attach" subtitle={`To ${inProgram && program ? program : loc ? tabTitle(loc.tab) : "this pane"} on ${name || "a computer not found"}`} onClose={close}>
+    <SheetFrame board="attach" title="Attach" subtitle={`To ${inProgram && program ? program : loc ? tabTitle(loc.tab) : "this pane"} on ${name || "a computer not found"}`} onClose={close}>
       <CardBox>
         {hasSystemPasteButton ? (
-          // iOS's own paste control IS this row: tapping it is the consent, so no "Allow Paste" prompt
+          // An ordinary row whose word "Paste" is iOS's own paste control: tapping it is the
+          // consent, so no "Allow Paste" prompt. The control draws the system's word on the row's
+          // ground; nothing may cover it, so it is the row's title.
           <View style={styles.pasteRow}>
-            <SystemPasteButton
-              labelled
-              ground={colors.bg}
-              ink={colors.accent}
-              onText={(text) => deliver(nativeAttached({ text }, rules))}
-              onImage={(image) => deliver(nativeAttached({ image }, rules))}
-              onFile={(file) => deliver(nativeAttached({ file }, rules))}
-              style={styles.control}
-            />
-            <Text style={styles.pasteLine}>Paste from clipboard: text, an image or a file</Text>
+            <View style={styles.tile}>
+              <Icon name="paste" size={16} color={colors.accent} />
+            </View>
+            <View style={styles.pasteText}>
+              <SystemPasteButton
+                ground={colors.surface}
+                ink={colors.text}
+                onText={(text) => deliver(nativeAttached({ text }, rules))}
+                onImage={(image) => deliver(nativeAttached({ image }, rules))}
+                onFile={(file) => deliver(nativeAttached({ file }, rules))}
+                style={styles.control}
+              />
+              <Text style={styles.pasteLine}>{PASTE_LINE}</Text>
+            </View>
+            <View style={styles.chevron} importantForAccessibility="no">
+              <Icon name="forward" size={CHEVRON} color={colors.textMuted} />
+            </View>
           </View>
         ) : (
-          <Row icon="paste" title="Paste from clipboard" line="Text, an image or a file" disabled={busy} onPress={() => void paste()} />
+          <Row icon="paste" title="Paste" line={PASTE_LINE} disabled={busy} onPress={() => void paste()} />
         )}
         <Row
           rule
@@ -173,8 +184,11 @@ function Row({ icon, title, line, rule, disabled, onPress }: { icon: IconName; t
 
 const useStyles = makeStyles((colors) => ({
   tile: { width: 28, height: 28, borderRadius: radius.small + 2, backgroundColor: colors.faint, alignItems: "center", justifyContent: "center" },
-  // the system control draws its own icon and word; the line under it says what it takes
-  pasteRow: { gap: 4, paddingTop: 8, paddingBottom: 10, paddingHorizontal: 8 },
-  control: { height: TOUCH, alignSelf: "stretch" },
-  pasteLine: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12, lineHeight: 16, textAlign: "center" },
+  // NavRow's measures (Rows.tsx): 68 pt, 16 pt in, 12 between; the control in the label's place
+  pasteRow: { minHeight: ROW_HEIGHT.regular, flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 16, paddingVertical: 8 },
+  pasteText: { flex: 1, gap: 2, alignItems: "flex-start" },
+  // the system's word "Paste" with room around it (UIPasteControl hides a word it cannot fit)
+  control: { width: 64, height: 40, marginLeft: -11, marginTop: -10, marginBottom: -8 },
+  pasteLine: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13, lineHeight: 17 },
+  chevron: { width: 14, alignItems: "center" },
 }));

@@ -82,7 +82,7 @@ export default function NtfyScreen() {
   const footer = on ? ntfyFooter(server, st.showCommandInNotification) : pushFooter(s.push, false);
   return (
     <SettingsPage title="While the app is closed" notice={<SaveError />}>
-      <Group footer={footer}>
+      <Group title="Alerts through ntfy" footer={footer}>
         <CardBox>
           <SwitchRow
             first

@@ -176,36 +176,36 @@ describe("hostLine: the status line of a computer's card", () => {
 });
 
 describe("pathRows: the Connection sheet", () => {
-  const rows = (c: ConnState) => pathRows(c).map((r) => [r.title, r.addr, r.mark, r.note]);
+  const rows = (c: ConnState) => pathRows(c).map((r) => [r.title, r.addr, r.tone, r.note]);
 
   it("Same Wi-Fi: this network in use with its latency, the relay not needed", () => {
     expect(rows(onLan)).toEqual([
-      ["This network", "192.168.0.149:7878", "✓", "In use · 6 ms"],
-      ["Relay", "rift-relay.playhaws.com", "–", "Not needed on the same network"],
+      ["This network", "192.168.0.149:7878", "ok", "In use · 6 ms"],
+      ["Relay", "rift-relay.playhaws.com", "off", "Not needed on the same network"],
     ]);
   });
   it("Finding it: no answer on this network (with the wait), the relay connecting", () => {
     expect(rows(searching)).toEqual([
-      ["This network", "192.168.0.149:7878", "✕", "No answer on this network (2 s)"],
-      ["Relay", "rift-relay.playhaws.com", "…", "Connecting…"],
+      ["This network", "192.168.0.149:7878", "bad", "No answer on this network (2 s)"],
+      ["Relay", "rift-relay.playhaws.com", "busy", "Connecting…"],
     ]);
   });
   it("Away (relay): this network not used, the relay in use with its latency", () => {
     expect(rows(viaRelay)).toEqual([
-      ["This network", "192.168.0.149:7878", "–", "Not on the same network"],
-      ["Relay", "rift-relay.playhaws.com", "✓", "In use · 84 ms"],
+      ["This network", "192.168.0.149:7878", "off", "Not on the same network"],
+      ["Relay", "rift-relay.playhaws.com", "ok", "In use · 84 ms"],
     ]);
   });
   it("Relay down: the relay refusing an unregistered gateway", () => {
     expect(rows(failing)).toEqual([
-      ["This network", "192.168.0.149:7878", "–", "Not on the same network"],
-      ["Relay", "rift-relay.playhaws.com", "✕", "The relay answered, but your computer is not registered there"],
+      ["This network", "192.168.0.149:7878", "off", "Not on the same network"],
+      ["Relay", "rift-relay.playhaws.com", "bad", "The relay answered, but your computer is not registered there"],
     ]);
   });
   it("No network: nothing is tried", () => {
     expect(rows(offline)).toEqual([
-      ["This network", "192.168.0.149:7878", "–", "Waiting for a network"],
-      ["Relay", "rift-relay.playhaws.com", "–", "Waiting for a network"],
+      ["This network", "192.168.0.149:7878", "off", "Waiting for a network"],
+      ["Relay", "rift-relay.playhaws.com", "off", "Waiting for a network"],
     ]);
   });
   it("shows no latency before one is measured, and never a made-up one", () => {
@@ -214,11 +214,11 @@ describe("pathRows: the Connection sheet", () => {
   });
   it("a relay that is up while the computer has not joined", () => {
     const c = conn({ status: "connecting", path: RELAY, paths: [path(LAN, { state: "failed", error: NO_ANSWER }), path(RELAY, { state: "trying", reached: true })] });
-    expect(pathRows(c)[1]).toMatchObject({ mark: "…", note: "Relay up · your computer has not joined" });
+    expect(pathRows(c)[1]).toMatchObject({ tone: "busy", note: "Relay up · your computer has not joined" });
   });
   it("shows the real error of a path, not a made-up cause", () => {
     const c = conn({ status: "closed", retryInMs: 1, paths: [path(LAN, { state: "failed", error: "connect ECONNREFUSED" }), path(RELAY)] });
-    expect(pathRows(c)[0]).toMatchObject({ mark: "✕", note: "Connect ECONNREFUSED" });
+    expect(pathRows(c)[0]).toMatchObject({ tone: "bad", note: "Connect ECONNREFUSED" });
   });
   it("lists one row per LAN address", () => {
     const second: Endpoint = { kind: "lan", address: "10.0.0.5:7878" };

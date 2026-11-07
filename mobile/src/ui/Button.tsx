@@ -11,11 +11,14 @@ import { toggleA11y } from "./toggle";
  */
 export type ButtonVariant = "primary" | "secondary" | "text" | "destructive";
 
-/** regular: 44 pt (pages, sheets, cards); small: 32 pt with a 44 pt hit area (Copy error, Run again). */
+/** regular: 48 pt (pages, sheets, cards); small: 34 pt with a 44 pt hit area (Copy error, Run again). */
 export type ButtonSize = "regular" | "small";
 
-/** The hit slop that takes a small button's 32 pt to the 44 pt touch target. */
-export const SMALL_SLOP = (TOUCH - 32) / 2;
+/** A regular button's height and a small one's (the boards: 48 and the cards' 34 pt pills). */
+export const BUTTON_HEIGHT = { regular: 48, small: 34 } as const;
+
+/** The hit slop that takes a small button's 34 pt to the 44 pt touch target. */
+export const SMALL_SLOP = (TOUCH - BUTTON_HEIGHT.small) / 2;
 
 interface Props {
   label: string;
@@ -83,18 +86,19 @@ export function Button({
 }
 
 const useStyles = makeStyles((colors) => ({
-  base: { flexDirection: "row", gap: 8, alignItems: "center", justifyContent: "center", borderRadius: radius.button },
-  regular: { minHeight: TOUCH, paddingHorizontal: 20 },
-  small: { minHeight: 32, paddingHorizontal: 12, gap: 6 },
+  // the boards: 48 pt, 18 pt in, Inter 600 16; the cards' pills 34 pt, 12 pt in, 600 13; 6 pt to an icon
+  base: { flexDirection: "row", gap: 6, alignItems: "center", justifyContent: "center", borderRadius: radius.button },
+  regular: { minHeight: BUTTON_HEIGHT.regular, paddingHorizontal: 18 },
+  small: { minHeight: BUTTON_HEIGHT.small, paddingHorizontal: 12 },
   primary: { backgroundColor: colors.accent },
-  secondary: { borderWidth: 1, borderColor: colors.borderStrong },
+  secondary: { borderWidth: 1, borderColor: colors.rim },
   text: {},
   destructive: { borderWidth: 1, borderColor: `${colors.error}66` },
   on: { backgroundColor: colors.tints.accentBadge, borderColor: `${colors.accent}33` },
   pressed: { opacity: 0.75 },
   disabled: { opacity: 0.45 },
-  label: { fontFamily: ui(600), color: colors.text, fontSize: 15, textAlign: "center", flexShrink: 1 },
-  smallLabel: { fontFamily: ui(500), fontSize: 13 },
+  label: { fontFamily: ui(600), color: colors.text, fontSize: 16, textAlign: "center", flexShrink: 1 },
+  smallLabel: { fontFamily: ui(600), fontSize: 13 },
   primaryLabel: { color: colors.onAccent },
   secondaryLabel: {},
   textLabel: { color: colors.accent },

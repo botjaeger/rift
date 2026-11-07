@@ -130,6 +130,12 @@ const TONES: Record<string, ColorName> = {
 const TIMERS = new Set(["elapsed", "time12", "time24", "date"]);
 export const isTimer = (kind: string): boolean => TIMERS.has(kind);
 
+/** A timer's words after the chips: Time on tab as "last 2m" (the New Blocks board), the clock and the date as they are. */
+export function timerText(c: Pick<ChipItem, "id" | "short">): string {
+  const value = c.short.map((p) => p.text).join(" ");
+  return c.id === "elapsed" ? `last ${value}` : value;
+}
+
 /** A tone's colour; a tone this app does not know (a newer desktop) is drawn as ordinary text. */
 export const toneColor = (tone: string): ColorName => TONES[tone] ?? "text";
 
@@ -140,12 +146,6 @@ export function compact(n: number): string {
   if (n < 1000) return String(n);
   if (n < 10_000) return `${(n / 1000).toFixed(1)}k`;
   return `${Math.floor(n / 1000)}k`;
-}
-
-/** The last component of a folder: `~/xxx/flow` → `flow`. */
-export function folderName(path: string): string {
-  const parts = path.replace(/\/+$/, "").split("/");
-  return parts[parts.length - 1] || path;
 }
 
 /** What a screen reader says for a chip's value; the glyphs the desktop draws (↑ ↓ •) are spelt out. */
@@ -186,9 +186,11 @@ function item(kind: string, w: { icon: string; full: ChipText[]; short: ChipText
     id: kind,
     name,
     icon: ICONS[kind] ?? "terminal",
-    iconColor: toneColor(w.icon),
+    // the folder's glyph in the accent, the branch's and the rest in their tones (the New Blocks board)
+    iconColor: kind === "cwd" ? "accent" : toneColor(w.icon),
     full: w.full,
-    short: w.short,
+    // the folder reads as its whole path, "~/code/project1" (the New Blocks board); the row folds what does not fit
+    short: kind === "cwd" ? w.full : w.short,
     attention: w.attention,
     opens,
     spoken: `${name}: ${value}${w.attention ? ", needs attention" : ""}${opens ? `. ${OPENS_SPOKEN[opens]}` : ""}`,
@@ -214,8 +216,8 @@ export function chipItems(pane: Pane | null, state: PaneState | null, features: 
         "cwd",
         {
           icon: "accent",
-          full: [{ text: c.cwd, color: "textBright" }],
-          short: [{ text: folderName(c.cwd), color: "textBright" }],
+          full: [{ text: c.cwd, color: "text" }],
+          short: [{ text: c.cwd, color: "text" }],
           attention: false,
         },
         features,

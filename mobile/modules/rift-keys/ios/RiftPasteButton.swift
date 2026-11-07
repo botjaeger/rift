@@ -14,7 +14,7 @@ class RiftPasteButton: ExpoView {
   /// Over this a screenshot goes as JPEG and a file not at all (MAX_UPLOAD_BYTES of the protocol).
   private static let maxPng = 10 * 1024 * 1024
 
-  /// The icon alone (the key rows), or the icon with the system's word "Paste" across a row (the Attach sheet).
+  /// The system's word "Paste" alone (the key rows), or its icon and the word across a row (the Attach sheet).
   var labelled = false {
     didSet {
       if labelled != oldValue {
@@ -65,7 +65,7 @@ class RiftPasteButton: ExpoView {
 
   /// The key row's look (the Keys board, KeysNormalized): the key's surface ground and text colour
   /// with its corners less the 1 pt rim the view around it draws. A clear ground drew as a black
-  /// circle among the row's keys. The glyph stays the system's own.
+  /// circle among the row's keys. The word stays the system's own (its font cannot be set).
   private static let keyGround = UIColor(red: 0x1e / 255, green: 0x1e / 255, blue: 0x1e / 255, alpha: 1)
   private static let keyText = UIColor(red: 0xe6 / 255, green: 0xe6 / 255, blue: 0xe6 / 255, alpha: 1)
   /// The key's 8 pt corners less the 1 pt rim (ControlRow `key`).
@@ -76,7 +76,8 @@ class RiftPasteButton: ExpoView {
 
   private static func makeControl(labelled: Bool, ground: UIColor?, ink: UIColor?, target: UIView) -> UIPasteControl {
     let config = UIPasteControl.Configuration()
-    config.displayMode = labelled ? .iconAndLabel : .iconOnly
+    // a key shows the word "Paste" (the Keys boards), the Attach row the icon and the word
+    config.displayMode = labelled ? .iconAndLabel : .labelOnly
     if labelled {
       // the Attach sheet's row: its list's ground and the accent its sibling rows' icons take
       // (a clear ground drew as a black pill there too)

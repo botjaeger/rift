@@ -1,13 +1,17 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { Pressable, TextInput, View, type StyleProp, type TextInputProps, type ViewStyle } from "react-native";
 import { Icon, type IconName } from "./Icon";
-import { radius, TOUCH, ui, makeStyles, useColors } from "./theme";
+import { radius, ui, makeStyles, useColors } from "./theme";
+
+/** The field's height: the boards' 44 pt box and its 1 pt rim on each side. */
+export const FIELD_HEIGHT = 46;
 
 /**
- * The one text field (the Standard board): 44 pt, radius 10, on the surface, a leading icon,
- * words in Inter (the placeholder included) and a clear button while it holds text. Search tabs,
- * Search folders, Search output and the pairing link use it; the command line is its own control.
- * Every other TextInput prop passes through.
+ * The one text field (the Standard board): 46 pt, radius 10, on the surface, a leading icon,
+ * words in Inter (the placeholder included), its rim in the accent while it has focus, and a
+ * round clear mark while it holds text. Search tabs, Search folders, Search output and the
+ * pairing link use it; the command line is its own control. Every other TextInput prop passes
+ * through.
  */
 export function Field({
   icon,
@@ -16,6 +20,8 @@ export function Field({
   label,
   trailing,
   style,
+  onFocus,
+  onBlur,
   ...input
 }: Omit<TextInputProps, "style" | "value" | "onChangeText" | "accessibilityLabel"> & {
   icon: IconName;
@@ -29,13 +35,22 @@ export function Field({
 }) {
   const colors = useColors();
   const styles = useStyles();
+  const [focused, setFocused] = useState(false);
   return (
-    <View style={[styles.field, style]}>
+    <View style={[styles.field, focused && styles.focused, style]}>
       <Icon name={icon} size={16} color={colors.textMuted} />
       <TextInput
         keyboardAppearance={colors.dark ? "dark" : "light"}
-        placeholderTextColor={colors.textMuted}
+        placeholderTextColor={colors.placeholder}
         {...input}
+        onFocus={(e) => {
+          setFocused(true);
+          onFocus?.(e);
+        }}
+        onBlur={(e) => {
+          setFocused(false);
+          onBlur?.(e);
+        }}
         value={value}
         onChangeText={onChangeText}
         accessibilityLabel={label}
@@ -47,6 +62,8 @@ export function Field({
           accessibilityRole="button"
           accessibilityLabel="Clear"
           onPress={() => onChangeText("")}
+          // the 28 pt mark, 44 to the touch
+          hitSlop={8}
           style={({ pressed }) => [styles.clear, pressed && styles.pressed]}
         >
           <View style={styles.clearDot}>
@@ -59,20 +76,23 @@ export function Field({
 }
 
 const useStyles = makeStyles((colors) => ({
+  // the boards: 12 pt before the icon, 10 between, 8 after the clear mark
   field: {
-    height: TOUCH,
+    height: FIELD_HEIGHT,
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
     paddingLeft: 12,
+    paddingRight: 8,
     borderRadius: radius.field,
     borderWidth: 1,
     borderColor: colors.borderStrong,
     backgroundColor: colors.surface,
   },
-  input: { flex: 1, minWidth: 0, height: TOUCH - 2, paddingVertical: 0, paddingRight: 12, fontFamily: ui(400), color: colors.textBright, fontSize: 16 },
-  // the 16 pt round clear mark in a 44 pt target, at the field's end
-  clear: { width: 40, height: TOUCH - 2, alignItems: "center", justifyContent: "center", marginLeft: -12 },
+  focused: { borderColor: colors.accent },
+  input: { flex: 1, minWidth: 0, height: FIELD_HEIGHT - 2, paddingVertical: 0, fontFamily: ui(400), color: colors.textBright, fontSize: 16 },
+  // the 16 pt round mark in a 28 pt button at the field's end
+  clear: { width: 28, height: 28, alignItems: "center", justifyContent: "center" },
   clearDot: { width: 16, height: 16, borderRadius: 8, backgroundColor: colors.textMuted, alignItems: "center", justifyContent: "center" },
   pressed: { opacity: 0.6 },
 }));

@@ -97,13 +97,13 @@ describe("tabRow", () => {
   const h = host([asking, working, idleAgent, failed]);
   const rows = (c: RowContext, idle = new Map<string, number>()) => h.windows[0]!.tabs.map((t) => tabRow(h, t, c, idle));
 
-  it("titles a row by its tab; its line is the lead pane's program and what it does; the short time goes beside the mark", () => {
+  it("titles a row by its tab; its line is what the lead pane does (its tile names the program); the short time goes beside the mark", () => {
     const [a, w, i, f] = rows(ctx({ waitingSince: () => NOW - 120_000 }), new Map([[tabKey("A", idleAgent), NOW - 12 * 60_000]]));
-    expect(a).toMatchObject({ title: "RIFT", state: "Needs you · 2m", line: "claude · Waiting for you · Edit mobile/src/app/index.tsx?", when: "2m", agent: true, panes: 1 });
+    expect(a).toMatchObject({ title: "RIFT", state: "Needs you · 2m", line: "Waiting for you · Edit mobile/src/app/index.tsx?", when: "2m", agent: true, panes: 1 });
     expect(a!.ask).toMatchObject({ pane: 1, program: "claude" });
     // an agent's session title is its line now, never the row's title
-    expect(w).toMatchObject({ title: "q", state: "Working 3:56", line: "claude · running · pnpm test — 14 passed", when: "3:56" });
-    expect(i).toMatchObject({ title: "c", state: "Idle 12m", line: "claude · Idle · Code changes overview", when: "12m" });
+    expect(w).toMatchObject({ title: "q", state: "Working 3:56", line: "running · pnpm test — 14 passed", when: "3:56" });
+    expect(i).toMatchObject({ title: "c", state: "Idle 12m", line: "Idle · Code changes overview", when: "12m" });
     // several panes: their count leads the line; the tab's words count its failures
     expect(f).toMatchObject({ title: "flow", state: "2 failed", line: "3 panes · psa · failed with 1", when: "✕ 1", agent: false, panes: 3 });
   });

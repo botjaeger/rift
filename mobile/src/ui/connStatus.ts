@@ -133,13 +133,10 @@ export interface PathRow {
   title: string;
   /** The LAN address, or the relay's host. */
   addr: string;
-  /** ✓ in use, … connecting, ✕ failed, – not used. */
-  mark: "✓" | "…" | "✕" | "–";
+  /** ok in use (the sheet ticks it), busy connecting, bad failed, off not used. */
   tone: PathTone;
   note: string;
 }
-
-const MARK: Record<PathTone, PathRow["mark"]> = { ok: "✓", busy: "…", bad: "✕", off: "–" };
 
 const seconds = (ms: number | null) => (ms === null ? "" : ` (${Math.max(1, Math.ceil(ms / 1000))} s)`);
 
@@ -164,7 +161,17 @@ export function failNote(p: PathStatus): string {
 function row(p: PathStatus, tone: PathTone, note: string): PathRow {
   const lan = p.path.kind === "lan";
   const addr = p.path.kind === "lan" ? p.path.address : relayHost(p.path.url);
-  return { key: addr, title: lan ? "This network" : "Relay", addr, mark: MARK[tone], tone, note };
+  return { key: addr, title: lan ? "This network" : "Relay", addr, tone, note };
+}
+
+/**
+ * A path's one line on the Connection sheet (the New Portals board): where, then why, in words:
+ * "192.168.1.15 · in use · 2 ms", "relay.example.com · not needed on the same network". The
+ * port is left out (every LAN address of a computer shares its gateway's).
+ */
+export function pathLine(r: PathRow): string {
+  const where = r.addr.replace(/^([^:]+):\d+$/, "$1");
+  return r.note ? `${where} · ${r.note.charAt(0).toLowerCase()}${r.note.slice(1)}` : where;
 }
 
 /** One row per path, in trying order, as the Connection sheet lists them. */

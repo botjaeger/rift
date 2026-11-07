@@ -220,11 +220,11 @@ describe("pushTokenProblem", () => {
     const firebase =
       "Unable to get Firebase Messaging instance. Did you configure `googleServicesFile` path in app config? Make sure to complete the guide at https://docs.expo.dev/push-notifications/fcm-credentials/ : Default FirebaseApp is not initialized in this process dev.botjaeger.rift. Make sure to call FirebaseApp.initializeApp(Context) first.";
     expect(pushTokenProblem(firebase)).toBe("this build is not set up for Android push.");
-    expect(pushTokenProblem("SERVICE_NOT_AVAILABLE")).toBe("the system gave no push token.");
+    expect(pushTokenProblem("SERVICE_NOT_AVAILABLE")).toBe("this phone gave no push token.");
     for (const d of [firebase, "SERVICE_NOT_AVAILABLE"]) {
       expect(pushTokenProblem(d)).not.toMatch(/https?:|java|Firebase|SERVICE/);
       // reads on in the footer's sentence
-      expect(pushFooter({ state: "unavailable", reason: pushTokenProblem(d) })).toMatch(/^Notifications come only while this app is open: [a-z].*\. Turn on/);
+      expect(pushFooter({ state: "unavailable", reason: pushTokenProblem(d) })).toMatch(/^Without it, notifications come only while this app is open: [a-z].*\.$/);
     }
   });
 });
@@ -239,9 +239,10 @@ describe("pushFooter", () => {
     expect(pushFooter({ state: "on" })).toContain("only with “Show the command”, the command line. Never output.");
     expect(pushFooter({ state: "off" })).toContain("while it is open");
     const unavailable = pushFooter({ state: "unavailable", reason: "this build has no push project." });
-    expect(unavailable).toBe(
-      "Notifications come only while this app is open: this build has no push project. Turn on Alerts through ntfy to get them while it is closed.",
+    // the While the app is closed board's footer, under Alerts through ntfy ("it")
+    expect(unavailable).toBe("Without it, notifications come only while this app is open: this build has no push project.");
+    expect(pushFooter({ state: "unavailable", reason: pushTokenProblem("SERVICE_NOT_AVAILABLE") })).toBe(
+      "Without it, notifications come only while this app is open: this phone gave no push token.",
     );
-    expect(unavailable.split("while").length - 1).toBe(2);
   });
 });

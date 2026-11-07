@@ -3,6 +3,7 @@ import type { HostView } from "@/fleet";
 import { tabPane } from "@/now";
 import { hostLine, lastSeenAt } from "./connStatus";
 import { hostDot } from "./hostDot";
+import { glyph } from "./Screen";
 import { Icon } from "./Icon";
 import { ui, makeStyles, useColors } from "./theme";
 
@@ -68,21 +69,21 @@ export function ComputerMenu({
               <View style={[styles.dot, { backgroundColor: colors[hostDot(h)] }]} />
             </View>
             <View style={styles.text}>
-              <Text style={[styles.title, !usable && { color: colors.textMuted }]} numberOfLines={1}>
+              <Text style={styles.title} numberOfLines={1}>
                 {h.record.name}
               </Text>
               <Text style={styles.hint} numberOfLines={1}>
                 {line}
               </Text>
             </View>
-            {on ? <Icon name="check" size={16} color={colors.accent} /> : null}
+            {on ? <Icon name="check" size={glyph(16, 11)} color={colors.accent} /> : null}
           </Pressable>
         );
       })}
       {here ? (
-        <Pressable accessibilityRole="menuitem" accessibilityLabel={`Connection: how this phone reaches ${here.record.name}`} onPress={onConnection} style={({ pressed }) => [styles.row, styles.rule, styles.first, pressed && styles.pressed]}>
+        <Pressable accessibilityRole="menuitem" accessibilityLabel={`Connection: how this phone reaches ${here.record.name}`} onPress={onConnection} style={({ pressed }) => [styles.row, styles.rule, pressed && styles.pressed]}>
           <View style={styles.dotBox}>
-            <Icon name="wifi" size={18} color={colors.text} />
+            <Icon name="wifi" size={glyph(18, 15)} color={colors.text} />
           </View>
           <View style={styles.text}>
             <Text style={styles.title}>Connection</Text>
@@ -94,16 +95,18 @@ export function ComputerMenu({
       ) : null}
       <Pressable accessibilityRole="menuitem" accessibilityLabel="All portals" onPress={onPortals} style={({ pressed }) => [styles.row, pressed && styles.pressed]}>
         <View style={styles.dotBox}>
-          <Icon name="computer" size={18} color={colors.text} />
+          <Icon name="computer" size={glyph(18, 15)} color={colors.text} />
         </View>
-        <Text style={[styles.title, styles.text]}>All portals</Text>
+        <View style={styles.text}>
+          <Text style={styles.title}>All portals</Text>
+        </View>
       </Pressable>
     </View>
   );
 }
 
 const useStyles = makeStyles((colors) => ({
-  // the ⋯ menu's look, under the header's name
+  // the New Portals board's menu, under the header's name: one hairline between every row
   menu: {
     position: "absolute",
     left: 12,
@@ -111,23 +114,24 @@ const useStyles = makeStyles((colors) => ({
     borderRadius: 14,
     backgroundColor: colors.menu,
     borderWidth: 1,
-    borderColor: colors.glassRim,
+    borderColor: colors.borderStrong,
     overflow: "hidden",
+    // the board's 0 12 40 #000000aa
     shadowColor: "#000000",
-    shadowOpacity: 0.6,
+    shadowOpacity: 0.67,
     shadowRadius: 20,
-    shadowOffset: { width: 0, height: 16 },
+    shadowOffset: { width: 0, height: 12 },
     elevation: 16,
   },
   // the Standard's caption: Inter 500 12/16, uppercase
-  cap: { fontFamily: ui(500), color: colors.textMuted, fontSize: 12, lineHeight: 16, letterSpacing: 0.5, textTransform: "uppercase", paddingHorizontal: 14, paddingTop: 12, paddingBottom: 4 },
-  row: { minHeight: 56, flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 14 },
+  cap: { fontFamily: ui(500), color: colors.textMuted, fontSize: 12, lineHeight: 16, textTransform: "uppercase", paddingHorizontal: 16, paddingTop: 12, paddingBottom: 6 },
+  // 68 pt: 52 and 8 above and under
+  row: { minHeight: 68, flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 16, paddingVertical: 8 },
   rule: { borderBottomWidth: 1, borderBottomColor: colors.hairline },
-  first: { borderTopWidth: 1, borderTopColor: colors.borderStrong },
   pressed: { opacity: 0.7 },
   dotBox: { width: 20, alignItems: "center" },
   dot: { width: 8, height: 8, borderRadius: 4 },
-  text: { flex: 1, minWidth: 0, gap: 2, paddingVertical: 8 },
-  title: { fontFamily: ui(400), color: colors.textBright, fontSize: 15 },
-  hint: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12 },
+  text: { flex: 1, minWidth: 0, gap: 2 },
+  title: { fontFamily: ui(400), color: colors.text, fontSize: 16, lineHeight: 21 },
+  hint: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13, lineHeight: 17 },
 }));

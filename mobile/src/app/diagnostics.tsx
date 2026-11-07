@@ -45,10 +45,10 @@ export default function DiagnosticsScreen() {
         {/* the Diagnostics board: what it measures as a row under Encryption, then Run */}
         <Group title="Encryption">
           <CardBox>
-            <Row first wrap>
+            <Row first>
               <View style={styles.text}>
                 <Text style={styles.label}>Crypto benchmark</Text>
-                <Text style={styles.lead}>One Noise handshake, then 1 MiB sealed and opened in 65 000-byte chunks, as the gateway sends a full snapshot</Text>
+                <Text style={styles.lead}>One handshake, then 1 MiB in 65 000-byte chunks</Text>
               </View>
             </Row>
           </CardBox>
@@ -81,11 +81,12 @@ export default function DiagnosticsScreen() {
 }
 
 const useStyles = makeStyles((colors) => ({
-  fill: { flex: 1, backgroundColor: colors.chrome },
-  content: { padding: 16, gap: 16, maxWidth: 720, width: "100%", alignSelf: "center" },
-  text: { flex: 1, gap: 2, paddingVertical: 10 },
-  label: { fontFamily: ui(400), color: colors.text, fontSize: 16, lineHeight: 22 },
-  lead: { fontFamily: ui(400), color: colors.textMuted, fontSize: 14, lineHeight: 20 },
+  fill: { flex: 1, backgroundColor: colors.bg },
+  // the Diagnostics board: the caption 18 under the header, Run 14 under the card
+  content: { paddingTop: 18, paddingHorizontal: 16, gap: 14, maxWidth: 720, width: "100%", alignSelf: "center" },
+  text: { flex: 1, gap: 2 },
+  label: { fontFamily: ui(400), color: colors.text, fontSize: 16, lineHeight: 21 },
+  lead: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13, lineHeight: 17 },
   // measured numbers: tabular, as output
   value: { color: colors.textBright, fontFamily: mono, fontSize: 14 },
 }));

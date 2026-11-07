@@ -20,7 +20,7 @@ import { askingTitle, questionKey } from "@/answer";
 import { chipItems } from "@/promptChips";
 import { canClose, canOperate, draftKey, hasFeature, isAsked, wrapsLines } from "@/fleet";
 import { foldBlocks, paneKind, paneName, programName, swipeTarget, tabKind, tabPane, type PaneItem } from "@/now";
-import { bareScreen as screenIsBare, CLAUDE_COLOR, paneMark, runsAgent, screenView, waitingOthers } from "@/paneView";
+import { bareScreen as screenIsBare, paneMark, runsAgent, screenView, waitingOthers } from "@/paneView";
 import { canLoadOlder, MAX_BLOCKS } from "@/protocol/store";
 import type { Block } from "@/protocol/types";
 import { fleet, useApp, useScreen } from "@/runtime";
@@ -45,14 +45,16 @@ import { BlockSkeleton, PaneCard, PaneStrip } from "@/ui/PaneLoading";
 import { openingTitle, paneLoad } from "@/ui/paneLoad";
 import { canNewPane, canNewTab } from "@/ui/newTab";
 import { Field } from "@/ui/Field";
-import { GlassGroup, headerTop, IconButton } from "@/ui/Screen";
+import { AgentLogo } from "@/ui/AgentLogo";
+import { Toggle } from "@/ui/Rows";
+import { glyph, headerTop, IconButton } from "@/ui/Screen";
 import { TabBar } from "@/ui/TabBar";
+import { Toast } from "@/ui/useToast";
 import { TerminalView } from "@/ui/TerminalView";
 import { TextSizeMenu } from "@/ui/TextSizeMenu";
 import { useClose } from "@/ui/useClose";
 import { useNow } from "@/ui/useNow";
 import { useSingleFlight } from "@/ui/useSingleFlight";
-import { avatarInk } from "@/ui/palette";
 import { mono, radius, ui, makeStyles, useColors } from "@/ui/theme";
 
 /** Within this many points of the end counts as "at the bottom" (stick to new output). */
@@ -95,6 +97,8 @@ export default function PaneScreen() {
   const [menu, setMenu] = useState(false);
   // the computer menu (the header's name)
   const [computers, setComputers] = useState(false);
+  // the pane picker's Panes sheet is up: its ⌄ points up until this screen has focus again
+  const [picking, setPicking] = useState(false);
   // the selection bar while text is selected in the output (SelectionScope) or on the screen (TerminalView)
   const [selBar, setSelBar] = useState<ReactNode | null>(null);
   const [barH, setBarH] = useState(0);
@@ -161,10 +165,19 @@ export default function PaneScreen() {
   const title = loc ? paneTitle(loc) : (cachedTitle ?? host?.record.name ?? "this pane");
   // the computer's tabs no longer hold it (none at all, too): nothing left to show or type into
   const closed = !!host && status === "open" && host.topology && !loc;
+  // The tab's other panes, as last seen: once this pane has closed, the tab row stays (that tab's)
+  // and "Other pane" goes to the first of them still open (the New Blocks board).
+  const othersNow = loc ? loc.tab.panes.filter((p) => p.id !== paneId).map((p) => p.id) : null;
+  const [tabmates, setTabmates] = useState<number[]>([]);
+  if (othersNow && othersNow.join(",") !== tabmates.join(",")) setTabmates(othersNow);
+  const closedLoc = closed && host ? (tabmates.map((p) => findPane(host.windows, p)).find((l) => l !== null) ?? null) : null;
+  // the tab row's tab: this pane's, else (closed) the tab it was in
+  const rowLoc = loc ?? closedLoc;
 
   // A cold start's pane that has closed meanwhile: back to Portals rather than a dead page. Only
   // once it is on top: dismissing to Portals would also close a sheet over it (What's New).
   const focused = useIsFocused();
+  useFocusEffect(useCallback(() => setPicking(false), []));
   useEffect(() => {
     if (closed && restored === "1" && focused) router.dismissTo("/");
   }, [closed, restored, focused, router]);
@@ -208,14 +221,14 @@ export default function PaneScreen() {
     ? screenView(loc.pane, !!screen?.alt, state === null || state.blocks.at(-1)?.state === "running", state !== null && state.blocks.length === 0)
     : { tui: showsTerminal(screen, screenFeature), pinned: false };
   const pinned = view.pinned;
-  const fullScreen = view.tui;
+  // Search output searches the blocks: over a full-screen program it shows them until it closes
+  const fullScreen = view.tui && search === null;
   const program = (loc && programName(loc.pane)) || screenProgram(running, loc?.pane.job ?? null);
   const following = pane !== null;
   useEffect(() => {
     if (screenFeature && status === "open" && following && !closed) fleet.setScreenMode(key, paneId, pinned ? "on" : "auto");
   }, [screenFeature, status, following, closed, key, paneId, pinned]);
-  // the search belongs to the blocks: a full-screen program closes it
-  const searching = fullScreen ? null : search;
+  const searching = search;
 
   // While the pane opens: the status strip, the steps card, the blocks held in memory (dimmed)
   // the wait starts when the page opens, when Try again is pressed, and when the view switches
@@ -257,7 +270,7 @@ export default function PaneScreen() {
 
   const wrap = wrapsLines(s, key, paneId);
   const operate = host ? canOperate(host) : false;
-  const closeable = canClose(host);
+  const closeable = canClose(host) && !closed;
   const canSplit = !!host && !closed && canNewPane(host, paneId);
   const canOpenTab = !!host && !closed && canNewTab(host);
   const onClose = useClose(key, paneId, setError, say);
@@ -383,9 +396,7 @@ export default function PaneScreen() {
   // on its side the screen needs every row: one header line, no picker
   const { width: winWidth, height: winHeight } = useWindowDimensions();
   const compact = fullScreen && winWidth > winHeight;
-  const headerPad = compact ? Math.max(insets.top, 6) : headerTop(insets.top) + 2;
-  const tabNumber = loc ? loc.window.tabs.indexOf(loc.tab) + 1 : 0;
-  const tabCount = loc ? loc.window.tabs.length : 0;
+  const headerPad = compact ? Math.max(insets.top, 6) : headerTop(insets.top);
   const paneNumber = loc ? loc.paneIndex + 1 : 0;
   const others = tab ? waitingOthers(tab, paneId) : 0;
   const mark = loc ? paneMark(loc.pane) : null;
@@ -414,11 +425,11 @@ export default function PaneScreen() {
   }, [pastedPane, box]);
   const held = usePending(box);
   const bareScreen = screenIsBare({ fullScreen, asking, agent, pinned, alt: !!screen?.alt }) || (fullScreen && (pastedPane === paneId || held.items.length > 0));
-  const bottomInset = keyboard ? 0 : Math.max(0, insets.bottom - 12);
+  const bottomInset = keyboard ? 0 : Math.max(0, insets.bottom - 14);
   // the tab bar over the command line: the window's tabs either side, a swipe goes to them
-  const siblings = loc?.window.tabs ?? [];
-  const prevTab = loc ? (siblings[siblings.indexOf(loc.tab) - 1] ?? null) : null;
-  const nextTab = loc ? (siblings[siblings.indexOf(loc.tab) + 1] ?? null) : null;
+  const siblings = rowLoc?.window.tabs ?? [];
+  const prevTab = rowLoc ? (siblings[siblings.indexOf(rowLoc.tab) - 1] ?? null) : null;
+  const nextTab = rowLoc ? (siblings[siblings.indexOf(rowLoc.tab) + 1] ?? null) : null;
   // stable across renders: the bar's swipe gesture is rebuilt when these change, and a pane
   // streaming output re-renders many times a second (a rebuilt gesture drops a swipe in progress)
   const prevPane = prevTab ? tabPane(prevTab) : null;
@@ -434,14 +445,16 @@ export default function PaneScreen() {
   const onPrevTab = useCallback(() => goPaneOf(prevPane, "prev"), [goPaneOf, prevPane]);
   const onNextTab = useCallback(() => goPaneOf(nextPane, "next"), [goPaneOf, nextPane]);
   const openSwitcher = useCallback(() => router.push({ pathname: "/tabs", params: { key, pane: String(paneId) } }), [router, key, paneId]);
-  // the tab row under the header: on its side the screen needs every row
+  // the tab row in the header block: on its side the screen needs every row. Its dot is grey
+  // while the pane opens and dim once the pane has closed (the New Blocks board).
   const tabBar =
-    loc && tab && !compact && !closed ? (
+    rowLoc && !compact ? (
       <TabBar
-        title={tabTitle(loc.tab)}
-        kind={tabKind(loc.tab)}
-        number={tabNumber}
-        count={tabCount}
+        title={tabTitle(rowLoc.tab)}
+        kind={tabKind(rowLoc.tab)}
+        dot={closed ? "textDim" : waitingForPane ? "textMuted" : undefined}
+        number={rowLoc.window.tabs.indexOf(rowLoc.tab) + 1}
+        count={rowLoc.window.tabs.length}
         prev={prevTab ? tabTitle(prevTab) : null}
         next={nextTab ? tabTitle(nextTab) : null}
         onPrev={onPrevTab}
@@ -451,7 +464,7 @@ export default function PaneScreen() {
     ) : null;
   const composer =
     closed || !host ? null : operate ? (
-      // the board's 30 pt under the command line: the home indicator's inset, less the
+      // the board's 28 pt under the command line: the home indicator's inset, less the
       // command line's own 8 pt
       <View style={{ paddingBottom: bottomInset, backgroundColor: colors.chrome }}>
         <Composer
@@ -460,11 +473,16 @@ export default function PaneScreen() {
           running={running}
           program={program}
           online={status === "open"}
-          chips={chipItems(loc?.pane ?? null, state, {
-            git: hasFeature(host, "git"),
-            menus: hasFeature(host, "chips"),
-            promptChips: hasFeature(host, "prompt_chips"),
-          })}
+          // while searching the results take the room, and while the pane opens nothing is known yet: no context row (the New Blocks board)
+          chips={
+            searching !== null || waitingForPane
+              ? []
+              : chipItems(loc?.pane ?? null, state, {
+                  git: hasFeature(host, "git"),
+                  menus: hasFeature(host, "chips"),
+                  promptChips: hasFeature(host, "prompt_chips"),
+                })
+          }
           complete={hasFeature(host, "complete") && operate}
           recent={recent}
           label={title}
@@ -539,33 +557,50 @@ export default function PaneScreen() {
               <Text style={styles.title} numberOfLines={1}>
                 {hostName}
               </Text>
-              {host ? <Icon name="chevronDown" size={16} color={colors.textMuted} /> : null}
+              {host ? <Icon name={computers ? "chevronUp" : "chevronDown"} size={glyph(16, 11)} color={colors.textMuted} /> : null}
             </View>
           </Pressable>
-          {!host || closed ? null : (
-            <GlassGroup>
-              {fullScreen ? null : (
-                <IconButton grouped icon="search" label="Search output" pressed={searching !== null} active={searching !== null} onPress={() => setSearch(searching === null ? "" : null)} />
-              )}
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="More"
-                accessibilityState={{ expanded: menu }}
-                hitSlop={3}
+          {/* ⌕ and ⋯: two round glass buttons, over a program's screen too; ⌕ is not tinted while searching */}
+          {!host ? null : (
+            <>
+              <IconButton glass icon="search" label="Search output" pressed={searching !== null} onPress={() => setSearch(searching === null ? "" : null)} />
+              <IconButton
+                glass
+                icon="more"
+                label="More"
+                expanded={menu}
                 onPress={() => {
                   Keyboard.dismiss();
                   setComputers(false);
                   setMenu((m) => !m);
                 }}
-                style={({ pressed }) => [styles.action, pressed && styles.pressed]}
-              >
-                <Icon name="more" size={19} color={colors.text} />
-              </Pressable>
-            </GlassGroup>
+              />
+            </>
           )}
         </View>
+        {tabBar}
+        {/* Search output in the header block: the field, then how many blocks hold the words */}
+        {searching !== null ? (
+          <View style={styles.search}>
+            <Field
+              icon="search"
+              label="Search output"
+              value={searching}
+              onChangeText={setSearch}
+              autoFocus
+              autoCapitalize="none"
+              autoCorrect={false}
+              placeholder="Search commands and output"
+              returnKeyType="search"
+            />
+          </View>
+        ) : null}
+        {searching !== null && searching.trim() !== "" ? (
+          <Text style={styles.searchCount} accessibilityLiveRegion="polite">
+            {`${shownBlocks} of ${blocks.length} ${blocks.length === 1 ? "block" : "blocks"}`}
+          </Text>
+        ) : null}
       </View>
-      {tabBar}
       {loc && tab && !closed && !compact && tab.panes.length > 1 ? (
         <View style={styles.paneRow}>
           <View style={styles.pickRow}>
@@ -574,13 +609,17 @@ export default function PaneScreen() {
               accessibilityLabel={
                 "Pane " + paneNumber + " of " + tab.panes.length + ": " + pickName + (others ? ", " + others + " other" + (others === 1 ? "" : "s") + " need you" : "") + ". Switch pane"
               }
+              accessibilityState={{ expanded: picking && !focused }}
               accessibilityActions={pagerActions}
               onAccessibilityAction={(e) => goPane(swipeTarget(tab, paneId, e.nativeEvent.actionName === "next" ? 1 : -1))}
               hitSlop={{ top: 4, bottom: 4 }}
-              onPress={() => router.push({ pathname: "/panes", params: { key, pane: String(paneId) } })}
+              onPress={() => {
+                setPicking(true);
+                router.push({ pathname: "/panes", params: { key, pane: String(paneId) } });
+              }}
               style={({ pressed }) => [styles.picker, pressed && styles.pressed]}
             >
-              <Text style={[styles.pickMark, { color: mark?.claude ? avatarInk(CLAUDE_COLOR, colors) : colors.accent }]}>{mark?.mark}</Text>
+              {mark?.logo ? <AgentLogo logo={mark.logo} size={16} /> : <Text style={styles.pickMark}>{mark?.mark}</Text>}
               <Text style={styles.pickName} numberOfLines={1}>
                 {pickName}
               </Text>
@@ -596,7 +635,7 @@ export default function PaneScreen() {
                   <Text style={styles.pickWaitText}>{others}</Text>
                 </View>
               ) : null}
-              <Icon name="chevronDown" size={14} color={colors.textMuted} />
+              <Icon name={picking && !focused ? "chevronUp" : "chevronDown"} size={14} color={colors.textMuted} />
             </Pressable>
           </View>
         </View>
@@ -621,7 +660,8 @@ export default function PaneScreen() {
       {error ? <ErrorText style={styles.notice}>{error}</ErrorText> : null}
       {host && fullScreen && !closed ? (
         <>
-          <View style={[styles.fill, { paddingBottom: bareScreen ? 0 : bottomInset }, load?.held && styles.held]}>
+          {/* black under the key block (the New Screen board); the screen draws its own ground */}
+          <View style={[styles.fill, { paddingBottom: bareScreen ? 0 : bottomInset }, !bareScreen && styles.chromeGround, load?.held && styles.held]}>
             <TerminalView
               hostKey={key}
               paneId={paneId}
@@ -646,53 +686,43 @@ export default function PaneScreen() {
           </View>
           {bareScreen ? dockedFooter : null}
         </>
+      ) : closed ? (
+        // the New Blocks board: centred, what happened, the tab's other pane or Portals
+        <View style={styles.closed}>
+          <Text style={styles.closedTitle} accessibilityRole="header" accessibilityLiveRegion="polite">
+            This pane has closed
+          </Text>
+          <Text style={styles.closedText}>
+            {closedLoc
+              ? `It was closed on ${hostName}. Its tab has ${closedLoc.tab.panes.length === 1 ? "one other pane" : `${closedLoc.tab.panes.length} other panes`}.`
+              : `It was closed on ${hostName}, with its tab.`}
+          </Text>
+          <View style={styles.closedActions}>
+            {closedLoc ? (
+              <Button label="Other pane" variant="primary" numberOfLines={1} style={styles.closedAction} onPress={() => goPane(closedLoc.pane.id)} />
+            ) : null}
+            <Button label="Portals" variant={closedLoc ? "secondary" : "primary"} numberOfLines={1} style={styles.closedAction} onPress={() => router.dismissTo("/")} />
+          </View>
+        </View>
       ) : (
         <>
-          {searching !== null ? (
-            <View style={styles.search}>
-              <Field
-                icon="search"
-                label="Search output"
-                value={searching}
-                onChangeText={setSearch}
-                autoFocus
-                autoCapitalize="none"
-                autoCorrect={false}
-                placeholder="Search commands and output"
-                returnKeyType="search"
-                trailing={
-                  searching.trim() === "" ? null : (
-                    <Text style={styles.searchCount} accessibilityLiveRegion="polite">
-                      {`${shownBlocks} of ${blocks.length} ${blocks.length === 1 ? "block" : "blocks"}`}
-                    </Text>
-                  )
-                }
-              />
-            </View>
-          ) : null}
           {!host ? (
             // a tapped alert opens this page on a cold start before the paired computers are read
             s.ready ? <Text style={styles.empty}>This computer is not paired.</Text> : null
-          ) : closed ? (
-            <View style={styles.closed}>
-              <Text style={styles.closedText} accessibilityLiveRegion="polite">
-                This pane has closed.
-              </Text>
-              <Button label="Go to Portals" onPress={() => router.dismissTo("/")} />
-            </View>
           ) : !state ? null : blocks.length === 0 ? (
             <Text style={styles.empty}>No commands in this pane yet.</Text>
           ) : searching !== null && searching.trim() !== "" && shownBlocks === 0 ? (
             <Text style={styles.empty}>No block holds “{searching.trim()}”.</Text>
           ) : null}
           <View style={[styles.fill, load?.held && styles.held]}>
-            <SelectionScope ref={selectionScope} hostKey={key} paneId={paneId} canPrompt={operate && !closed} onBar={setSelBar}>
-              {!state && host && !closed ? <BlockSkeleton /> : null}
+            <SelectionScope ref={selectionScope} hostKey={key} paneId={paneId} canPrompt={operate} onBar={setSelBar}>
+              {/* the opening card stands alone on the page (the New Blocks board) */}
+              {!state && host && !load?.card ? <BlockSkeleton /> : null}
               {/* Not inverted: oldest first, so the reading order (and swiping through with a
                   screen reader) ends at the newest block, which the list starts scrolled to. */}
               <FlashList
                 ref={list}
-                data={closed ? [] : items}
+                data={items}
                 keyExtractor={itemKey}
                 getItemType={(it) => (it.kind === "fold" ? "fold" : it.block.state === "running" ? "running" : it.block.exit ? "failed" : "block")}
                 extraData={extraData}
@@ -729,7 +759,7 @@ export default function PaneScreen() {
                     </SelectionItem>
                   )
                 }
-                ListHeaderComponent={closed ? null : header}
+                ListHeaderComponent={header}
                 // opened at a block: no sticking to the bottom, which would scroll past it
                 maintainVisibleContentPosition={
                   target === null
@@ -755,14 +785,11 @@ export default function PaneScreen() {
       )}
       {menu ? (
         <>
-          <Pressable accessibilityRole="button" accessibilityLabel="Close menu" onPress={() => setMenu(false)} style={StyleSheet.absoluteFill} />
-          <View accessibilityRole="menu" accessibilityLabel="Pane options" style={[styles.menu, { top: headerPad + 50 }]}>
-            {fullScreen ? (
-              // wrapping is the blocks'; the screen is the program's own
-              hasFeature(host, "fit") ? (
-                <Text style={[styles.menuNote, styles.menuRule]}>The pane takes this phone's width here, so programs wrap their own lines.</Text>
-              ) : null
-            ) : (
+          {/* the board's scrim over the whole page, the header too; a tap on it closes the menu */}
+          <Pressable accessibilityRole="button" accessibilityLabel="Close menu" onPress={() => setMenu(false)} style={[StyleSheet.absoluteFill, styles.scrim]} />
+          <View accessibilityRole="menu" accessibilityLabel="Pane options" style={[styles.menu, { top: headerPad + MENU_DROP }]}>
+            {/* wrapping is the blocks'; a program's screen wraps its own lines; a closed pane has none */}
+            {fullScreen || closed ? null : (
               <MenuSwitch
                 icon="wrapOn"
                 title="Wrap long lines"
@@ -804,12 +831,13 @@ export default function PaneScreen() {
       ) : null}
       {computers && host ? (
         <>
-          <Pressable accessibilityRole="button" accessibilityLabel="Close menu" onPress={() => setComputers(false)} style={StyleSheet.absoluteFill} />
+          {/* the New Portals board's scrim over the whole page; a tap on it closes the menu */}
+          <Pressable accessibilityRole="button" accessibilityLabel="Close menu" onPress={() => setComputers(false)} style={[StyleSheet.absoluteFill, styles.scrim]} />
           <ComputerMenu
             hosts={s.hosts}
             current={key}
             now={now}
-            top={headerPad + 50}
+            top={headerPad + 48}
             onOpen={(h, p) => {
               setComputers(false);
               router.replace({ pathname: "/host/[key]/pane/[id]", params: { key: h, id: String(p) } });
@@ -826,18 +854,20 @@ export default function PaneScreen() {
           />
         </>
       ) : null}
+      {/* over the tab row, under the computer's row (the New Blocks board) */}
       {toast ? (
-        <View pointerEvents="none" style={[styles.toastWrap, { top: headerPad + 94 }]}>
-          <Text style={styles.toast} accessibilityLiveRegion="polite">
-            {toast}
-          </Text>
+        <View pointerEvents="none" style={[styles.toastWrap, { top: headerPad + MENU_DROP }]}>
+          <Toast text={toast} />
         </View>
       ) : null}
     </KeyboardAvoidingView>
   );
 }
 
-/** One of the ⋯ menu's actions: a destructive word. */
+/** The ⋯ menu and the toast hang this far under the header's top padding: over the tab row (the New Blocks board's 127 pt). */
+const MENU_DROP = 58;
+
+/** One of the ⋯ menu's actions: a destructive word, lined up with the titles of the rows with icons. */
 function MenuAction({ title, last, onPress }: { title: string; last?: boolean; onPress: () => void }) {
   const styles = useStyles();
   return (
@@ -845,7 +875,7 @@ function MenuAction({ title, last, onPress }: { title: string; last?: boolean; o
       accessibilityRole="menuitem"
       accessibilityLabel={title}
       onPress={onPress}
-      style={({ pressed }) => [styles.menuAction, !last && styles.menuRule, pressed && styles.pressed]}
+      style={({ pressed }) => [styles.menuRow, styles.menuAction, !last && styles.menuRule, pressed && styles.pressed]}
     >
       <Text style={styles.menuDestructive}>{title}</Text>
     </Pressable>
@@ -867,7 +897,7 @@ function MenuItem({ icon, title, hint, last, onPress }: { icon: "newPane" | "add
   );
 }
 
-/** One of the ⋯ menu's switches: an icon, the label and what it does, the 40 x 24 switch. */
+/** One of the ⋯ menu's switches: an icon, the label and what it does, the 51 x 31 switch. */
 function MenuSwitch({
   icon,
   title,
@@ -903,22 +933,22 @@ function MenuSwitch({
         <Text style={styles.menuTitle}>{title}</Text>
         <Text style={styles.menuHint}>{hint}</Text>
       </View>
-      <View style={[styles.track, { backgroundColor: on ? colors.accent : colors.borderStrong }]}>
-        <View style={[styles.knob, { left: on ? 18 : 2 }]} />
-      </View>
+      <Toggle on={on} />
     </Pressable>
   );
 }
 
 const useStyles = makeStyles((colors) => ({
   fill: { flex: 1, backgroundColor: colors.bg },
+  chromeGround: { backgroundColor: colors.chrome },
   flex: { flex: 1 },
   pressed: { opacity: 0.7 },
-  // the Pane board's header: chrome, 12 pt gutter, 10 pt between its two rows, a hairline under
-  header: { backgroundColor: colors.chrome, paddingHorizontal: 12, paddingBottom: 10, gap: 10, borderBottomWidth: 1, borderBottomColor: colors.hairline },
+  // the New Blocks board's header block: the computer's row, the tab row and the search field on
+  // the chrome, 14 pt gutter, 8 pt between rows, one hairline under all of it
+  header: { backgroundColor: colors.chrome, paddingHorizontal: 14, paddingBottom: 8, gap: 8, borderBottomWidth: 1, borderBottomColor: colors.hairline },
   headerRow: { flexDirection: "row", alignItems: "center", gap: 8 },
-  titleButton: { flex: 1, minWidth: 0, minHeight: 44, justifyContent: "center", paddingHorizontal: 6 },
-  titleLine: { flexDirection: "row", alignItems: "center", gap: 7 },
+  titleButton: { flex: 1, minWidth: 0, minHeight: 38, justifyContent: "center" },
+  titleLine: { flexDirection: "row", alignItems: "center", gap: 8 },
   hostDot: { width: 8, height: 8, borderRadius: 4 },
   // the pane picker under the tab row, for a tab of several panes
   // the selection bar over the pane's controls (hidden in place under it)
@@ -926,9 +956,7 @@ const useStyles = makeStyles((colors) => ({
   dock: { position: "absolute", left: 0, right: 0, backgroundColor: colors.chrome },
   overCard: { backgroundColor: colors.chrome },
   paneRow: { backgroundColor: colors.chrome, paddingHorizontal: 12, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: colors.hairline },
-  title: { flexShrink: 1, fontFamily: ui(600), color: colors.textBright, fontSize: 17 },
-  // the ⋯ in the glass pill, as a GlassGroup's 38 pt button (it reports its menu as expanded)
-  action: { width: 38, height: 38, borderRadius: 19, alignItems: "center", justifyContent: "center" },
+  title: { flexShrink: 1, fontFamily: ui(600), color: colors.textBright, fontSize: 16, lineHeight: 20 },
   pickRow: { flexDirection: "row", alignItems: "center", gap: 6 },
   picker: {
     flex: 1,
@@ -944,7 +972,7 @@ const useStyles = makeStyles((colors) => ({
     borderColor: colors.glassRim,
     backgroundColor: colors.faint,
   },
-  pickMark: { fontFamily: mono, fontSize: 13 },
+  pickMark: { fontFamily: mono, fontSize: 13, color: colors.accent },
   pickName: { flexShrink: 1, fontFamily: ui(500), color: colors.textBright, fontSize: 13 },
   pickPos: { fontFamily: ui(500), color: colors.textMuted, fontSize: 13 },
   pickWait: { flexDirection: "row", alignItems: "center", gap: 5 },
@@ -952,46 +980,36 @@ const useStyles = makeStyles((colors) => ({
   pickWaitText: { fontFamily: ui(400), color: colors.warning, fontSize: 12 },
   // blocks held in memory while the pane reconnects (PaneLoading board)
   held: { opacity: 0.55 },
-  // the ⋯ menu: 280 wide under the button, 14 pt radius, #2c2c30 with a soft shadow
+  // the ⋯ menu's scrim (the New Blocks board's #00000066)
+  scrim: { backgroundColor: "#00000066" },
+  // the ⋯ menu: 270 wide, 16 pt from the right, 14 pt radius, the board's #28282a with its rim and shadow
   menu: {
     position: "absolute",
-    right: 12,
-    width: 280,
+    right: 16,
+    width: 270,
     borderRadius: 14,
-    backgroundColor: colors.menu,
+    backgroundColor: colors.popover,
     borderWidth: 1,
-    borderColor: colors.glassRim,
+    borderColor: colors.borderStrong,
     overflow: "hidden",
     shadowColor: "#000000",
-    shadowOpacity: 0.6,
+    shadowOpacity: 0.67,
     shadowRadius: 20,
-    shadowOffset: { width: 0, height: 16 },
+    shadowOffset: { width: 0, height: 12 },
     elevation: 16,
   },
-  menuRow: { minHeight: 56, flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 14 },
-  menuRule: { borderBottomWidth: 1, borderBottomColor: colors.hairline },
-  // between the menu's groups: a band of the page's ground, as iOS menus part theirs
-  menuNote: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12, lineHeight: 17, paddingHorizontal: 14, paddingVertical: 12 },
-  // the text column of the rows with icons (14 + the 20 pt icon + 12)
-  menuAction: { minHeight: 48, justifyContent: "center", paddingLeft: 46, paddingRight: 14 },
+  // a row: 48 pt and 6 pt above and below, 14 in, 10 between the icon, the words and the switch
+  menuRow: { minHeight: 60, flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 14, paddingVertical: 6 },
+  // one hairline under every row but the last (no band between groups: the user's call)
+  menuRule: { minHeight: 61, borderBottomWidth: 1, borderBottomColor: colors.hairline },
+  // Close pane, Close tab: no icon, the words where the other rows' titles start (14 + 20 + 10)
+  menuAction: { paddingLeft: 44 },
   // Close pane, Close tab: the destructive red (orange is for "needs you" only)
-  menuDestructive: { fontFamily: ui(400), color: colors.error, fontSize: 15 },
-  menuText: { flex: 1, gap: 2, paddingVertical: 8 },
-  menuTitle: { fontFamily: ui(400), color: colors.textBright, fontSize: 15 },
-  menuHint: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12 },
-  track: { width: 40, height: 24, borderRadius: 12 },
-  knob: { position: "absolute", top: 2, width: 20, height: 20, borderRadius: 10, backgroundColor: colors.textBright },
+  menuDestructive: { fontFamily: ui(400), color: colors.error, fontSize: 15, lineHeight: 20 },
+  menuText: { flex: 1 },
+  menuTitle: { fontFamily: ui(400), color: colors.text, fontSize: 15, lineHeight: 20 },
+  menuHint: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12, lineHeight: 16 },
   toastWrap: { position: "absolute", left: 0, right: 0, alignItems: "center" },
-  toast: {
-    fontFamily: ui(500),
-    color: colors.bg,
-    fontSize: 14,
-    paddingVertical: 10,
-    paddingHorizontal: 16,
-    borderRadius: 20,
-    overflow: "hidden",
-    backgroundColor: colors.textBright,
-  },
   cardGap: { paddingHorizontal: 12, paddingVertical: 4 },
   // a question the card does not answer (a password, input, a view-only device): one tap to the answer page
   asking: {
@@ -1007,7 +1025,8 @@ const useStyles = makeStyles((colors) => ({
   askingDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.warning },
   askingText: { flex: 1, fontFamily: ui(400), color: colors.textBright, fontSize: 13 },
   askingLink: { fontFamily: ui(400), color: colors.accent, fontSize: 13 },
-  listContent: { paddingTop: 6, paddingBottom: 4 },
+  // the board's 12 pt around the cards (with the cards' own 4)
+  listContent: { paddingTop: 8, paddingBottom: 8 },
   older: {
     alignSelf: "center",
     minHeight: 36,
@@ -1022,18 +1041,18 @@ const useStyles = makeStyles((colors) => ({
   olderText: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12 },
   capped: { fontFamily: ui(400), color: colors.textDim, fontSize: 12, textAlign: "center", padding: 12 },
   empty: { fontFamily: ui(400), color: colors.textMuted, fontSize: 14, padding: 16 },
-  closed: { padding: 16, gap: 12, alignItems: "flex-start" },
-  closedText: { fontFamily: ui(400), color: colors.textBright, fontSize: 15 },
+  // a pane that closed: centred in the page, 14 pt apart, 24 pt in
+  closed: { flex: 1, backgroundColor: colors.bg, alignItems: "center", justifyContent: "center", gap: 14, padding: 24 },
+  closedTitle: { fontFamily: ui(600), color: colors.textBright, fontSize: 18, lineHeight: 24, textAlign: "center" },
+  closedText: { fontFamily: ui(400), color: colors.textMuted, fontSize: 14, lineHeight: 20, textAlign: "center" },
+  // two buttons of one width side by side (the board's 106 pt each), the words fitted to them
+  closedActions: { flexDirection: "row", gap: 10 },
+  closedAction: { width: 106, paddingHorizontal: 8 },
   notice: { paddingHorizontal: 16, paddingVertical: 6 },
-  // the field across the whole width (the Standard)
-  search: {
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    backgroundColor: colors.chrome,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.hairline,
-  },
-  searchCount: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13 },
+  // the search field in the header block, 4 pt under the tab row
+  search: { paddingTop: 4 },
+  // "2 of 14 blocks", centred under the field
+  searchCount: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12, lineHeight: 16, textAlign: "center" },
   viewOnly: {
     fontFamily: ui(400),
     color: colors.textDim,

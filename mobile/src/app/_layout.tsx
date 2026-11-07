@@ -208,8 +208,8 @@ export default function RootLayout() {
               options={{
                 title: "New tab",
                 presentation: "formSheet",
-                sheetAllowedDetents: [0.85],
-                sheetGrabberVisible: true,
+                sheetAllowedDetents: "fitToContents",
+                sheetGrabberVisible: false,
                 sheetCornerRadius: 20,
                 headerShown: false,
                 contentStyle: { backgroundColor: colors.surface },
@@ -220,8 +220,8 @@ export default function RootLayout() {
               options={{
                 title: "New pane",
                 presentation: "formSheet",
-                sheetAllowedDetents: [0.7],
-                sheetGrabberVisible: true,
+                sheetAllowedDetents: "fitToContents",
+                sheetGrabberVisible: false,
                 sheetCornerRadius: 20,
                 headerShown: false,
                 contentStyle: { backgroundColor: colors.surface },
@@ -232,8 +232,8 @@ export default function RootLayout() {
               options={{
                 title: "Attach",
                 presentation: "formSheet",
-                sheetAllowedDetents: [0.66],
-                sheetGrabberVisible: true,
+                sheetAllowedDetents: "fitToContents",
+                sheetGrabberVisible: false,
                 sheetCornerRadius: 20,
                 headerShown: false,
                 contentStyle: { backgroundColor: colors.surface },
@@ -258,6 +258,8 @@ export default function RootLayout() {
             />
             <Stack.Screen name="control-keys" options={{ headerShown: false, title: "Keys" }} />
             <Stack.Screen name="answer" options={{ headerShown: false, title: "Answer" }} />
+            {/* a question card's Full diff (AskCard.tsx): its own page, not a sheet */}
+            <Stack.Screen name="change" options={{ headerShown: false, title: "A change in full" }} />
             <Stack.Screen name="diagnostics" options={{ headerShown: false, title: "Diagnostics" }} />
             <Stack.Screen name="changelog" options={{ headerShown: false, title: "What's New" }} />
             <Stack.Screen
@@ -265,8 +267,8 @@ export default function RootLayout() {
               options={{
                 title: "What's New",
                 presentation: "formSheet",
-                sheetAllowedDetents: [0.75, 1],
-                sheetGrabberVisible: true,
+                sheetAllowedDetents: "fitToContents",
+                sheetGrabberVisible: false,
                 sheetCornerRadius: 20,
                 headerShown: false,
                 contentStyle: { backgroundColor: colors.surface },
@@ -278,7 +280,7 @@ export default function RootLayout() {
                 title: "Command",
                 presentation: "formSheet",
                 sheetAllowedDetents: "fitToContents",
-                sheetGrabberVisible: true,
+                sheetGrabberVisible: false,
                 sheetCornerRadius: 20,
                 headerShown: false,
                 contentStyle: { backgroundColor: colors.surface },
@@ -289,12 +291,13 @@ export default function RootLayout() {
               options={({ route }) => ({
                 title: "Prompt chip",
                 presentation: "formSheet",
-                // the pull request, interpreter, Docker and Time on tab menus are short: the sheet fits them
+                // the pull request, interpreter, Docker and Time on tab menus are short: the sheet fits
+                // them; Change folder has its board's height (chips.tsx)
                 sheetAllowedDetents:
-                  ["pr", "python", "php", "docker", "elapsed"].includes((route.params as { menu?: string } | undefined)?.menu ?? "")
+                  ["dirs", "pr", "python", "php", "docker", "elapsed"].includes((route.params as { menu?: string } | undefined)?.menu ?? "")
                     ? "fitToContents"
                     : [0.75, 1],
-                sheetGrabberVisible: true,
+                sheetGrabberVisible: false,
                 sheetCornerRadius: 20,
                 headerShown: false,
                 contentStyle: { backgroundColor: colors.surface },
@@ -306,7 +309,7 @@ export default function RootLayout() {
                 title: "This pane",
                 presentation: "formSheet",
                 sheetAllowedDetents: "fitToContents",
-                sheetGrabberVisible: true,
+                sheetGrabberVisible: false,
                 sheetCornerRadius: 20,
                 headerShown: false,
                 contentStyle: { backgroundColor: colors.surface },
@@ -318,7 +321,7 @@ export default function RootLayout() {
                 title: "Diff",
                 presentation: "formSheet",
                 sheetAllowedDetents: [1],
-                sheetGrabberVisible: true,
+                sheetGrabberVisible: false,
                 sheetCornerRadius: 20,
                 headerShown: false,
                 contentStyle: { backgroundColor: colors.surface },
@@ -330,7 +333,7 @@ export default function RootLayout() {
                 title: "Connection",
                 presentation: "formSheet",
                 sheetAllowedDetents: "fitToContents",
-                sheetGrabberVisible: true,
+                sheetGrabberVisible: false,
                 sheetCornerRadius: 20,
                 headerShown: false,
                 contentStyle: { backgroundColor: colors.surface },
@@ -342,7 +345,7 @@ export default function RootLayout() {
                 title: "Run command",
                 presentation: "formSheet",
                 sheetAllowedDetents: "fitToContents",
-                sheetGrabberVisible: true,
+                sheetGrabberVisible: false,
                 sheetCornerRadius: 20,
                 headerShown: false,
                 contentStyle: { backgroundColor: colors.surface },

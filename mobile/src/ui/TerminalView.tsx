@@ -62,12 +62,13 @@ import { ControlRow, NO_STICKY, type Sticky } from "./ControlRow";
 import { ScreenSkeleton } from "./PaneLoading";
 import { useOpenShell } from "./useOpenShell";
 import { ErrorText, WarningText } from "./Notice";
-import { fromPalette, mono, monoBold, ui, makeStyles, useColors } from "./theme";
+import { fromPalette, mono, monoBold, tint, ui, makeStyles, useColors } from "./theme";
 
 /** The terminal's default colours (a run's null fg / bg): terminal text on the pane's ground. */
 const defaultColors = fromPalette((colors) => ({ fg: colors.fg, bg: colors.bg }));
 const PADDING = 8;
-const PADDING_X = 6;
+// the program screen board: 8 pt over and under the rows, 10 pt either side
+const PADDING_X = 10;
 
 function decoration(flags: number): TextStyle["textDecorationLine"] {
   const u = (flags & RUN_UNDERLINE) !== 0;
@@ -75,13 +76,13 @@ function decoration(flags: number): TextStyle["textDecorationLine"] {
   return u && s ? "underline line-through" : u ? "underline" : s ? "line-through" : undefined;
 }
 
-/** A selection handle: a 2 pt stem the row's height with an 18 pt knob (above the start, below the end), and how close a finger must come to take it (44 pt, either side). */
-const STEM = 2;
+/** A selection handle: an 18 pt accent knob with a dark rim on the selection's corner (the start's top left, the end's bottom right), and how close a finger must come to take it (44 pt, either side). */
 const KNOB = 18;
 const HANDLE_REACH = 44;
-/** The loupe over a dragged handle: its size, how much larger it draws the row, and its gap above the finger's row. */
+/** The loupe over a dragged handle (the selection board): 150 × 46, the row in mono 22, and its gap above the finger's row. */
 const LOUPE_W = 150;
-const LOUPE_SCALE = 1.6;
+const LOUPE_H = 46;
+const LOUPE_FONT = 22;
 const LOUPE_GAP = 28;
 /** Hold this long, still, and a touch starts a selection. */
 const SELECT_HOLD_MS = 450;
@@ -218,14 +219,14 @@ export function handleSpots(a: Cell, b: Cell, cell: number, rowHeight: number) {
   return {
     from,
     to,
-    start: { x: from.col * cell, y: from.row * rowHeight - KNOB / 2 },
-    end: { x: (to.col + 1) * cell, y: (to.row + 1) * rowHeight + KNOB / 2 },
+    start: { x: from.col * cell, y: from.row * rowHeight },
+    end: { x: (to.col + 1) * cell, y: (to.row + 1) * rowHeight },
   };
 }
 
 /**
- * The selected cells' ground and a handle at each end (a stem the row's height, the start's knob
- * above it, the end's below): drawn only, the view's touches move them.
+ * The selected cells' ground and a knob at each end (on the first cell's top left corner and the
+ * last cell's bottom right): drawn only, the view's touches move them.
  */
 function SelectionMarks({ a, b, cols, cell, rowHeight }: { a: Cell; b: Cell; cols: number; cell: number; rowHeight: number }) {
   const styles = useStyles();
@@ -239,36 +240,37 @@ function SelectionMarks({ a, b, cols, cell, rowHeight }: { a: Cell; b: Cell; col
   return (
     <View pointerEvents="none" style={StyleSheet.absoluteFill} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
       {bands}
-      <View style={[styles.stem, { left: start.x - STEM / 2, top: from.row * rowHeight, height: rowHeight }]} />
       <View style={[styles.knob, { left: start.x - KNOB / 2, top: start.y - KNOB / 2 }]} />
-      <View style={[styles.stem, { left: end.x - STEM / 2, top: to.row * rowHeight, height: rowHeight }]} />
       <View style={[styles.knob, { left: end.x - KNOB / 2, top: end.y - KNOB / 2 }]} />
     </View>
   );
 }
 
 /**
- * The loupe over a dragged handle: the finger's row drawn larger, centred on the handle's cell with
- * a caret there, above the row (below it on the first rows) so the finger never hides what it picks.
+ * The loupe over a dragged handle (the selection board): the finger's row in mono 22 on the
+ * surface, centred on the handle's cell with a caret there, above the row (below it on the first
+ * rows) so the finger never hides what it picks.
  */
-function Loupe({ row, edge, screen, fontSize, rowHeight, cell, fg, bg }: { row: number; edge: number; screen: ScreenState; fontSize: number; rowHeight: number; cell: number; fg: string; bg: string }) {
+function Loupe({ row, edge, screen, rowHeight, cell }: { row: number; edge: number; screen: ScreenState; rowHeight: number; cell: number }) {
+  const colors = useColors();
   const styles = useStyles();
-  const big = fontSize * LOUPE_SCALE;
-  const bigRow = Math.round(big * LINE_RATIO);
-  const height = bigRow + 12;
+  const bigCell = LOUPE_FONT * CELL_RATIO;
+  const bigRow = Math.round(LOUPE_FONT * LINE_RATIO);
+  const inner = LOUPE_H - 2;
   // `edge`: the column boundary the handle stands on
   const x = edge * cell;
   const left = Math.max(0, Math.min(x - LOUPE_W / 2, screen.cols * cell - LOUPE_W));
   const centre = x - left;
-  const above = row * rowHeight - LOUPE_GAP - height;
+  const above = row * rowHeight - LOUPE_GAP - LOUPE_H;
   const top = above >= 0 ? above : (row + 1) * rowHeight + LOUPE_GAP;
-  const width = Math.ceil(screen.cols * big * CELL_RATIO) + 2;
+  const width = Math.ceil(screen.cols * bigCell) + 2;
+  const rowTop = (inner - bigRow) / 2;
   return (
-    <View pointerEvents="none" accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={[styles.loupe, { left, top, height, backgroundColor: bg }]}>
-      <View style={{ position: "absolute", top: 6, left: centre - edge * big * CELL_RATIO, width }}>
-        <Row runs={screen.lines[row] ?? []} cursorCol={null} fontSize={big} width={width} rule={null} fg={fg} bg={bg} links={NO_LINKS} />
+    <View pointerEvents="none" accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={[styles.loupe, { left, top }]}>
+      <View style={{ position: "absolute", top: rowTop, left: centre - 1 - edge * bigCell, width }}>
+        <Row runs={screen.lines[row] ?? []} cursorCol={null} fontSize={LOUPE_FONT} width={width} rule={null} fg={colors.textBright} bg={colors.surface} links={NO_LINKS} />
       </View>
-      <View style={[styles.loupeCaret, { left: centre - 1, top: 6, height: bigRow }]} />
+      <View style={[styles.loupeCaret, { left: centre - 2, top: rowTop, height: bigRow }]} />
     </View>
   );
 }
@@ -338,7 +340,7 @@ function Grid({
         />
       ))}
       {selection ? <SelectionMarks a={selection.a} b={selection.b} cols={screen.cols} cell={fontSize * CELL_RATIO} rowHeight={rowHeight} /> : null}
-      {selection && loupe ? <Loupe row={loupe.row} edge={loupe.edge} screen={screen} fontSize={fontSize} rowHeight={rowHeight} cell={fontSize * CELL_RATIO} fg={defaults.fg} bg={defaults.bg} /> : null}
+      {selection && loupe ? <Loupe row={loupe.row} edge={loupe.edge} screen={screen} rowHeight={rowHeight} cell={fontSize * CELL_RATIO} /> : null}
     </View>
   );
   return (
@@ -568,8 +570,8 @@ export function TerminalView({
         const y = (lastTextRow(screen.lines) + 1) * rowHeight.current + PADDING - local.current.viewH;
         scroller.current?.scrollTo({ y: Math.max(0, y), animated: false });
       } else {
-        // the keyboard is up over a tall screen: the cursor stays in sight, not the blank rows at the end
-        const y = keepHeight ? null : cursorScrollY(screen?.cursor?.[0], rowHeight.current, PADDING, local.current.viewH);
+        // the keyboard is up over a tall screen: the last text and the cursor stay in sight, not the blank rows at the end
+        const y = keepHeight || !screen ? null : cursorScrollY(screen.cursor?.[0], lastTextRow(screen.lines), rowHeight.current, PADDING, local.current.viewH);
         if (y !== null) scroller.current?.scrollTo({ y, animated: false });
         else scroller.current?.scrollToEnd({ animated: false });
       }
@@ -1241,15 +1243,14 @@ const useStyles = makeStyles((colors) => ({
   // a selection's ground and its handles; the bar floats over the top of the screen
   age: { paddingHorizontal: 12, paddingVertical: 4, backgroundColor: colors.chrome },
   ageText: { fontFamily: ui(500), color: colors.textMuted, fontSize: 12 },
-  band: { position: "absolute", backgroundColor: `${colors.accent}55` },
-  stem: { position: "absolute", width: STEM, borderRadius: STEM / 2, backgroundColor: colors.accent },
+  band: { position: "absolute", backgroundColor: colors.selection },
   knob: { position: "absolute", width: KNOB, height: KNOB, borderRadius: KNOB / 2, backgroundColor: colors.accent, borderWidth: 2, borderColor: colors.bg },
-  loupe: { position: "absolute", width: LOUPE_W, overflow: "hidden", borderRadius: 22, borderWidth: 1, borderColor: colors.borderStrong, elevation: 10, shadowColor: "#000", shadowOpacity: 0.8, shadowRadius: 14, shadowOffset: { width: 0, height: 8 } },
-  loupeCaret: { position: "absolute", width: 2, borderRadius: 1, backgroundColor: colors.accent },
+  loupe: { position: "absolute", width: LOUPE_W, height: LOUPE_H, overflow: "hidden", borderRadius: LOUPE_H / 2, borderWidth: 1, borderColor: tint(colors.textBright, 0x33), backgroundColor: colors.surface },
+  loupeCaret: { position: "absolute", width: 2, borderRadius: 1, backgroundColor: colors.textBright },
   selectKeyText: { fontFamily: ui(500), color: colors.text, fontSize: 14 },
   copiedBar: { position: "absolute", top: 8, alignSelf: "center", paddingHorizontal: 14, height: 36, justifyContent: "center", borderRadius: 18, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.glassRim, elevation: 8 },
   bareError: { paddingHorizontal: 12, paddingVertical: 6, backgroundColor: colors.chrome },
-  // a block's rule: 2 px in the 6 pt gutter left of the row
+  // a block's rule: 2 px in the 10 pt gutter left of the row
   rule: { position: "absolute", left: -4, top: 0, width: 2 },
   disabled: { opacity: 0.45 },
   pressed: { opacity: 0.7 },

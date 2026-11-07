@@ -4,7 +4,7 @@ import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
 import { themeStub } from "./helpers/themeStub";
 
-type Node = { type: string; props: { label?: string; disabled?: boolean; onPress?: () => void; children: unknown[] } };
+type Node = { type: string; props: { label?: string; disabled?: boolean; onPress?: () => void; children: unknown[]; footer?: unknown } };
 type Auth = { ok: true } | { ok: false; message: string };
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 
@@ -67,7 +67,7 @@ function harness(deferRun = false, parent = false, locked = false) {
     "@/topology": { findPane: () => ({ pane: {} }), paneBranch: () => "", paneTitle: () => "Fixture pane", runningCommand: () => null },
     "@/ui/Button": { Button: "Button" },
     "@/ui/Notice": { ErrorText: "ErrorText", WarningText: "WarningText" },
-    "@/ui/SheetHeader": { SheetHeader: "SheetHeader" },
+    "@/ui/SheetFrame": { SheetFrame: "SheetFrame", SheetButtons: "SheetButtons" },
     "@/ui/theme": themeStub,
     "@/ui/useSingleFlight": load("../src/ui/useSingleFlight.ts", {}),
     "@/ui/useActionScope": load("../src/ui/useActionScope.ts", { "expo-router": { useFocusEffect: (effect: () => (() => void)) => cleanups.push(effect()) } }),
@@ -79,6 +79,8 @@ function harness(deferRun = false, parent = false, locked = false) {
     const node = value as Node;
     if (node.type === "Button") buttons.push(node);
     node.props?.children.forEach(walk);
+    // a sheet's pinned actions (SheetFrame `footer`)
+    walk(node.props?.footer);
   }
   walk((screen.default as () => Node)());
   const button = buttons.find((node) => node.props.label === "Run");

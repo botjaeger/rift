@@ -92,7 +92,7 @@ export default function PanesScreen() {
           </View>
         ) : null}
         {loc ? (
-          <View style={styles.list} accessibilityRole="list" accessibilityLabel={`Panes in ${tabTitle(loc.tab)}`}>
+          <View accessibilityRole="list" accessibilityLabel={`Panes in ${tabTitle(loc.tab)}`}>
             {rows.map((r, i) => {
               const on = r.id === paneId;
               const p = loc.tab.panes[i]!;
@@ -103,18 +103,18 @@ export default function PanesScreen() {
                     <ListRow
                       handle={handle}
                       movable={movable}
-                      lead={<Tile agent={r.claude} program={programName(p)} size={32} radius={9} promptSize={12} />}
+                      lead={<Tile agent={r.claude} program={programName(p)} />}
                       title={r.name}
                       // the title names the program: the line says what it does
                       line={sum.activity}
-                      lineCodes={sum.codes}
                       kind={sum.kind}
                       when={sum.when}
                       label={`Pane ${r.number} of ${rows.length}: ${r.name}, ${sum.state}, ${sum.activity}`}
                       selected={on}
                       onPress={() => pick(r.id)}
                       onClose={closeable ? () => closePane(r.id, "pane") : undefined}
-                      closeLabel={`Close pane ${r.name}`}
+                      // the number tells two panes running the same program apart
+                      closeLabel={`Close pane ${r.number}: ${r.name}`}
                     />
                   )}
                 </ReorderRow>
@@ -134,7 +134,5 @@ const useStyles = makeStyles((colors) => ({
   hidden: { opacity: 0 },
   pad: { paddingHorizontal: 16, paddingTop: 12 },
   cap: { paddingHorizontal: 16, paddingTop: 18, paddingBottom: 8 },
-  // edge to edge, as the Tabs page's rows
-  list: { borderTopWidth: 1, borderTopColor: colors.hairline },
   gone: { fontFamily: ui(400), color: colors.textMuted, fontSize: 14 },
 }));

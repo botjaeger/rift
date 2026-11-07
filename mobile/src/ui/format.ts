@@ -101,39 +101,3 @@ export function updateStatusText(
       return "Not checked yet";
   }
 }
-
-/** A run of a row's line: words (Inter) or a command, path or output (`code`, mono). */
-export interface Span {
-  text: string;
-  code: boolean;
-}
-
-/**
- * A line that mixes words with a command ("idle · echo one ✓") cut into runs, so only the
- * command, path or output in it is drawn mono (the Standard: words in Inter). `codes` are the
- * line's commands and paths; each occurrence is a mono run, the earliest (then the longest) first.
- */
-export function codeSpans(line: string, codes: readonly (string | null | undefined)[]): Span[] {
-  const wanted = codes.filter((c): c is string => typeof c === "string" && c.trim() !== "");
-  const out: Span[] = [];
-  const push = (text: string, code: boolean) => {
-    if (text === "") return;
-    const last = out[out.length - 1];
-    if (last && last.code === code) last.text += text;
-    else out.push({ text, code });
-  };
-  let at = 0;
-  while (at < line.length) {
-    let best: { i: number; c: string } | null = null;
-    for (const c of wanted) {
-      const i = line.indexOf(c, at);
-      if (i >= 0 && (best === null || i < best.i || (i === best.i && c.length > best.c.length))) best = { i, c };
-    }
-    if (!best) break;
-    push(line.slice(at, best.i), false);
-    push(best.c, true);
-    at = best.i + best.c.length;
-  }
-  push(line.slice(at), false);
-  return out;
-}

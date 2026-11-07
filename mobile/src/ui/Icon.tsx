@@ -59,6 +59,8 @@ const ICONS = {
   editKeys: { ios: "slider.horizontal.3", android: "tune", web: "tune" },
 
   chevronDown: { ios: "chevron.down", android: "expand_more", web: "expand_more" },
+  // a ⌄ whose menu or sheet is open points up
+  chevronUp: { ios: "chevron.up", android: "expand_less", web: "expand_less" },
   // the computer menu's Connection row
   wifi: { ios: "wifi", android: "wifi", web: "wifi" },
   // the tab row's ‹ ›: one shape both ways (back and forward differ on Android)

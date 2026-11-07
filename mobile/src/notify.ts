@@ -224,10 +224,10 @@ export function tapTarget(
  */
 export function pushTokenProblem(detail: string): string {
   if (/firebase|fcm/i.test(detail)) return "this build is not set up for Android push.";
-  return "the system gave no push token.";
+  return "this phone gave no push token.";
 }
 
-/** Settings › Notifications' footer: where notifications come from, and what push carries. */
+/** While the app is closed's footer with ntfy off: where notifications come from, and what push carries. */
 export function pushFooter(
   push: { state: "on" } | { state: "off" } | { state: "unavailable"; reason: string },
   ntfyOn = false,
@@ -240,6 +240,6 @@ export function pushFooter(
     case "off":
       return "Notifications come from this app while it is open. Allow notifications to get them while it is closed too.";
     case "unavailable":
-      return `Notifications come only while this app is open: ${push.reason} Turn on Alerts through ntfy to get them while it is closed.`;
+      return `Without it, notifications come only while this app is open: ${push.reason}`;
   }
 }

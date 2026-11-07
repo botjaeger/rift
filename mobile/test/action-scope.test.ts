@@ -47,7 +47,7 @@ function harness() {
     "@/ui/theme": themeStub,
     "@/closing": { afterClose: () => 13, closedText: () => "Closed", closeConfirm: () => null, closesCurrent: () => true, runningCount: () => 0 },
     "./confirm": { confirmDestructive: () => Promise.resolve(true) },
-    "@/ui/Rows": { Group: "Group", CardBox: "CardBox", SwitchRow: "SwitchRow" },
+    "@/ui/Rows": { Group: "Group", CardBox: "CardBox", SwitchRow: "SwitchRow", ROW_HEIGHT: { regular: 68, compact: 44 } },
   };
   function load(path: string): Record<string, unknown> {
     let source = readFileSync(new URL(`../src/${path}`, import.meta.url), "utf8");

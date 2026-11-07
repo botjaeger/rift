@@ -6,7 +6,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { parsePairLink } from "@/pairing";
 import { Button } from "@/ui/Button";
 import { PageHeader } from "@/ui/Screen";
-import { radius, ui, makeStyles, PaletteProvider, paletteOf } from "@/ui/theme";
+import { ui, makeStyles, PaletteProvider, paletteOf } from "@/ui/theme";
 import { DARK_DEFAULT } from "@/ui/palette";
 import { StatusBar } from "expo-status-bar";
 
@@ -41,9 +41,9 @@ function ScanPage() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const window = useWindowDimensions();
-  // the board's 300 pt frame, smaller on a narrow or short phone (320 × 568) so the copy and
-  // its button stay above the paste button; the page scrolls if they still do not fit
-  const frame = Math.max(200, Math.min(300, window.width - 48, window.height - 420));
+  // the board's 264 pt frame, smaller on a narrow or short phone (320 × 568) so the copy and
+  // its buttons stay in sight; the page scrolls if they still do not fit
+  const frame = Math.max(200, Math.min(264, window.width - 48, window.height - 420));
   const [permission, requestPermission] = useCameraPermissions();
   const [wrongCode, setWrongCode] = useState(false);
   const handled = useRef(false);
@@ -64,8 +64,10 @@ function ScanPage() {
 
   return (
     <View style={styles.fill}>
-      <PageHeader title="Pair a computer" back={close} backIcon="close" />
-      <ScrollView style={styles.flex} contentContainerStyle={styles.body}>
+      <PageHeader title="Pair a computer" back={close} />
+      {/* the New Pairing board: the viewfinder, the heading on the left, the path under it, and at the
+          bottom Allow camera full width over the paste link */}
+      <ScrollView style={styles.flex} contentContainerStyle={[styles.body, { paddingBottom: Math.max(16, insets.bottom) }]}>
         <View style={[styles.viewfinder, { width: frame, height: frame }]} accessible={!granted} accessibilityLabel="Camera view with a frame for the code">
           {granted ? (
             <CameraView
@@ -78,50 +80,44 @@ function ScanPage() {
           ) : null}
           <Corners />
         </View>
-        <View style={styles.copy}>
-          <Text style={styles.title} accessibilityRole="header">
-            {permission && !granted && blocked ? "Camera access is off" : "Scan the code on your computer"}
-          </Text>
-          <Text style={[styles.text, wrongCode && granted && styles.wrong]} accessibilityLiveRegion="polite">
-            {permission && !granted
-              ? blocked
-                ? "Rift may not use the camera. Turn it on in Settings, or paste the pairing link instead."
-                : "Rift › Settings › Remote access › Pair a phone. The camera only reads that code."
-              : wrongCode
-                ? "That QR code is not a Rift pairing code."
-                : "Rift › Settings › Remote access › Pair a phone"}
-          </Text>
-          {permission && !granted ? (
-            blocked ? (
-              <Button label="Open Settings" variant="primary" onPress={() => void Linking.openSettings()} />
-            ) : (
-              <Button label="Allow camera" variant="primary" onPress={() => void requestPermission()} />
-            )
-          ) : null}
-        </View>
+        <Text style={styles.title} accessibilityRole="header">
+          {permission && !granted && blocked ? "Camera access is off" : "Scan the code on your computer"}
+        </Text>
+        <Text style={[styles.text, wrongCode && granted && styles.wrong]} accessibilityLiveRegion="polite">
+          {permission && !granted && blocked
+            ? "Rift may not use the camera. Turn it on in Settings, or paste the pairing link instead."
+            : granted && wrongCode
+              ? "That QR code is not a Rift pairing code."
+              : "Rift › Settings › Remote access › Pair a phone"}
+        </Text>
+        <View style={styles.flex} />
+        {permission && !granted ? (
+          blocked ? (
+            <Button label="Open Settings" variant="primary" style={styles.wide} onPress={() => void Linking.openSettings()} />
+          ) : (
+            <Button label="Allow camera" variant="primary" style={styles.wide} onPress={() => void requestPermission()} />
+          )
+        ) : null}
+        <Button label="Paste a pairing link" variant="text" style={styles.wide} onPress={() => router.replace("/add")} />
       </ScrollView>
-      <View style={[styles.actions, { paddingBottom: Math.max(40, insets.bottom + 6) }]}>
-        <Button label="Paste a pairing link" onPress={() => router.replace("/add")} />
-      </View>
     </View>
   );
 }
 
-const C = 44;
+const C = 46;
 const useStyles = makeStyles((colors) => ({
   fill: { flex: 1, backgroundColor: colors.camera },
   flex: { flex: 1 },
-  body: { alignItems: "center", paddingTop: 28, paddingBottom: 8, paddingHorizontal: 24, gap: 28 },
-  viewfinder: { borderRadius: radius.card, backgroundColor: colors.viewfinder, overflow: "hidden" },
+  body: { flexGrow: 1, alignItems: "center", paddingTop: 24, paddingHorizontal: 24, gap: 18 },
+  viewfinder: { borderRadius: 16, backgroundColor: colors.viewfinder, overflow: "hidden" },
   corner: { position: "absolute", width: C, height: C, borderColor: colors.accent },
   tl: { left: 22, top: 22, borderLeftWidth: 3, borderTopWidth: 3, borderTopLeftRadius: 10 },
   tr: { right: 22, top: 22, borderRightWidth: 3, borderTopWidth: 3, borderTopRightRadius: 10 },
   bl: { left: 22, bottom: 22, borderLeftWidth: 3, borderBottomWidth: 3, borderBottomLeftRadius: 10 },
   br: { right: 22, bottom: 22, borderRightWidth: 3, borderBottomWidth: 3, borderBottomRightRadius: 10 },
-  copy: { maxWidth: 310, gap: 10, alignItems: "stretch" },
-  title: { fontFamily: ui(600), color: colors.textBright, fontSize: 20, textAlign: "center" },
-  text: { fontFamily: ui(400), color: colors.textMuted, fontSize: 14, lineHeight: 21, textAlign: "center" },
+  title: { alignSelf: "stretch", fontFamily: ui(600), color: colors.textBright, fontSize: 20, lineHeight: 26 },
+  text: { fontFamily: ui(400), color: colors.textMuted, fontSize: 14, lineHeight: 20, textAlign: "center" },
   // a refusal, said in words at full strength (orange is for "needs you" only)
   wrong: { color: colors.textBright },
-  actions: { paddingTop: 16, paddingHorizontal: 24 },
+  wide: { alignSelf: "stretch" },
 }));

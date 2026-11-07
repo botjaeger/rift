@@ -134,7 +134,7 @@ export const BlockView = memo(function BlockView({ block, onActions, wrap, mark 
       ) : rows ? (
         <Output text={block.output.trimEnd()} wrap={wrap} ground={colors.surface} size={11.5} lineHeight={17} mark={mark} />
       ) : line ? (
-        <SelectableText text={line} style={styles.line} lineHeight={19} lines={2} mark={mark} />
+        <SelectableText text={line} style={styles.line} lineHeight={17} lines={2} mark={mark} />
       ) : null}
     </CardFrame>
   );
@@ -147,7 +147,8 @@ const useStyles = makeStyles((colors) => ({
   fadeStep: { flex: 1 },
   track: { height: 3, borderRadius: 2, backgroundColor: colors.hairline },
   thumb: { position: "absolute", top: 0, bottom: 0, borderRadius: 2, backgroundColor: colors.textMuted },
-  line: { fontFamily: ui(400), color: colors.textMuted, fontSize: 14 },
+  // the first output line: JetBrains Mono 12/17 in the text colour (the New Blocks board)
+  line: { fontFamily: mono, color: colors.text, fontSize: 12 },
   // the list runs edge to edge in the card: its rows carry the card's 12 pt gutter
   list: { marginHorizontal: -12 },
   row: {

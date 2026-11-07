@@ -1,8 +1,8 @@
 import Constants from "expo-constants";
 import * as Updates from "expo-updates";
 import { useRouter } from "expo-router";
-import { useEffect, useState } from "react";
-import { Platform, Text, TextInput, View } from "react-native";
+import { useEffect, useRef, useState } from "react";
+import { Platform, Pressable, Text, TextInput, View } from "react-native";
 import { controlKey } from "@/controlKeys";
 import { canOperate } from "@/fleet";
 import { authenticate, biometricSupport, fleet, updateChecks, useApp, useUpdateChecks, type BiometricSupport } from "@/runtime";
@@ -14,7 +14,7 @@ import { hostDot } from "@/ui/hostDot";
 import { Icon } from "@/ui/Icon";
 import { ErrorText } from "@/ui/Notice";
 import { Button } from "@/ui/Button";
-import { CardBox, ChoiceRow, Group, NavRow, Row, Segmented, SettingsPage, SwitchRow, ValueRow } from "@/ui/Rows";
+import { CardBox, CHEVRON, ChoiceRow, Group, NavRow, Row, SettingsPage, SwitchRow, ValueRow } from "@/ui/Rows";
 import { SaveError } from "@/ui/SaveError";
 import { hostMeta, notifyExample, ntfySummary, shortAfter, updateLine } from "@/ui/settingsText";
 import { ui, makeStyles, useColors } from "@/ui/theme";
@@ -29,10 +29,23 @@ const POLICIES: { value: NotifyPolicy; label: string }[] = [
 
 const NAME_START = { start: 0, end: 0 };
 
-/** This phone's Name: the field sits right-aligned in its row; saved when it loses focus or on done. */
+/** The Name field (a TextInput). */
+type NameField = TextInput;
+
+/** The widest the Name field grows to (pt): a longer name scrolls in it. */
+const NAME_MAX = 150;
+
+/**
+ * This phone's Name (the Settings board: the value in Inter 15 and a ›): the field sits
+ * right-aligned, as wide as the name; a tap anywhere in the row edits it. Saved when it loses
+ * focus or on done.
+ */
 function DeviceName({ name }: { name: string }) {
   const colors = useColors();
   const styles = useStyles();
+  const input = useRef<NameField>(null);
+  // the name's own width, measured by an unseen copy: the field hugs it
+  const [width, setWidth] = useState(0);
   // The text being edited; null shows the saved name (which a load or another rename may change).
   const [draft, setDraft] = useState<string | null>(null);
   // a name wider than the field shows its start, not its scrolled end, until it is edited
@@ -43,15 +56,21 @@ function DeviceName({ name }: { name: string }) {
       setDraft((current) => current === draft ? null : current);
     }
   };
+  const shown = draft ?? name;
   return (
+    <Pressable accessible={false} onPress={() => input.current?.focus()}>
     <Row first>
       <View style={styles.text}>
         <Text style={styles.label}>Name</Text>
         <Text style={styles.detail}>Computers show it in toasts and logs</Text>
       </View>
+      <Text style={[styles.nameInput, styles.measure]} numberOfLines={1} onLayout={(e) => setWidth(e.nativeEvent.layout.width)} importantForAccessibility="no-hide-descendants" accessibilityElementsHidden>
+        {shown || "Phone name"}
+      </Text>
       <TextInput
+        ref={input}
         keyboardAppearance={colors.dark ? "dark" : "light"}
-        value={draft ?? name}
+        value={shown}
         onChangeText={setDraft}
         selection={editing ? undefined : NAME_START}
         onFocus={() => {
@@ -69,9 +88,13 @@ function DeviceName({ name }: { name: string }) {
         placeholderTextColor={colors.textMuted}
         accessibilityLabel="This phone's name"
         accessibilityHint="Shown on your computers when this phone connects or runs a command"
-        style={styles.nameInput}
+        style={[styles.nameInput, { width: Math.min(NAME_MAX, Math.ceil(width) + 4) }]}
       />
+      <View style={styles.chevron} importantForAccessibility="no">
+        <Icon name="forward" size={CHEVRON} color={colors.textMuted} />
+      </View>
     </Row>
+    </Pressable>
   );
 }
 
@@ -96,6 +119,37 @@ function LongerThan({ value, onChange }: { value: number; onChange: (ms: number)
               selected={value === ms}
               onSelect={() => {
                 onChange(ms);
+                setOpen(false);
+              }}
+            />
+          ))}
+        </View>
+      ) : null}
+    </>
+  );
+}
+
+/** "Other commands [Failures ›]": the choices open under it. */
+function OtherCommands({ value, onChange }: { value: NotifyPolicy; onChange: (v: NotifyPolicy) => void }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <NavRow
+        label="Other commands"
+        value={POLICIES.find((p) => p.value === value)?.label}
+        expanded={open}
+        hint="Shows the choices"
+        onPress={() => setOpen((o) => !o)}
+      />
+      {open ? (
+        <View accessibilityRole="radiogroup" accessibilityLabel="Notify for other commands">
+          {POLICIES.map((p) => (
+            <ChoiceRow
+              key={p.value}
+              label={p.label}
+              selected={value === p.value}
+              onSelect={() => {
+                onChange(p.value);
                 setOpen(false);
               }}
             />
@@ -155,7 +209,7 @@ function AppLock() {
   return (
     <>
       {shown ? (
-        <SwitchRow label="App lock" detail={`${bio}, on opening and after 5 minutes away`} value={st.biometricLock} onChange={(v) => void setLock(v)} />
+        <SwitchRow label="App lock" detail={bio} value={st.biometricLock} onChange={(v) => void setLock(v)} />
       ) : reason ? (
         <Row>
           <View style={styles.text}>
@@ -246,7 +300,7 @@ function About({ autoUpdate }: { autoUpdate: boolean }) {
             />
           </>
         ) : null}
-        <NavRow label="What’s new" accessibilityLabel="What's new" hint="The changes in each version of the app" onPress={() => router.push("/changelog")} />
+        <NavRow label="What's new" hint="The changes in each version of the app" onPress={() => router.push("/changelog")} />
       </CardBox>
     </Group>
   );
@@ -304,24 +358,15 @@ export default function SettingsScreen() {
         </CardBox>
       </Group>
 
-      <Group title="Notifications" footer="Nothing notifies for the pane on screen. Questions always notify.">
+      <Group title="Notifications">
         <CardBox>
           <SwitchRow
             first
             label="Commands I ran from here"
-            detail="When a command you ran from this phone finishes"
             value={st.notifyMyCommands}
             onChange={(v) => void fleet.updateSettings({ notifyMyCommands: v })}
           />
-          <View style={styles.policy}>
-            <Text style={styles.label}>Other commands</Text>
-            <Segmented
-              label="Notify for other commands"
-              options={POLICIES}
-              value={st.notifyPolicy}
-              onChange={(v) => void fleet.updateSettings({ notifyPolicy: v })}
-            />
-          </View>
+          <OtherCommands value={st.notifyPolicy} onChange={(v) => void fleet.updateSettings({ notifyPolicy: v })} />
           {st.notifyPolicy !== "off" ? (
             <LongerThan value={st.notifyAfterMs} onChange={(ms) => void fleet.updateSettings({ notifyAfterMs: ms })} />
           ) : null}
@@ -345,7 +390,7 @@ export default function SettingsScreen() {
           <SwitchRow
             first
             label="Ask before running"
-            detail="Shows the command before it runs. Keys like ⌃C always send at once."
+            detail="Shows the command first. ^C always sends at once."
             value={st.askBeforeRun}
             onChange={(v) => void fleet.updateSettings({ askBeforeRun: v })}
           />
@@ -358,20 +403,19 @@ export default function SettingsScreen() {
           <SwitchRow
             first
             label="Wrap long lines"
-            detail="Off: wide output scrolls sideways. Each pane can change it."
+            detail="Off: wide output scrolls sideways"
             value={st.wrapLines}
             onChange={(v) => void fleet.updateSettings({ wrapLines: v })}
           />
           <SwitchRow
             label="Keys under the command line"
-            detail="Off: ⌨ shows them; a full-screen program always has them"
+            detail="Off: only under a program"
             value={st.showKeys}
             onChange={(v) => void fleet.updateSettings({ showKeys: v })}
           />
           <NavRow
             label="Keys"
-            detail={st.controlKeys.map((id) => controlKey(id)?.label ?? id).join(" ") || "None"}
-            mono
+            value={st.controlKeys.map((id) => controlKey(id)?.label ?? id).join(" ") || "None"}
             hint="Choose and order the keys in the key block"
             onPress={() => router.push("/control-keys")}
           />
@@ -392,20 +436,16 @@ const useStyles = makeStyles((colors) => ({
   fresh: { color: colors.success },
   reason: { fontFamily: ui(400), flex: 1, color: colors.textMuted, fontSize: 13, lineHeight: 19 },
   dot: { width: 8, height: 8, borderRadius: 4 },
-  policy: {
-    gap: 10,
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderTopWidth: 1,
-    borderTopColor: colors.hairline,
-  },
+  // the row's value (Rows.tsx `value`): Inter 15, muted
   nameInput: {
     fontFamily: ui(400),
-    width: 130,
     minHeight: 44,
     paddingVertical: 0,
+    paddingHorizontal: 0,
     color: colors.textMuted,
-    fontSize: 16,
+    fontSize: 15,
     textAlign: "right",
   },
+  measure: { position: "absolute", opacity: 0, minHeight: 0, right: 0, maxWidth: NAME_MAX },
+  chevron: { width: 14, alignItems: "center" },
 }));

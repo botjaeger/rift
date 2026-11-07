@@ -1,17 +1,16 @@
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useEffect, useState } from "react";
 import { AccessibilityInfo, Text, View } from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { tildePath } from "@/chips";
 import { canOperate, draftKey } from "@/fleet";
 import { needsAuthBeforeRun } from "@/lock";
 import { chipCommand, isMenuCommand, type ChipAction } from "@/chips";
 import { commandProblem, MAX_MENU_NAME } from "@/protocol/types";
 import { authenticate, fleet, useApp, useLock } from "@/runtime";
-import { findPane, paneBranch, paneTitle, runningCommand } from "@/topology";
+import { findPane, paneTitle, runningCommand } from "@/topology";
 import { Button } from "@/ui/Button";
 import { ErrorText, WarningText } from "@/ui/Notice";
-import { SheetHeader } from "@/ui/SheetHeader";
+import { SheetButtons, SheetFrame } from "@/ui/SheetFrame";
 import { mono, radius, ui, makeStyles, useColors } from "@/ui/theme";
 import { useSingleFlight } from "@/ui/useSingleFlight";
 import { useActionScope } from "@/ui/useActionScope";
@@ -37,7 +36,6 @@ export default function ConfirmScreen() {
   const colors = useColors();
   const styles = useStyles();
   const router = useRouter();
-  const insets = useSafeAreaInsets();
   const {
     key,
     pane: paneParam,
@@ -79,7 +77,6 @@ export default function ConfirmScreen() {
   const chip = chipAction(chipParam, argParam);
   const command = chip ? chipCommand(chip) : (again ?? s.drafts[draftKey(key, paneId)] ?? "");
   const running = runningCommand(loc?.pane ?? null, state);
-  const branch = loc?.pane.git?.branch ?? paneBranch(state);
   const connected = host?.conn.status === "open";
   const problem = commandProblem(command);
   // The permission can drop while the sheet is open, and a deep link can open it for a view-only host.
@@ -87,9 +84,9 @@ export default function ConfirmScreen() {
   const canRun = !!host && operate && !!loc && connected && running === null && problem === null && !sending;
   const askFirst = needsAuthBeforeRun(s.settings);
   const hostName = host?.record.name ?? "this computer";
-  // where it runs, in words: "In ~/code/project1 (main) on studio-mac."
+  // where it runs, in words: "In ~/code/project1 on studio-mac."
   const place = loc ? (loc.pane.cwd ? tildePath(loc.pane.cwd) : paneTitle(loc)) : null;
-  const where = loc ? `In ${place}${branch ? ` (${branch})` : ""} on ${hostName}.` : "This pane has closed.";
+  const where = loc ? `In ${place} on ${hostName}.` : "This pane has closed.";
 
   const once = useSingleFlight();
   const run = () => once(async () => {
@@ -116,41 +113,16 @@ export default function ConfirmScreen() {
     }
   });
 
-  // Hidden while the app is in the app switcher, locked, or under a Face ID prompt (the sheet
-  // sits above the lock cover). Kept laid out: a sheet sized to its content must not collapse.
-  const hidden = lock.covered || lock.locked;
-
   return (
-    <View
-      style={[styles.fill, { paddingBottom: Math.max(36, insets.bottom + 2) }, hidden && styles.hidden]}
-      accessibilityElementsHidden={hidden}
-      importantForAccessibility={hidden ? "no-hide-descendants" : "auto"}
-    >
-      {/* a title that asks; why it asks under it; where it runs under the command */}
-      <SheetHeader title="Run this?" subtitle="Ask before running is on" onClose={close} />
-      <View style={styles.content}>
-        <View style={styles.command} accessible accessibilityLabel={`Command: ${command}`}>
-          <Text style={styles.commandText} selectable>
-            <Text style={{ color: colors.success }}>❯ </Text>
-            {command}
-          </Text>
-        </View>
-
-        <Text style={styles.why}>{where}</Text>
-
-        {running ? (
-          <WarningText>
-            This pane is running {running}. Commands only run at a prompt; the pane's command line sends text to the program.
-          </WarningText>
-        ) : null}
-        {host && !operate ? <WarningText>This device may only view {hostName}.</WarningText> : null}
-        {!connected && host ? <WarningText>Not connected to {hostName}.</WarningText> : null}
-        {problem === "too_long" ? <WarningText>The command is too long (2 KiB at most).</WarningText> : null}
-        {problem === "control" ? <WarningText>The command must be one line.</WarningText> : null}
-        {error ? <ErrorText>{error}</ErrorText> : null}
-
-        <View style={styles.buttons}>
-          <Button label="Cancel" onPress={close} style={styles.cancel} />
+    // a title that asks; why it asks under it; where it runs under the command; Cancel / Run pinned to the foot
+    <SheetFrame
+      board="confirm"
+      title="Run this?"
+      subtitle="Ask before running is on"
+      onClose={close}
+      footer={
+        <SheetButtons>
+          <Button label="Cancel" onPress={close} style={styles.flex} />
           <Button
             label={sending ? "Running…" : "Run"}
             variant="primary"
@@ -165,29 +137,44 @@ export default function ConfirmScreen() {
                     : undefined
             }
             onPress={() => void run()}
-            style={styles.run}
+            style={styles.flex}
           />
-        </View>
+        </SheetButtons>
+      }
+    >
+      <View style={styles.command} accessible accessibilityLabel={`Command: ${command}`}>
+        <Text style={styles.commandText} selectable>
+          <Text style={{ color: colors.success }}>❯ </Text>
+          {command}
+        </Text>
       </View>
-    </View>
+
+      <Text style={styles.why}>{where}</Text>
+
+      {running ? (
+        <WarningText>
+          This pane is running {running}. Commands only run at a prompt; the pane's command line sends text to the program.
+        </WarningText>
+      ) : null}
+      {host && !operate ? <WarningText>This device may only view {hostName}.</WarningText> : null}
+      {!connected && host ? <WarningText>Not connected to {hostName}.</WarningText> : null}
+      {problem === "too_long" ? <WarningText>The command is too long (2 KiB at most).</WarningText> : null}
+      {problem === "control" ? <WarningText>The command must be one line.</WarningText> : null}
+      {error ? <ErrorText>{error}</ErrorText> : null}
+    </SheetFrame>
   );
 }
 
+// The Run this? board: 16 pt in, 12 between, the command in a #050505 box 12 pt in.
 const useStyles = makeStyles((colors) => ({
-  fill: { backgroundColor: colors.surface },
-  hidden: { opacity: 0 },
-  content: { paddingTop: 4, paddingHorizontal: 20, gap: 16, maxWidth: 560, width: "100%", alignSelf: "center" },
+  flex: { flex: 1 },
   command: {
     backgroundColor: colors.bg,
     borderRadius: radius.field,
     borderWidth: 1,
     borderColor: colors.hairline,
-    padding: 14,
+    padding: 12,
   },
   commandText: { color: colors.textBright, fontFamily: mono, fontSize: 14, lineHeight: 20 },
-  why: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13, lineHeight: 19 },
-  // Side by side, Run twice as wide; stacked when large text makes them too wide.
-  buttons: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
-  cancel: { flexGrow: 1, flexBasis: 100 },
-  run: { flexGrow: 2, flexBasis: 200 },
+  why: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13, lineHeight: 18 },
 }));

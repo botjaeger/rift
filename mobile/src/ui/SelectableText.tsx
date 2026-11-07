@@ -163,7 +163,10 @@ export function SelectableText({
         scrollEnabled={false}
         showSoftInputOnFocus={false}
         selection={forced}
-        selectionColor={colors.accent}
+        selectionColor={colors.selection}
+        // Android: the handles in the accent (the selection board's knobs), apart from the ground;
+        // iOS draws its own in the selection colour (no prop sets them apart there)
+        selectionHandleColor={colors.accent}
         // iOS only: Android's selection lives in the edit menu's mode, and hiding the menu ends it at once
         contextMenuHidden={scope !== null && Platform.OS === "ios"}
         onSelectionChange={onSelection}

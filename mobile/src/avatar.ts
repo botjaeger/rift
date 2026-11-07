@@ -6,8 +6,8 @@ export const AVATAR_COLORS = ["#19aad8", "#1ca05a", "#ff8272", "#a5d5fe", "#ff8f
 
 export interface Avatar {
   color: string;
-  /** Claude Code's ✳ in place of the terminal icon; null for the icon. */
-  glyph: string | null;
+  /** Claude Code's logo in place of the terminal icon; null for the icon. */
+  logo: "claude" | null;
 }
 
 /** The folder a pane is in, as its avatar names it: the path's last part ("~" for home). */
@@ -35,6 +35,6 @@ export function avatarFor(cwd: string | null | undefined, title: string, program
   const key = folderOf(cwd) ?? title;
   return {
     color: AVATAR_COLORS[hash(key) % AVATAR_COLORS.length]!,
-    glyph: program === "claude" ? "\u2733\uFE0E" : null,
+    logo: program === "claude" ? "claude" : null,
   };
 }

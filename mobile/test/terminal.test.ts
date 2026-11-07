@@ -398,11 +398,22 @@ describe("selection", () => {
 });
 
 describe("cursorScrollY", () => {
+  // 16 pt rows, 8 pt padding, a 160 pt view: 9 rows and a bit
   it("keeps the cursor and the row under it in sight", () => {
-    // 16 pt rows, 8 pt padding, a 160 pt view: 9 rows and a bit
-    expect(cursorScrollY(6, 16, 8, 160)).toBe(0);
-    expect(cursorScrollY(39, 16, 8, 160)).toBe(41 * 16 + 8 - 160);
-    expect(cursorScrollY(undefined, 16, 8, 160)).toBeNull();
+    expect(cursorScrollY(6, 6, 16, 8, 160)).toBe(0);
+    expect(cursorScrollY(39, 39, 16, 8, 160)).toBe(41 * 16 + 8 - 160);
+  });
+  it("shows what a program draws under its cursor: Claude Code's status lines under its prompt", () => {
+    // prompt on row 40, status line and mode on 42-44: all of it in sight, not just row 41
+    expect(cursorScrollY(40, 44, 16, 8, 160)).toBe(45 * 16 + 8 - 160);
+  });
+  it("never scrolls the cursor off the top for text far below it", () => {
+    // a cursor at row 5 over text down to row 46 in a 9-row view: the cursor's row stays at the top
+    expect(cursorScrollY(5, 46, 16, 8, 160)).toBe(5 * 16);
+  });
+  it("without a cursor, the last line of text; without text either, the caller's end", () => {
+    expect(cursorScrollY(undefined, 44, 16, 8, 160)).toBe(45 * 16 + 8 - 160);
+    expect(cursorScrollY(undefined, -1, 16, 8, 160)).toBeNull();
   });
 });
 

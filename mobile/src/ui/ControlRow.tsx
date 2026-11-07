@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { AccessibilityInfo, AppState, Pressable, Text, View, type StyleProp, type ViewStyle } from "react-native";
+import { AccessibilityInfo, AppState, Platform, Pressable, Text, View, type StyleProp, type ViewStyle } from "react-native";
 import { hasSystemPasteButton, SystemPasteButton, type PastedFile } from "../../modules/rift-keys";
 import { ARROW_KEYS, blockColumns, controlKey, KeyRepeat, keyTipTitle, PressGate, type ControlKey } from "@/controlKeys";
 import type { OpenKind } from "@/protocol/types";
 import { Icon, type IconName } from "./Icon";
-import { monoMedium, ui, makeStyles, useColors } from "./theme";
+import { monoBold, ui, makeStyles, useColors } from "./theme";
 import { toggleA11y } from "./toggle";
 
 /** The key block's key height: two rows and their 6 pt gap are the 88 pt of the arrow pad. */
@@ -12,6 +12,12 @@ export const KEY_H = 41;
 /** The arrow pad: 132 x 88 pt, three columns and two rows 4 pt apart (the Keys redesign board). */
 export const PAD_W = 132;
 export const BLOCK_H = 88;
+
+/**
+ * A key's icon size: SF Symbols draw larger than the boards' Material glyphs at 18, so 14 (⌃,
+ * whose board glyph is the smallest, 12) matches them on iOS; Android draws the Material glyphs.
+ */
+export const keyIconSize = (icon: IconName): number => (Platform.OS !== "ios" ? 18 : icon === "control" ? 12 : 14);
 
 /** Sticky modifiers from the block, applied to the next key or letter. */
 export interface Sticky {
@@ -28,7 +34,7 @@ const modOf = (id: string): keyof Sticky => (id === "alt" ? "alt" : id === "shif
 /**
  * A key's face (the Keys redesign board): the surface ground, a glass rim and 8 pt corners; an
  * 18 pt icon from the one set (arrows, ⌃ ⌥ ⇧, Return, the keyboard), its label in JetBrains Mono
- * 13 ("Esc", "⌃D", "F5"), or a word in Inter 12 (Paste). A modifier before a word (⇧Tab) is its
+ * Bold 14 ("Esc", "⌃D", "F5"), a word too (Paste). A modifier before a word (⇧Tab) is its
  * icon at 13 pt. Colour means a state only: a held modifier is lit, the accent with dark ink.
  * `style` sizes it (the block's cells fill their place; Settings › Keys' list draws 44 x 34).
  */
@@ -58,7 +64,7 @@ export function KeyCap({
       {def.paste ? (
         <Text style={[styles.word, { color: fg }]}>{def.label}</Text>
       ) : def.icon ? (
-        <Icon name={def.icon} size={18} weight="medium" color={fg} />
+        <Icon name={def.icon} size={keyIconSize(def.icon)} weight="medium" color={fg} />
       ) : (
         <>
           {def.lead ? <Icon name={def.lead} size={13} weight="medium" color={fg} /> : null}
@@ -401,12 +407,12 @@ const useStyles = makeStyles((colors) => ({
     alignItems: "center",
     justifyContent: "center",
     borderWidth: 1,
-    borderColor: colors.glassRim,
+    borderColor: colors.borderStrong,
   },
   // a held modifier: lit, the accent ground and rim, its icon in the accent's ink
   keyActive: { backgroundColor: colors.accent, borderColor: colors.accent },
-  label: { fontFamily: monoMedium, fontSize: 13, letterSpacing: 0.2 },
-  word: { fontFamily: ui(500), fontSize: 12 },
+  label: { fontFamily: monoBold, fontSize: 14 },
+  word: { fontFamily: monoBold, fontSize: 14 },
   disabled: { opacity: 0.45 },
   pressed: { opacity: 0.7 },
 }));

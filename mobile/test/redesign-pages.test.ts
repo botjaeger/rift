@@ -73,7 +73,7 @@ describe("Connection sheet: the standard header and Test again", () => {
   const sheet = (c: ConnState) => {
     const deps = uiDeps("ios", {
       "expo-router": { useRouter: () => ({ back: vi.fn(), replace: vi.fn(), canGoBack: () => true }) },
-      "@/runtime": { fleet: { retry }, useApp: () => ({ hosts: [host("A", "studio-mac", c)] }) },
+      "@/runtime": { fleet: { retry }, useApp: () => ({ hosts: [host("A", "studio-mac", c)] }), useLock: () => ({ locked: false, covered: false }) },
       "./connStatus": connStatus,
       "./useNow": { useNow: () => NOW },
     });
@@ -178,14 +178,13 @@ describe("Portals page", () => {
     "@/ui/FirstRun": { FirstRun: "FirstRun" },
     "@/ui/Icon": { Icon: "Icon" },
     "@/ui/confirm": { confirmDestructive: confirm },
-    "@/ui/ListRow": { CodeText: "CodeText" },
+    "@/ui/ListRow": { RowMark: "RowMark" },
     "@/ui/newTab": { canNewTab: () => true },
     "@/ui/Notice": { ErrorText: "ErrorText" },
     "@/ui/ProgressBar": { ProgressBar: "ProgressBar" },
     "@/ui/Rows": { NavRow: "NavRow" },
-    "@/ui/StatusMark": { KIND_COLOR: {}, StatusMark: "StatusMark" },
     "@/ui/SwipeAction": { SwipeAction: "SwipeAction" },
-    "@/ui/Screen": { IconButton: "IconButton", tabBottom: () => 0, titleTop: () => 0 },
+    "@/ui/Screen": { IconButton: "IconButton", glyph: (m: number) => m, headerTop: () => 0, tabBottom: () => 0 },
     "@/ui/theme": (uiDeps("ios")["./theme"] as object),
     "@/ui/useNow": { useNow: () => NOW },
   });

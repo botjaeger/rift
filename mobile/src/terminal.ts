@@ -8,7 +8,8 @@ export const MIN_FONT = 7;
 export const MAX_FONT = 14;
 /** A monospace cell is about this wide per point of font size (Menlo, Roboto Mono, Courier). */
 export const CELL_RATIO = 0.6;
-export const LINE_RATIO = 1.25;
+/** A screen row is this tall per point of font size: the program screen board's 15 pt rows at its 10.5 and 11 pt. */
+export const LINE_RATIO = 1.4;
 
 /**
  * The width a run's Text gets for `width` points of cells. A font's hinted advance can pass the
@@ -25,13 +26,16 @@ export function lastTextRow(lines: readonly (readonly { 0: string }[])[]): numbe
 }
 
 /**
- * Where a screen taller than its view stops so the keyboard never covers the cursor: its row and
- * the one under it in sight, or the top when the cursor fits there (a program drawing at the top of
- * a tall screen); `null` without a cursor (the caller goes to the end).
+ * Where a screen taller than its view stops while the keyboard (and the keys) cover it: down to its
+ * last line of text, so what a program draws under its cursor stays in sight (Claude Code's status
+ * line and mode under its prompt), and at least the cursor's row and the one under it; but never so
+ * far that the cursor leaves the top. The top when it all fits there. Without a cursor, the last
+ * line of text; `null` when the screen has no text either (the caller goes to the end).
  */
-export function cursorScrollY(cursorRow: number | undefined, rowHeight: number, padding: number, viewHeight: number): number | null {
-  if (cursorRow === undefined) return null;
-  return Math.max(0, (cursorRow + 2) * rowHeight + padding - viewHeight);
+export function cursorScrollY(cursorRow: number | undefined, lastText: number, rowHeight: number, padding: number, viewHeight: number): number | null {
+  if (cursorRow === undefined) return lastText < 0 ? null : Math.max(0, (lastText + 1) * rowHeight + padding - viewHeight);
+  const end = Math.max(cursorRow + 2, lastText + 1) * rowHeight + padding - viewHeight;
+  return Math.max(0, Math.min(end, cursorRow * rowHeight));
 }
 
 /** Whether a scroller sits at its end (within `slop`): "the user is following the output". */

@@ -66,26 +66,34 @@ describe("paneLoad: the PaneLoading board's states", () => {
     const l = paneLoad(input({ conn: reaching }));
     expect(l.strip).toEqual({ text: "Connecting through the relay", tone: "busy", busy: true, elapsed: "0:03" });
     expect(l.card).toEqual({
-      title: "Opening “3.16.0 updates pull”",
+      title: "Opening 3.16.0 updates pull",
       hint: null,
       actions: false,
       steps: [
-        { tone: "now", mark: "…", label: "Reach Sam’s MacBook Pro", note: "Not on this network · through the relay" },
-        { tone: "todo", mark: "", label: "Open this pane", note: "" },
-        { tone: "todo", mark: "", label: "Load its blocks", note: "" },
+        { tone: "now", mark: "◌", label: "Reach Sam’s MacBook Pro", note: "Not on this network · through the relay" },
+        { tone: "todo", mark: "○", label: "Open this pane", note: "" },
+        { tone: "todo", mark: "○", label: "Load its blocks", note: "" },
       ],
     });
     expect(l.held).toBe(false);
   });
 
-  it("Loading blocks: connected with its latency, the pane open, the blocks awaited", () => {
+  it("Loading blocks (the New Blocks board): no strip, reached ✓, the blocks loading ◌, the screen to come ○", () => {
     const l = paneLoad(input({ conn: connectedRelay }));
-    expect(l.strip).toEqual({ text: "Connected through the relay · 84 ms", tone: "quiet", busy: false, elapsed: "" });
-    expect(l.card!.steps).toEqual([
-      { tone: "done", mark: "✓", label: "Reach Sam’s MacBook Pro", note: "Through the relay · 84 ms" },
-      { tone: "done", mark: "✓", label: "Open this pane", note: "" },
-      { tone: "now", mark: "…", label: "Load its blocks", note: "Waiting for the computer to send them" },
-    ]);
+    expect(l.strip).toBeNull();
+    expect(l.card).toEqual({
+      title: "Opening 3.16.0 updates pull",
+      hint: null,
+      actions: false,
+      steps: [
+        { tone: "done", mark: "✓", label: "Reached Sam’s MacBook Pro through the relay", note: "" },
+        { tone: "now", mark: "◌", label: "Loading the pane’s blocks…", note: "" },
+        { tone: "todo", mark: "○", label: "The screen", note: "" },
+      ],
+    });
+    // on the computer's network
+    const lan = conn({ status: "open", path: LAN, paths: [path(LAN, { state: "ok", latencyMs: 4 })] });
+    expect(paneLoad(input({ conn: lan })).card!.steps[0]!.label).toBe("Reached Sam’s MacBook Pro on this network");
   });
 
   it("omits the count of blocks, which the app is not told", () => {
@@ -93,16 +101,17 @@ describe("paneLoad: the PaneLoading board's states", () => {
     expect(JSON.stringify(l)).not.toMatch(/\d+ of \d+/);
   });
 
-  it("Agent screen: Get the screen, waiting for its next frame, titled by the program", () => {
+  it("Agent screen: the screen loading, titled by the program", () => {
     const l = paneLoad(input({ conn: connectedRelay, view: "screen", opening: openingTitle("rift", "claude") }));
     expect(l.card!.title).toBe("Opening claude");
-    expect(l.card!.steps[2]).toEqual({ tone: "now", mark: "…", label: "Get the screen", note: "Waiting for its next frame" });
+    expect(l.card!.steps.slice(1)).toEqual([{ tone: "now", mark: "◌", label: "Loading the screen…", note: "" }]);
   });
 
   it("waits for the tab list before the pane can be opened", () => {
     const l = paneLoad(input({ conn: connectedRelay, paneKnown: false }));
     expect(l.card!.steps.map((s) => s.tone)).toEqual(["done", "now", "todo"]);
     expect(l.card!.steps[1]!.note).toBe("Waiting for the computer’s tab list");
+    expect(l.card!.steps[2]!.label).toBe("The pane’s blocks");
   });
 
   it("Slow: after 15 s the card says so, with Try again and Details", () => {
@@ -115,7 +124,7 @@ describe("paneLoad: the PaneLoading board's states", () => {
     });
     expect(l.card!.steps[0]!.note).toBe("Relay answered · waiting for your computer");
     // one second earlier it is not slow yet
-    expect(paneLoad(input({ conn: reaching, now: T0 + SLOW_MS - 1 })).card!.title).toBe("Opening “3.16.0 updates pull”");
+    expect(paneLoad(input({ conn: reaching, now: T0 + SLOW_MS - 1 })).card!.title).toBe("Opening 3.16.0 updates pull");
   });
 
   it("a wait past an hour reads as a clock with hours, as a running block's", () => {
@@ -140,7 +149,7 @@ describe("paneLoad: the PaneLoading board's states", () => {
       leave: "Cancel",
       hint: "The relay answered, but your computer is not registered there. Rift retries 5 times, then stops and waits for you.",
     });
-    expect(l.card!.steps[0]).toEqual({ tone: "now", mark: "…", label: "Reach Sam’s MacBook Pro", note: "Retry 1 of 5 in 8 s" });
+    expect(l.card!.steps[0]).toEqual({ tone: "now", mark: "◌", label: "Reach Sam’s MacBook Pro", note: "Retry 1 of 5 in 8 s" });
   });
 
   it("the Reconnecting hint states the reason as a sentence, whatever its shape", () => {
@@ -174,9 +183,9 @@ describe("paneLoad: the PaneLoading board's states", () => {
     expect(l.card).toEqual({
       title: "Sam’s MacBook Pro is updating Rift",
       steps: [
-        { tone: "now", mark: "…", label: "Reach Sam’s MacBook Pro", note: "Back in about a minute" },
-        { tone: "todo", mark: "", label: "Open this pane", note: "" },
-        { tone: "todo", mark: "", label: "Load its blocks", note: "" },
+        { tone: "now", mark: "◌", label: "Reach Sam’s MacBook Pro", note: "Back in about a minute" },
+        { tone: "todo", mark: "○", label: "Open this pane", note: "" },
+        { tone: "todo", mark: "○", label: "Load its blocks", note: "" },
       ],
       hint: "Nothing is wrong. Your tabs come back by themselves.",
       actions: true,
@@ -253,7 +262,7 @@ describe("paneLoad: the PaneLoading board's states", () => {
 
   it("openingTitle never shows the placeholder Pane", () => {
     expect(openingTitle(null, null)).toBe("Opening this pane");
-    expect(openingTitle("rift", null)).toBe("Opening “rift”");
+    expect(openingTitle("rift", null)).toBe("Opening rift");
     expect(openingTitle("rift", "claude")).toBe("Opening claude");
   });
 });

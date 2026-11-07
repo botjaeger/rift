@@ -23,7 +23,7 @@ import { AT_PROMPT } from "@/upload";
 import { cursorOutOfToken, insertedBy, pastesAsToken, spokenLabel, staleField } from "@/draftTokens";
 import { isImageItem, nativeAttached, outHead, outParts, UPLOAD_GAP_MS, waitForImage, pending, PENDING_FULL, plainDraft, readClipboard, sendParts, type AttachRules, type Attached } from "@/pending";
 import { chipRowMode, completionRows, NO_COMPLETIONS, NO_COMPLETIONS_PROGRAM, returnTakes } from "@/chips";
-import { boxImages, commandNote, fieldKey, isOneLineRefusal, MAX_FIELD_PASTE_BYTES, messageLines, messagePlaceholder, partSend, programSend } from "@/paneView";
+import { boxImages, commandNote, fieldKey, fitPlaceholder, isOneLineRefusal, MAX_FIELD_PASTE_BYTES, messageLines, messagePlaceholder, partSend, programSend } from "@/paneView";
 import type { ChipItem, ChipOpen } from "@/promptChips";
 import { rowWithPaste } from "@/controlKeys";
 import { showsKeyRow } from "@/terminal";
@@ -33,10 +33,11 @@ import { usePending } from "./usePending";
 import { insertedChar, plainPunctuation } from "./format";
 import { Icon } from "./Icon";
 import { ErrorText } from "./Notice";
+import { glyph } from "./Screen";
 import { useOpenShell } from "./useOpenShell";
 import { mono, TOUCH, ui, makeStyles, useColors } from "./theme";
 
-/** Suggestions shown under the command line's keys (the command line redesign board). */
+/** Suggestions shown above the command line (the command line board). */
 const MAX_SUGGESTIONS = 6;
 type Field = TextInput;
 /** How long after a correction the field may still report a key made from its old text (a held Backspace). */
@@ -51,11 +52,11 @@ const COMPLETE_DELAY_MS = 200;
  * The pane's command line (operate permission only; the command line redesign board), top to
  * bottom: the context above the field (the desktop's prompt chips, in its order, as many as fit and
  * "+N" for the rest; folder and branch are chips that open their menus, a timer is plain text);
- * one line: + (the Attach sheet: paste, photo, camera, file), ⌃, which shows the control keys (the
- * key block and arrow pad, ControlRow.tsx) under the field, so the field stays in sight above them
- * while the keyboard is up, and the round field with its run button; then the completions, closest to the keyboard (the desktop's, feature `complete`,
- * and this pane's history, typed part bright, the rest dim, with where each comes from), the first
- * marked: the phone keyboard's Return takes it at a prompt. Run runs; through the Confirm sheet only
+ * then the completions (the desktop's, feature `complete`, and this pane's history, with where
+ * each comes from), the first marked: the phone keyboard's Return takes it at a prompt; then one
+ * line: + (the Attach sheet: paste, photo, camera, file), ⌃, which shows the control keys (the key
+ * block and arrow pad, ControlRow.tsx) under the field, so the field stays in sight above them
+ * while the keyboard is up, and the round field with its run button. Run runs; through the Confirm sheet only
  * with Settings › Ask before running on. While a program runs (`running`) the field says who it
  * types to; Send sends the
  * line as text, then Return as a key (feature `text`), with no Confirm sheet. The phone keyboard's Return is a new line; only Run or Send sends. A hardware
@@ -564,9 +565,9 @@ export function Composer({
               hitSlop={{ top: 6, bottom: 6 }}
               style={({ pressed }) => [styles.chip, first ? styles.firstSuggestion : styles.suggestion, pressed && styles.pressed]}
             >
-              <Text style={styles.chipText} numberOfLines={1}>
-                <Text style={styles.typed}>{r.typed}</Text>
-                <Text style={first ? styles.typed : styles.rest}>{r.rest}</Text>
+              <Text style={[styles.chipText, first && styles.firstText]} numberOfLines={1}>
+                {r.typed}
+                {r.rest}
               </Text>
               <Text style={styles.source}>{r.source}</Text>
             </Pressable>
@@ -592,6 +593,7 @@ export function Composer({
           Sending to the computer…
         </Text>
       ) : null}
+      {completions}
       <View style={[styles.inputRow, waiting && styles.waiting]}>
         <Pressable
           accessibilityRole="button"
@@ -602,18 +604,20 @@ export function Composer({
           onPress={openAttach}
           style={({ pressed }) => [styles.round, pressed && styles.pressed]}
         >
-          <Icon name="add" size={20} color={colors.text} />
+          {/* the boards' add 20, ⌃ 18 and arrow 18 (glyph: their SF sizes on iOS) */}
+          <Icon name="add" size={glyph(20, 13)} color={colors.text} />
         </Pressable>
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Control keys"
-          accessibilityHint="Shows the control keys under the command line"
+          accessibilityHint={keys ? "Hides the control keys" : "Shows the control keys under the command line"}
           accessibilityState={{ expanded: keys, disabled: waiting }}
           disabled={waiting}
           onPress={() => setKeys((k) => !k)}
           style={({ pressed }) => [styles.round, keys && styles.roundOn, pressed && styles.pressed]}
         >
-          <Icon name="control" size={18} weight="medium" color={keys ? colors.accent : colors.text} />
+          {/* shown, the keys fold away downward: ⌄; hidden, ⌃ */}
+          <Icon name={keys ? "chevronDown" : "control"} size={glyph(18, 12)} weight="medium" color={keys ? colors.accent : colors.text} />
         </Pressable>
         <View style={styles.field}>
           <TextInput
@@ -637,14 +641,14 @@ export function Composer({
             editable={!waiting}
             placeholder={
               waiting
-                ? "Waiting for your computer…"
+                ? fitPlaceholder("Waiting for your computer…", "Waiting…", windowWidth)
                 : stickyName
-                  ? `Type a letter for ${stickyName}+letter`
+                  ? fitPlaceholder(`Type a letter for ${stickyName}+letter`, "Type a letter", windowWidth)
                   : running !== null
                     ? messagePlaceholder(program, windowWidth)
                     : "Command"
             }
-            placeholderTextColor={colors.textMuted}
+            placeholderTextColor={colors.placeholder}
             autoCapitalize="none"
             autoCorrect={false}
             spellCheck={false}
@@ -668,11 +672,12 @@ export function Composer({
             hitSlop={4}
             style={({ pressed }) => [styles.send, canRun && styles.sendOn, pressed && styles.pressed]}
           >
-            <Icon name="run" size={18} color={colors.onAccent} />
+            <Icon name="run" size={glyph(18, 15)} color={colors.onAccent} />
           </Pressable>
         </View>
       </View>
       {keys ? (
+        <View style={styles.keys}>
         <ControlRow
           ids={rowWithPaste(s.settings.controlKeys, canUpload && running !== null)}
           sticky={sticky}
@@ -693,13 +698,13 @@ export function Composer({
           onHideKeyboard={keyboardUp ? () => Keyboard.dismiss() : undefined}
           onShowKeyboard={keyboardUp || waiting ? undefined : () => input.current?.focus()}
         />
+        </View>
       ) : null}
-      {completions}
     </KeyCaptureView>
   );
 }
 
-// The Pane board's command line: chrome ground, 8 / 12 pt padding, 8 pt between rows.
+// The New Blocks board's command line: chrome ground, 8 / 12 pt padding, 8 pt between rows.
 const useStyles = makeStyles((colors) => ({
   wrap: {
     backgroundColor: colors.chrome,
@@ -719,45 +724,48 @@ const useStyles = makeStyles((colors) => ({
   suggestion: { borderWidth: 1, borderColor: colors.hairline, backgroundColor: colors.tints.chipFill },
   firstSuggestion: { borderWidth: 1, borderColor: `${colors.accent}55`, backgroundColor: colors.tints.accentBadge },
   chipText: { fontFamily: mono, color: colors.text, fontSize: 13, flexShrink: 1 },
-  // a completion: what was typed bright, the rest dim, the source small after it
-  typed: { color: colors.textBright },
-  rest: { color: colors.textMuted },
-  source: { fontFamily: ui(400), color: colors.textDim, fontSize: 10 },
+  firstText: { color: colors.textBright },
+  // where a completion comes from, small after it
+  source: { fontFamily: ui(400), color: colors.textMuted, fontSize: 10 },
   none: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12, alignSelf: "center" },
   inputRow: { flexDirection: "row", gap: 8, alignItems: "flex-end" },
   // the pane has not opened: the board dims the whole row
   waiting: { opacity: 0.5 },
-  // the board's 44 pt round button and the round field with its 36 pt run button
+  // the board's 44 pt round glass buttons (+, ⌃), level with the 46 pt field
   round: {
     width: TOUCH,
     height: TOUCH,
+    marginBottom: 1,
     borderRadius: TOUCH / 2,
     borderWidth: 1,
-    borderColor: colors.glassRim,
-    backgroundColor: colors.surface,
+    borderColor: colors.borderStrong,
+    backgroundColor: colors.glass,
     alignItems: "center",
     justifyContent: "center",
   },
   // ⌃ while the keys show: the accent tint and rim
   roundOn: { borderColor: colors.accent, backgroundColor: colors.tints.accentBadge },
+  // the round field: 44 pt inside its rim, 14 pt before the text, 5 after the 34 pt run button
   field: {
     flex: 1,
     minWidth: 0,
-    minHeight: TOUCH,
+    minHeight: TOUCH + 2,
     flexDirection: "row",
     alignItems: "flex-end",
-    paddingVertical: 3,
-    paddingLeft: 16,
-    paddingRight: 4,
-    borderRadius: TOUCH / 2,
+    gap: 6,
+    paddingLeft: 14,
+    paddingRight: 5,
+    borderRadius: (TOUCH + 2) / 2,
     borderWidth: 1,
     borderColor: colors.borderStrong,
     backgroundColor: colors.bg,
   },
-  // grows with the message, up to five lines, then scrolls
-  input: { flex: 1, minWidth: 0, minHeight: 36, maxHeight: 108, paddingTop: 9, paddingBottom: 9, paddingHorizontal: 0, color: colors.textBright, fontFamily: mono, fontSize: 14, lineHeight: 18, textAlignVertical: "top" },
-  inputEmpty: { height: 36 },
+  // JetBrains Mono 15/20; grows with the message, up to five lines, then scrolls
+  input: { flex: 1, minWidth: 0, minHeight: TOUCH, maxHeight: 124, paddingTop: 12, paddingBottom: 12, paddingHorizontal: 0, color: colors.textBright, fontFamily: mono, fontSize: 15, lineHeight: 20, textAlignVertical: "top" },
+  inputEmpty: { height: TOUCH },
   // the board dims the run button to 40 % while the field is empty
-  send: { width: 36, height: 36, borderRadius: 18, backgroundColor: `${colors.accent}66`, alignItems: "center", justifyContent: "center" },
+  send: { width: 34, height: 34, marginBottom: 5, borderRadius: 17, backgroundColor: `${colors.accent}66`, alignItems: "center", justifyContent: "center" },
   sendOn: { backgroundColor: colors.accent },
+  // the key block 10 pt under the field (the row's 8 and 2)
+  keys: { marginTop: 2, zIndex: 2 },
 }));

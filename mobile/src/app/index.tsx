@@ -17,14 +17,13 @@ import { hostDot } from "@/ui/hostDot";
 import { FirstRun } from "@/ui/FirstRun";
 import { Icon } from "@/ui/Icon";
 import { confirmDestructive } from "@/ui/confirm";
-import { CodeText } from "@/ui/ListRow";
+import { RowMark } from "@/ui/ListRow";
 import { canNewTab } from "@/ui/newTab";
 import { ErrorText } from "@/ui/Notice";
 import { ProgressBar } from "@/ui/ProgressBar";
 import { NavRow } from "@/ui/Rows";
-import { KIND_COLOR, StatusMark } from "@/ui/StatusMark";
 import { SwipeAction } from "@/ui/SwipeAction";
-import { IconButton, tabBottom, titleTop } from "@/ui/Screen";
+import { glyph, headerTop, IconButton, tabBottom } from "@/ui/Screen";
 import { radius, ui, makeStyles, useColors } from "@/ui/theme";
 import { useNow } from "@/ui/useNow";
 
@@ -107,13 +106,12 @@ interface TabRowProps {
 const TabRowView = memo(TabRowBody, (a: TabRowProps, b: TabRowProps) => a.last === b.last && a.answerHere === b.answerHere && a.host.record.name === b.host.record.name && sameTabRow(a.row, b.row));
 
 function TabRowBody({ row, host, last, answerHere }: TabRowProps) {
-  const colors = useColors();
   const styles = useStyles();
   const router = useRouter();
   const needs = row.kind === "needs";
   const question = row.ask ? row.ask.waiting.prompt.split("\n")[0]!.trim() : "";
   const inline = answerHere && needs && row.operate && row.ask?.waiting.kind === "choice" && quickChoices(row.ask.waiting) !== null;
-  // the line carries the question ("claude · Waiting for you · Edit x?"); the inline answer shows it
+  // the line carries the question ("Waiting for you · Edit x?"); the inline answer shows it
   // whole. The pane count goes beside the title ("project2 · 2 panes"), so the line says what it does.
   const line = row.paneLine || row.line;
   return (
@@ -137,7 +135,9 @@ function TabRowBody({ row, host, last, answerHere }: TabRowProps) {
             </Text>
             {row.panes > 1 ? <Text style={styles.panes}>{` · ${row.panes} panes`}</Text> : null}
           </View>
-          <CodeText line={line} codes={row.codes} />
+          <Text style={styles.line} numberOfLines={1}>
+            {line}
+          </Text>
           {inline ? (
             <Text style={styles.question}>
               {question}
@@ -145,14 +145,7 @@ function TabRowBody({ row, host, last, answerHere }: TabRowProps) {
           ) : null}
         </View>
         {/* the desktop tab's mark, then since when (the state in words is in the label) */}
-        <View style={styles.side}>
-          <StatusMark kind={row.kind} />
-          {row.when ? (
-            <Text style={[styles.when, { color: row.kind === "idle" ? colors.textMuted : colors[KIND_COLOR[row.kind]] }]} numberOfLines={1}>
-              {row.when}
-            </Text>
-          ) : null}
-        </View>
+        <RowMark kind={row.kind} when={row.when} />
       </Pressable>
       {inline ? <AnswerPills row={row} host={host} /> : null}
     </View>
@@ -170,6 +163,8 @@ function HostCard({ host, rows, now, answerHere, twin }: { host: HostView; rows:
   const failed = host.conn.status === "failed";
   const tabs = host.windows.reduce((n, w) => n + w.tabs.length, 0);
   const line = hostLine(host.conn, now, online ? tabs : null, lastSeenAt(host));
+  // the card's line stays grey when it cannot reach the computer: its fixes are the rows under it
+  const lineTint = line.tone === "bad" ? colors.textMuted : lineColor(colors)[line.tone];
   // another pairing has the same name: each card says when it was paired, which tells them apart
   const paired = twin ? pairedText(host.record.pairedAt, now) : "";
   const lineText = paired ? `${line.text} · ${paired}` : line.text;
@@ -227,18 +222,20 @@ function HostCard({ host, rows, now, answerHere, twin }: { host: HostView; rows:
               onPress={() => router.push({ pathname: "/connection", params: { key: host.record.key } })}
               style={({ pressed }) => [styles.connButton, pressed && styles.pressed]}
             >
-              <Text style={[styles.conn, { color: lineColor(colors)[line.tone] }]}>{lineText}</Text>
-              <Icon name="forward" size={12} color={lineColor(colors)[line.tone]} />
+              <Text style={[styles.conn, { color: lineTint }]}>{lineText}</Text>
             </Pressable>
           </View>
-          {online && canNewTab(host) ? (
+          {/* on a computer it cannot reach too: the sheet says it is offline */}
+          {!viewOnly && (!online || canNewTab(host)) ? (
             <Pressable
               accessibilityRole="button"
               accessibilityLabel={`New tab on ${name}`}
+              // the board's 34 pt glass button, 44 to the touch
+              hitSlop={5}
               onPress={newTab}
               style={({ pressed }) => [styles.headIcon, pressed && styles.pressed]}
             >
-              <Icon name="newTab" size={20} color={colors.textMuted} />
+              <Icon name="newTab" size={glyph(20, 19)} color={colors.textMuted} />
             </Pressable>
           ) : null}
           {!unreachable && line.retry ? (
@@ -256,7 +253,7 @@ function HostCard({ host, rows, now, answerHere, twin }: { host: HostView; rows:
             <ProgressBar />
           </View>
         ) : null}
-        {line.hint ? <Text style={styles.why}>{line.hint}</Text> : null}
+        {line.hint && !unreachable ? <Text style={styles.why}>{line.hint}</Text> : null}
         {host.notice ? <ErrorText style={styles.inset}>{host.notice}</ErrorText> : null}
         {error ? <ErrorText style={styles.inset}>{error}</ErrorText> : null}
         {unreachable ? (
@@ -347,8 +344,8 @@ export default function PortalsScreen() {
   const rowsOf = (h: HostView) => all.find((c) => c.host.record.key === h.record.key)?.rows ?? [];
   const twin = (h: HostView) => s.hosts.some((o) => o !== h && o.record.name === h.record.name);
   return (
-    <View style={[styles.page, { paddingTop: titleTop(insets.top) }]}>
-      <View style={styles.header}>
+    <View style={styles.page}>
+      <View style={[styles.header, { paddingTop: headerTop(insets.top) }]}>
         <View style={styles.titleRow}>
           <Text style={styles.heading} accessibilityRole="header">
             Portals
@@ -390,26 +387,28 @@ export default function PortalsScreen() {
 const useStyles = makeStyles((colors) => ({
   flex: { flex: 1, minWidth: 0 },
   pressed: { opacity: 0.75 },
-  page: { flex: 1, backgroundColor: colors.chrome },
-  // a scrolled card is cut 8 pt under the summary, not at its baseline (the cards keep their 16 pt at rest)
-  header: { paddingHorizontal: 20, paddingBottom: 8, gap: 10 },
-  titleRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  // the #050505 page under the header's black (the New Portals board)
+  page: { flex: 1, backgroundColor: colors.bg },
+  // the New Portals board: 16 pt in, the summary 12 under the title; a scrolled card is cut 12 pt
+  // under the summary, not at its baseline (the cards keep their 16 pt at rest)
+  header: { paddingHorizontal: 16, paddingBottom: 12, gap: 12, backgroundColor: colors.chrome },
+  titleRow: { flexDirection: "row", alignItems: "center", gap: 10 },
   // the Standard's large title: Inter 600 30/36
-  heading: { fontFamily: ui(600), color: colors.textBright, fontSize: 30, lineHeight: 36, letterSpacing: -0.5 },
+  heading: { flex: 1, fontFamily: ui(600), color: colors.textBright, fontSize: 30, lineHeight: 36, letterSpacing: -0.5 },
   buttons: { flexDirection: "row", gap: 8 },
   summary: { fontFamily: ui(400), color: colors.textMuted, fontSize: 14, lineHeight: 20 },
   loadError: { gap: 12 },
-  cards: { paddingTop: 8, paddingHorizontal: 16, gap: 12 },
+  cards: { paddingTop: 4, paddingHorizontal: 16, gap: 14 },
   card: { borderRadius: radius.card, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.hairline, overflow: "hidden" },
-  head: { flexDirection: "row", alignItems: "center", gap: 10, paddingLeft: 16, paddingRight: 6, minHeight: 60, paddingVertical: 8 },
+  head: { flexDirection: "row", alignItems: "center", gap: 10, paddingLeft: 16, paddingRight: 12, paddingVertical: 12 },
   headRule: { borderBottomWidth: 1, borderBottomColor: colors.hairline },
   dot: { width: 9, height: 9, borderRadius: 5 },
-  headText: { flex: 1, minWidth: 0, gap: 2 },
+  headText: { flex: 1, minWidth: 0 },
   nameLine: { flexDirection: "row", alignItems: "center", gap: 8 },
-  name: { flexShrink: 1, fontFamily: ui(600), color: colors.textBright, fontSize: 17 },
+  name: { flexShrink: 1, fontFamily: ui(600), color: colors.textBright, fontSize: 17, lineHeight: 22 },
   // the status line wraps, never cut: its reason may be long
-  connButton: { alignSelf: "flex-start", flexDirection: "row", alignItems: "center", gap: 6, maxWidth: "100%" },
-  conn: { flexShrink: 1, fontFamily: ui(400), fontSize: 13, lineHeight: 18 },
+  connButton: { alignSelf: "flex-start", maxWidth: "100%" },
+  conn: { fontFamily: ui(400), fontSize: 13, lineHeight: 17 },
   tryAgain: { marginRight: 8 },
   progress: { paddingHorizontal: 16, paddingBottom: 12 },
   // a fact, not a call for attention: orange is for "needs you" only
@@ -423,26 +422,27 @@ const useStyles = makeStyles((colors) => ({
     borderWidth: 1,
     borderColor: colors.borderStrong,
   },
-  headIcon: { width: 44, height: 44, alignItems: "center", justifyContent: "center" },
+  headIcon: { width: 34, height: 34, borderRadius: 17, backgroundColor: colors.glass, borderWidth: 1, borderColor: colors.glassRim, alignItems: "center", justifyContent: "center" },
   why: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13, lineHeight: 18, paddingHorizontal: 16, paddingBottom: 14 },
   inset: { marginHorizontal: 16, marginBottom: 12 },
-  row: { minHeight: 64 },
-  rowNeeds: { backgroundColor: `${colors.warning}0d` },
+  row: { minHeight: 62 },
+  rowNeeds: { backgroundColor: colors.tints.selected },
   rowRule: { borderBottomWidth: 1, borderBottomColor: colors.hairline },
   rowInline: { paddingBottom: 14 },
-  rowMain: { flexDirection: "row", gap: 12, paddingLeft: 16, paddingRight: 12, paddingTop: 12, paddingBottom: 12, alignItems: "flex-start" },
-  rowMainInline: { paddingTop: 14 },
-  rowMainCompact: { alignItems: "center", minHeight: 64 },
+  // the New Portals board's row: 62 pt, 16 pt in, 12 at the end and between its parts
+  rowMain: { flexDirection: "row", gap: 12, paddingLeft: 16, paddingRight: 12, alignItems: "flex-start" },
+  rowMainInline: { paddingTop: 14, paddingBottom: 12 },
+  rowMainCompact: { alignItems: "center", minHeight: 62 },
   tileBox: { flexShrink: 0 },
   rowText: { flex: 1, minWidth: 0, gap: 3 },
   titleLine: { flexDirection: "row", alignItems: "center", minWidth: 0 },
-  title: { flexShrink: 1, fontFamily: ui(600), color: colors.textBright, fontSize: 15 },
-  panes: { flexShrink: 0, fontFamily: ui(400), color: colors.textMuted, fontSize: 15 },
+  title: { flexShrink: 1, fontFamily: ui(600), color: colors.textBright, fontSize: 15, lineHeight: 20 },
+  // "project2 · 2 panes" all in the title's 600 white
+  panes: { flexShrink: 0, fontFamily: ui(600), color: colors.textBright, fontSize: 15, lineHeight: 20 },
+  line: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13, lineHeight: 17 },
   fixes: { borderTopWidth: 1, borderTopColor: colors.hairline },
   showAll: { minHeight: 44, alignItems: "center", justifyContent: "center", borderTopWidth: 1, borderTopColor: colors.hairline },
   showAllText: { fontFamily: ui(500), color: colors.accent, fontSize: 14 },
-  side: { flexShrink: 0, minWidth: 36, alignItems: "flex-end", justifyContent: "center", gap: 5, alignSelf: "center" },
-  when: { fontFamily: ui(500), fontSize: 11, fontVariant: ["tabular-nums"] },
   question: { fontFamily: ui(400), color: colors.text, fontSize: 14, lineHeight: 20, marginTop: 4 },
   pillsBox: { gap: 8, paddingLeft: 68, paddingRight: 16 },
   pills: { flexDirection: "row", alignItems: "center", gap: 8 },

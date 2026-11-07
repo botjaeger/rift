@@ -315,7 +315,7 @@ export function focusPane(tab: Tab): Pane | undefined {
   );
 }
 
-/** Coding agents get the ✳ tile, everything else the `>_` one. */
+/** Coding agents get a logo tile, everything else the `>_` one. */
 export const isAgentProgram = (program: string | null) => program === "claude" || program === "codex" || program === "opencode";
 
 /** "now", "2m", "3h", "4d": a short age for the state texts. */
@@ -358,12 +358,10 @@ export interface TabRow {
   program: string | null;
   /** The state in words ("Working 3:56"), for screen readers. */
   state: string;
-  /** What the pane that speaks for the tab does, its pane count first: "2 panes · claude · Waiting for you · Allow edits?". */
+  /** What the pane that speaks for the tab does, its pane count first: "2 panes · Waiting for you · Allow edits?". */
   line: string;
   /** The same without the pane count (a list that shows the count as its own mark). */
   paneLine: string;
-  /** The commands, paths and output in the lines, drawn mono (PaneSummary `codes`). */
-  codes: string[];
   /** The short time beside the status mark: "3:56", "2m", "✕ 101", or "". */
   when: string;
   /** The question of the asking pane, with the pane it was asked in. */
@@ -397,14 +395,12 @@ export interface PaneSummary {
   kind: TabKind;
   program: string | null;
   agent: boolean;
-  /** In words, its command the only code: "Waiting for you · Allow edits?", "cargo test · running", "cargo test · failed with 101", "Idle · last: ls". */
+  /** In words: "Waiting for you · Allow edits?", "cargo test · running", "cargo test · failed with 101", "Idle · last: ls". */
   activity: string;
   /** "Needs you · 2m": the state in words, for screen readers. */
   state: string;
   /** "2m", "3:56", "✕ 101", or "" when unknown. */
   when: string;
-  /** The commands, paths and output in `activity` (and the program in its line): drawn mono, the words in Inter. */
-  codes: string[];
 }
 
 /** A pane's summary; `key`: its idle-since key (`host:pane`). */
@@ -435,24 +431,7 @@ export function paneSummary(host: string, p: Pane, ctx: RowContext, idle: Readon
   else activity = p.last_command ? `Idle · last: ${p.last_command}` : cwd ? `Idle · ${cwd}` : "Idle";
   const when =
     kind === "working" ? (elapsedMs === null ? "" : formatClock(elapsedMs)) : kind === "failed" ? `✕ ${p.last_exit}` : ageMs === null ? "" : agoCompact(ageMs);
-  // what each line holds besides words: a question and an idle agent's title are words
-  const said =
-    kind === "needs"
-      ? []
-      : kind === "working"
-        ? [agent ? null : command || p.job, p.running?.line]
-        : kind === "failed"
-          ? [command]
-          : agent
-            ? []
-            : [p.last_command ? p.last_command : cwd];
-  const codes = [agent ? program : null, ...said].filter((c): c is string => !!c);
-  return { kind, program, agent, activity, state, when, codes };
-}
-
-/** A pane's line: its program, then what it does (a shell's command already names itself). */
-export function paneLine(s: PaneSummary): string {
-  return s.agent && s.program ? `${s.program} · ${s.activity}` : s.activity;
+  return { kind, program, agent, activity, state, when };
 }
 
 /**
@@ -473,7 +452,6 @@ export function sameTabRow(a: TabRow, b: TabRow): boolean {
     a.state === b.state &&
     a.line === b.line &&
     a.paneLine === b.paneLine &&
-    a.codes.join("\0") === b.codes.join("\0") &&
     a.when === b.when &&
     a.operate === b.operate &&
     a.panes === b.panes &&
@@ -518,9 +496,9 @@ export function tabRow(h: HostView, tab: Tab, ctx: RowContext, idle: ReadonlyMap
     agent: s?.agent ?? false,
     program: s?.program ?? null,
     state,
-    line: said ? more + paneLine(said) : more.replace(/ · $/, ""),
-    paneLine: said ? paneLine(said) : "",
-    codes: said?.codes ?? [],
+    // what the lead pane does, its program left to the row's tile (the New Portals board)
+    line: said ? more + said.activity : more.replace(/ · $/, ""),
+    paneLine: said?.activity ?? "",
     when,
     ask: p?.waiting ? { pane: p.id, waiting: p.waiting, program: s?.program ?? null } : null,
     operate: (h.welcome?.permission ?? h.record.permission) === "operate",

@@ -2,7 +2,7 @@ import { useRouter } from "expo-router";
 import { useState } from "react";
 import { KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { BLOCK_SLOTS, DEFAULT_CONTROL_KEYS, addChoices, canAddKey, controlKey, keyName, moveKeyTo, toggleKey } from "@/controlKeys";
+import { BLOCK_SLOTS, DEFAULT_CONTROL_KEYS, FKEYS_CHIP, addChoices, canAddKey, controlKey, keyName, moveKeyTo, toggleKey } from "@/controlKeys";
 import { fleet, useApp } from "@/runtime";
 import { Button } from "@/ui/Button";
 import { ControlRow, KeyCap, NO_STICKY } from "@/ui/ControlRow";
@@ -11,7 +11,7 @@ import { Icon } from "@/ui/Icon";
 import { ReorderRow, useReorder, type RowHandle } from "@/ui/ReorderRow";
 import { SaveError } from "@/ui/SaveError";
 import { PageHeader, SectionTitle } from "@/ui/Screen";
-import { monoMedium, radius, TOUCH, ui, makeStyles, useColors } from "@/ui/theme";
+import { mono, monoMedium, radius, TOUCH, ui, makeStyles, useColors } from "@/ui/theme";
 
 /** A list row's height: the distance one row's drag moves it. */
 const ROW = 52;
@@ -44,7 +44,7 @@ function KeyRow({ id, index, count, handle, onRemove }: { id: string; index: num
         }}
       >
         <KeyCap def={k} color={k.danger ? colors.error : colors.text} ground={colors.bg} style={styles.cap} />
-        <Text style={styles.what} numberOfLines={1}>
+        <Text style={styles.what} numberOfLines={2}>
           {what}
           {k.icon && k.danger ? <Text style={styles.chord}> {k.label}</Text> : null}
         </Text>
@@ -75,11 +75,13 @@ export default function ControlKeysScreen() {
   const ids = s.settings.controlKeys;
   const reorder = useReorder();
   const [query, setQuery] = useState("");
+  // the F1–F12 chip, tapped: the twelve laid out
+  const [everyFKey, setEveryFKey] = useState(false);
   const set = (controlKeys: string[]) => void fleet.updateSettings({ controlKeys });
   const isDefault = ids.length === DEFAULT_CONTROL_KEYS.length && ids.every((id, i) => id === DEFAULT_CONTROL_KEYS[i]);
   const known = ids.filter((id) => controlKey(id));
   const full = !canAddKey(known);
-  const choices = addChoices(known, query);
+  const choices = addChoices(known, query, everyFKey);
 
   // Android 15 draws edge to edge: the padding leaves room to scroll Search keys above the keyboard
   return (
@@ -113,6 +115,8 @@ export default function ControlKeysScreen() {
         <View style={styles.section}>
           <SectionTitle>Preview</SectionTitle>
           <View style={styles.preview}>
+            {/* the pane's key area: its hairline over the keys, 28 pt under them */}
+            <View style={styles.keyArea}>
             <ControlRow
               ids={known}
               sticky={NO_STICKY}
@@ -124,6 +128,7 @@ export default function ControlKeysScreen() {
               onShowKeyboard={() => undefined}
               tipBelow
             />
+            </View>
           </View>
           <Text style={styles.previewHint}>Hold a key to see what it sends.</Text>
         </View>
@@ -157,6 +162,22 @@ export default function ControlKeysScreen() {
           <View style={styles.add}>
             {choices.length === 0 ? <Text style={styles.empty}>No key matches “{query.trim()}”.</Text> : null}
             {choices.map((c) => {
+              if (c.label === FKEYS_CHIP)
+                return (
+                  <Pressable
+                    key={c.label}
+                    accessibilityRole="button"
+                    accessibilityLabel="Function keys, F1 to F12"
+                    accessibilityHint="Shows each one to add"
+                    accessibilityState={{ disabled: full }}
+                    disabled={full}
+                    onPress={() => setEveryFKey(true)}
+                    hitSlop={4}
+                    style={({ pressed }) => [styles.addChip, full && styles.disabled, pressed && styles.pressed]}
+                  >
+                    <Text style={styles.addKey}>{FKEYS_CHIP}</Text>
+                  </Pressable>
+                );
               const k = controlKey(c.ids[0]!)!;
               // the key as the block shows it, then its word ("⌃D End input")
               const word = k.short ?? keyName(k);
@@ -192,23 +213,22 @@ export default function ControlKeysScreen() {
 }
 
 const useStyles = makeStyles((colors) => ({
-  fill: { flex: 1, backgroundColor: colors.chrome },
-  content: { paddingTop: 12, paddingHorizontal: 12, gap: 22, maxWidth: 720, width: "100%", alignSelf: "center" },
-  section: { gap: 6 },
+  fill: { flex: 1, backgroundColor: colors.bg },
+  // the Keys board: captions 18 pt over and 8 under, 20 pt in; cards 16 pt in
+  content: { paddingTop: 18, paddingHorizontal: 16, gap: 18, maxWidth: 720, width: "100%", alignSelf: "center" },
+  section: { gap: 8 },
   pressed: { opacity: 0.6 },
   disabled: { opacity: 0.45 },
-  previewHint: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12, paddingHorizontal: 4 },
+  previewHint: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12, lineHeight: 16, paddingHorizontal: 4 },
   // the board's preview: the keys as the pane draws them, on the chrome ground
   preview: {
     zIndex: 2,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    marginTop: 2,
     borderRadius: radius.card,
     backgroundColor: colors.chrome,
     borderWidth: 1,
     borderColor: colors.hairline,
   },
+  keyArea: { borderTopWidth: 1, borderTopColor: colors.hairline, paddingTop: 10, paddingHorizontal: 12, paddingBottom: 28 },
   empty: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13, paddingVertical: 8 },
   card: {
     backgroundColor: colors.surface,
@@ -222,32 +242,33 @@ const useStyles = makeStyles((colors) => ({
     alignItems: "center",
     gap: 12,
     paddingLeft: 10,
-    paddingRight: 4,
+    paddingRight: 12,
     borderRadius: radius.card - 1,
     backgroundColor: colors.surface,
   },
   divider: { borderTopWidth: 1, borderTopColor: colors.hairline, borderTopLeftRadius: 0, borderTopRightRadius: 0 },
-  handle: { width: 28, height: ROW, alignItems: "center", justifyContent: "center" },
+  // the grip 16 pt in, the key 12 pt after it (the grip's 28 pt touch column overlaps that gap)
+  handle: { width: 28, height: ROW, marginRight: -6, alignItems: "center", justifyContent: "center" },
   keyBody: { flex: 1, minWidth: 0, flexDirection: "row", alignItems: "center", gap: 12 },
   // the board's list key: 44 x 34
   cap: { width: 44, height: 34 },
-  what: { fontFamily: ui(400), flex: 1, color: colors.text, fontSize: 15 },
+  what: { fontFamily: ui(400), flex: 1, color: colors.text, fontSize: 15, lineHeight: 20 },
   chord: { fontFamily: monoMedium, color: colors.textMuted, fontSize: 13 },
   remove: { width: TOUCH, height: TOUCH, alignItems: "center", justifyContent: "center" },
-  add: { flexDirection: "row", flexWrap: "wrap", gap: 8, paddingTop: 6 },
+  add: { flexDirection: "row", flexWrap: "wrap", gap: 8, paddingTop: 4 },
   // the board's Add chips: 36 pt, 8 pt corners, the key in mono then its word
   addChip: {
     height: 36,
     flexDirection: "row",
-    gap: 6,
+    gap: 5,
     paddingHorizontal: 12,
     alignItems: "center",
     justifyContent: "center",
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: colors.glassRim,
+    borderColor: colors.borderStrong,
     backgroundColor: colors.surface,
   },
-  addKey: { color: colors.textBright, fontFamily: monoMedium, fontSize: 13 },
+  addKey: { color: colors.textBright, fontFamily: mono, fontSize: 13 },
   addText: { color: colors.text, fontFamily: ui(400), fontSize: 13 },
 }));

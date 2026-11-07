@@ -32,18 +32,19 @@ export function PaneStrip({ strip, onPress }: { strip: NonNullable<PaneLoad["str
   );
 }
 
-const stepColors = fromPalette((colors): Record<PaneStep["tone"], { fg: string; bg: string; label: string; note: string }> => ({
-  done: { fg: colors.success, bg: tint(colors.success, 0x26), label: colors.text, note: colors.textMuted },
-  now: { fg: colors.accent, bg: tint(colors.accent, 0x26), label: colors.textBright, note: colors.accent },
-  // the board's #ffffff66 label is 3:1 on the card; the muted token keeps AA
-  todo: { fg: colors.textMuted, bg: colors.faint, label: colors.textMuted, note: colors.textMuted },
-  bad: { fg: colors.error, bg: tint(colors.error, 0x26), label: colors.textBright, note: colors.error },
+// a step's glyph colour (✓ ◌ ○ ✕, decorative: the label says it) and its note's
+const stepColors = fromPalette((colors): Record<PaneStep["tone"], { fg: string; note: string }> => ({
+  done: { fg: colors.success, note: colors.textMuted },
+  now: { fg: colors.accent, note: colors.accent },
+  todo: { fg: colors.textDim, note: colors.textMuted },
+  bad: { fg: colors.error, note: colors.error },
 }));
 
 /**
- * The steps card centred over the skeleton: Reach the computer, Open this pane, Load its
- * blocks (or Get the screen), the current step saying what it waits for. After a while, or
- * when the computer cannot be reached, it says why in full with Try again and Details.
+ * The steps card centred over the skeleton (the New Blocks board): "Opening project1", then
+ * Reached the computer ✓, the blocks loading ◌, the screen to come ○, and Details. A step
+ * that waits on something else says what under it. After a while, or when the computer cannot
+ * be reached, it says why in full with Try again and Details.
  */
 export function PaneCard({
   card,
@@ -65,23 +66,25 @@ export function PaneCard({
         <Text style={styles.cardTitle} accessibilityRole="header">
           {card.title}
         </Text>
-        <View style={styles.steps}>
-          {card.steps.map((st) => {
-            const c = stepColors(colors)[st.tone];
-            return (
-              <View key={st.label} style={styles.step} accessible accessibilityLabel={`${st.label}${st.note ? `. ${st.note}` : ""}`}>
-                <View style={[styles.stepMark, { backgroundColor: c.bg }]}>
-                  <Text style={[styles.stepMarkText, { color: c.fg }]}>{st.mark}</Text>
-                </View>
-                <View style={styles.stepText}>
-                  <Text style={[styles.stepLabel, { color: c.label }]}>{st.label}</Text>
-                  {st.note ? <Text style={[styles.stepNote, { color: c.note }]}>{st.note}</Text> : null}
-                </View>
+        {card.steps.map((st) => {
+          const c = stepColors(colors)[st.tone];
+          return (
+            <View key={st.label} style={styles.step} accessible accessibilityLabel={`${st.label}${st.note ? `. ${st.note}` : ""}`}>
+              <Text style={[styles.stepMark, { color: c.fg }]}>{st.mark}</Text>
+              <View style={styles.stepText}>
+                <Text style={styles.stepLabel}>{st.label}</Text>
+                {st.note ? <Text style={[styles.stepNote, { color: c.note }]}>{st.note}</Text> : null}
               </View>
-            );
-          })}
-        </View>
+            </View>
+          );
+        })}
         {card.hint ? <Text style={styles.hint}>{card.hint}</Text> : null}
+        {/* while it only waits: Details, the Connection sheet */}
+        {!card.actions ? (
+          <View style={styles.details}>
+            <Button label="Details" size="small" onPress={onDetails} />
+          </View>
+        ) : null}
         {card.actions && card.leave && !card.noRetry ? (
           <>
             <View style={styles.actions}>
@@ -183,28 +186,23 @@ const useStyles = makeStyles((colors) => ({
   stripText: { flex: 1, fontFamily: ui(400), fontSize: 13, lineHeight: 18 },
   elapsed: { fontFamily: mono, fontSize: 12, opacity: 0.8 },
   cardLayer: { ...StyleSheet.absoluteFill, justifyContent: "center", paddingHorizontal: 16 },
+  // the New Blocks board's card: the surface, a hairline rim, 14 pt corners, no shadow
   card: {
     gap: 12,
     padding: 16,
     borderRadius: radius.card,
     borderWidth: 1,
-    borderColor: colors.glassRim,
-    // a step above the page (Dark Default: the board's #262626)
-    backgroundColor: colors.raised,
-    shadowColor: "#000000",
-    shadowOpacity: 0.5,
-    shadowRadius: 16,
-    shadowOffset: { width: 0, height: 12 },
-    elevation: 12,
+    borderColor: colors.hairline,
+    backgroundColor: colors.surface,
   },
-  cardTitle: { fontFamily: ui(600), color: colors.textBright, fontSize: 15 },
-  steps: { gap: 10 },
+  cardTitle: { fontFamily: ui(600), color: colors.textBright, fontSize: 16, lineHeight: 21 },
+  // a step: its 18 pt glyph, 10 pt, the label (14/20); a note under the label when it waits on something
   step: { flexDirection: "row", alignItems: "flex-start", gap: 10 },
-  stepMark: { width: 20, height: 20, borderRadius: 10, alignItems: "center", justifyContent: "center" },
-  stepMarkText: { fontFamily: ui(500), fontSize: 11 },
+  stepMark: { width: 18, fontFamily: ui(400), fontSize: 16, lineHeight: 22, textAlign: "center" },
   stepText: { flex: 1, minWidth: 0, gap: 2 },
-  stepLabel: { fontFamily: ui(400), fontSize: 14 },
+  stepLabel: { fontFamily: ui(400), color: colors.text, fontSize: 14, lineHeight: 20 },
   stepNote: { fontFamily: ui(400), fontSize: 12, lineHeight: 16 },
+  details: { flexDirection: "row", paddingTop: 4 },
   hint: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13, lineHeight: 18 },
   actions: { flexDirection: "row", gap: 8 },
   action: { flex: 1 },

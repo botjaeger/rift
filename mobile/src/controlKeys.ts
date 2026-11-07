@@ -171,13 +171,46 @@ export function moveKeyTo(ids: readonly string[], from: number, to: number): str
 /** What a search in Settings › Keys matches a key by: its label, its names, its id ("pgup", "page", "f5"). */
 const searchText = (k: ControlKey) => [k.label, k.name, k.short, k.spoken, k.id].filter(Boolean).join(" ").toLowerCase();
 
+/** The function keys' one Add chip ("F1–F12"): a tap lays out the twelve. */
+export const FKEYS_CHIP = "F1–F12";
+
+/**
+ * Add a key's order (the Keys, adding board): the default block's keys first (offered once
+ * removed), then the board's chips (⇧Tab, ⌥, ⇧, Home, End, Page up, Page down, ⌃D ⌃Z ⌃R ⌃L ⌃U,
+ * the function keys), then the keys the app had before that board (Interrupt, New line, ⌫, Del,
+ * Ins, ⌃A ⌃E ⌃W, New tab, New pane).
+ */
+const ADD_ORDER: readonly string[] = [
+  ...DEFAULT_CONTROL_KEYS,
+  "shift+tab", "alt", "shift", "home", "end", "pageup", "pagedown",
+  "ctrl+d", "ctrl+z", "ctrl+r", "ctrl+l", "ctrl+u",
+  ...fkeys.map((k) => k.id),
+  "ctrl+c", "ctrl+j", "backspace", "delete", "insert", "ctrl+a", "ctrl+e", "ctrl+w", "new_tab", "new_pane",
+];
+const rank = (id: string) => {
+  const i = ADD_ORDER.indexOf(id);
+  return i < 0 ? ADD_ORDER.length : i;
+};
+const isFKey = (id: string) => /^f\d+$/.test(id);
+
 /**
  * Settings › Keys' Add a key: every key not in the block and not on the arrow pad, matching
- * `query` (any word of its label or names; empty: all of them).
+ * `query` (any word of its label or names; empty: all of them), in the board's order. With no
+ * query the function keys left to add are one chip (`FKEYS_CHIP`, its `ids` all of them) unless
+ * `everyFKey`; a search finds each one.
  */
-export function addChoices(ids: readonly string[], query = ""): { label: string; ids: string[] }[] {
+export function addChoices(ids: readonly string[], query = "", everyFKey = false): { label: string; ids: string[] }[] {
   const q = query.trim().toLowerCase();
-  return CONTROL_KEYS.filter((k) => !ids.includes(k.id) && !isArrow(k.id) && (q === "" || searchText(k).includes(q))).map((k) => ({ label: k.label, ids: [k.id] }));
+  const keys = CONTROL_KEYS.filter((k) => !ids.includes(k.id) && !isArrow(k.id) && (q === "" || searchText(k).includes(q))).sort((a, b) => rank(a.id) - rank(b.id));
+  const out: { label: string; ids: string[] }[] = [];
+  for (const k of keys) {
+    if (q === "" && !everyFKey && isFKey(k.id)) {
+      const group = out.find((c) => c.label === FKEYS_CHIP);
+      if (group) group.ids.push(k.id);
+      else out.push({ label: FKEYS_CHIP, ids: [k.id] });
+    } else out.push({ label: k.label, ids: [k.id] });
+  }
+  return out;
 }
 
 /** `ids` with `id` added at the end (on; unchanged when the row is full) or removed (off). */

@@ -171,12 +171,17 @@ export function screenView(p: Pane, alt: boolean, blocksHoldRunning: boolean, no
 export const fieldKey = (name: string): "send" | "newline" | null => (name === "enter" ? "send" : name === "shift+enter" ? "newline" : null);
 
 /**
- * The message box's placeholder for `program` in a screen `width` wide: the program's name only when
- * it fits on the box's one line (14 pt mono; the box leaves about 184 pt for the +, ⌃, Send and gutters).
+ * A command line placeholder for a screen `width` wide: `full` when it fits on the field's one line
+ * (15 pt JetBrains Mono, 9 pt a character; the line leaves about 184 pt for the +, ⌃, Run and
+ * gutters), else `short`. A placeholder longer than the line is cut mid-word.
  */
+export function fitPlaceholder(full: string, short: string, width: number): string {
+  return full.length * 9 <= width - 184 ? full : short;
+}
+
+/** The message box's placeholder for `program`: the program's name only when it fits. */
 export function messagePlaceholder(program: string, width: number): string {
-  const full = `Message for ${program}`;
-  return full.length * 8.4 <= width - 184 ? full : "Message";
+  return fitPlaceholder(`Message for ${program}`, "Message", width);
 }
 
 /**
@@ -254,12 +259,17 @@ export function paneState(p: Pane): { text: string; tone: StateTone } {
   return { text: "Idle", tone: "idle" };
 }
 
-/** A program's mark: Claude Code's ✳ in its orange, Codex and OpenCode their own, else the prompt mark `>_`. */
-export function programMark(program: string | null): { mark: string; claude: boolean } {
-  if (program === "claude") return { mark: "\u2733\uFE0E", claude: true };
-  if (program === "codex") return { mark: "\u25C6", claude: false };
-  if (program === "opencode") return { mark: "\u25A0", claude: false };
-  return { mark: ">_", claude: false };
+/** A coding agent drawn with its own logo (Lobe Icons, MIT: mobile/assets/agents). */
+export type AgentLogo = "claude" | "codex" | "opencode";
+const AGENT_LOGOS: readonly AgentLogo[] = ["claude", "codex", "opencode"];
+
+/**
+ * A program's mark: a coding agent's logo (Claude Code, Codex, OpenCode; `mark` null), else the
+ * prompt mark `>_` as text (`logo` null).
+ */
+export function programMark(program: string | null): { mark: ">_" | null; logo: AgentLogo | null; claude: boolean } {
+  const logo = AGENT_LOGOS.find((l) => l === program) ?? null;
+  return { mark: logo ? null : ">_", logo, claude: logo === "claude" };
 }
 
 /** The pane's mark. */
@@ -279,7 +289,8 @@ export interface PaneRow {
   /** 1-based. */
   number: number;
   name: string;
-  mark: string;
+  mark: ">_" | null;
+  logo: AgentLogo | null;
   claude: boolean;
   line: string;
   state: string;
@@ -521,6 +532,22 @@ export function visibleRows(ctx: AskContext, full: boolean): DiffRow[] {
 
 /** Whether "Full diff" shows anything more. */
 export const hasMoreRows = (ctx: AskContext) => ctx.rows.some((r) => r.kind === "kept");
+
+/** A diff row's text as the card and A change in full draw it: "− TODO: ship it", "+ Done", a kept line as it is. */
+export const diffRowText = (row: DiffRow) => (row.sign === " " ? row.text : `${row.sign === "-" ? "−" : "+"} ${row.text}`);
+
+/**
+ * The hunk header over A change in full: the agent's own ("@@ -1,4 +1,6 @@") when it shows one,
+ * else made from the first numbered row and the rows' counts; null without line numbers.
+ */
+export function hunkHeader(ctx: AskContext): string | null {
+  const given = ctx.meta.find((t) => t.startsWith("@@"));
+  if (given) return given;
+  const first = ctx.rows.find((r) => r.n !== null);
+  if (!first) return null;
+  const kept = ctx.rows.length - ctx.added - ctx.removed;
+  return `@@ -${first.n},${kept + ctx.removed} +${first.n},${kept + ctx.added} @@`;
+}
 
 // --- the running card's log lines ---------------------------------------------------------------
 

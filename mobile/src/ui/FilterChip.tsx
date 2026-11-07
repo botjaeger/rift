@@ -42,9 +42,10 @@ export function FilterChip({
 }
 
 const useStyles = makeStyles((colors) => ({
-  chip: { height: 32, flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, borderRadius: radius.chip },
+  // the New Lists board: 32 pt, 11 pt in; the unchosen ones outlined in the rim
+  chip: { height: 32, flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 11, borderRadius: radius.chip },
   on: { backgroundColor: colors.textBright },
-  off: { borderWidth: 1, borderColor: colors.borderStrong },
+  off: { borderWidth: 1, borderColor: colors.rim },
   pressed: { opacity: 0.75 },
   dot: { width: 7, height: 7, borderRadius: 4 },
   text: { fontFamily: ui(500), color: colors.text, fontSize: 13 },
