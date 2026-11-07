@@ -504,9 +504,9 @@ mod tests {
             "-c",
             "head -c 300000 /dev/zero; head -c 200000 /dev/zero >&2",
         ]);
-        let t = Instant::now();
+        // a full pipe would stall it until the limit, which is an error: no
+        // wall-clock bound here (3.6 s on a loaded machine, 2026-11-07)
         let out = output_within(big, Duration::from_secs(5)).unwrap();
-        assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
         assert_eq!((out.stdout.len(), out.stderr.len()), (300_000, 200_000));
         // a command that does not end is killed at the limit
         let mut hang = Command::new("/bin/sleep");
