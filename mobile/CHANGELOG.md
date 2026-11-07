@@ -6,6 +6,15 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.9.0 · update 2 — 2026-11-07
+
+The Paste key shows the paste icon.
+
+### Improved
+
+- **Paste key** — Shows the paste icon instead of the word, in the keys and in Settings › Keys.
+  On iPhone, tapping it asks once whether Rift may paste.
+
 ## 0.9.0 · update 1 — 2026-11-07
 
 Portals keeps your computer's tab order.
