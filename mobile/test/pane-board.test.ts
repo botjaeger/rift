@@ -49,10 +49,16 @@ describe("the tab row", () => {
   const { TabBar } = load("ui/TabBar.tsx", deps) as { TabBar: (p: object) => unknown };
   const draw = (p: object = {}) =>
     render({ type: TabBar, props: { title: "project1", kind: "idle", number: 2, count: 30, prev: "notes", next: null, onPrev: vi.fn(), onNext: vi.fn(), onOpen: vi.fn(), children: [], ...p } }) as Node;
-  it("‹ › are 32 pt glass circles; the dot comes before the name, the place under it", () => {
+  it("‹ › are plain grey chevrons on 32 pt, no round ground (Back is the only round ‹); the dot comes before the name, the place under it", () => {
     const tree = draw();
     const prev = findAll(tree, (n) => n.props.accessibilityLabel === "Previous tab: notes")[0]!;
-    expect(flat(prev.props.style)).toMatchObject({ width: 32, height: 32, borderRadius: 16, backgroundColor: stubColors.glass, borderColor: stubColors.glassRim });
+    const box = flat(prev.props.style);
+    expect(box).toMatchObject({ width: 32, height: 32 });
+    expect(box.backgroundColor).toBeUndefined();
+    expect(box.borderWidth).toBeUndefined();
+    expect(box.borderRadius).toBeUndefined();
+    expect(prev.props.hitSlop).toBe(6);
+    expect(findAll(prev, (n) => n.props.color === stubColors.textMuted).length).toBeGreaterThan(0);
     const middle = findAll(tree, (n) => n.props.accessibilityLabel === "project1, tab 2 of 30. Open the tabs")[0]!;
     const line = (middle.props.children as Node[])[0]!;
     const [dot, name] = line.props.children as Node[];

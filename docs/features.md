@@ -1984,7 +1984,7 @@ on the desktop (also for shells a phone started while no window is open).
   in use · 2 ms*, the one in use ticked) and offers *Test again*
   while connected (it connects again, this network first) or *Try again now*. *Search output*
   (⌕) and ⋯ are two round glass buttons beside it, over a full-screen program too. Under it, in
-  the same header block, a tab row: ‹ and › (round glass buttons, or a fling across the row) go to the
+  the same header block, a tab row: ‹ and › (plain grey chevrons at the row's two ends, or a fling across the row) go to the
   previous and next tab, which slides in from the side it comes from; the
   middle, the tab's status dot (grey while the pane opens), its name and "tab 2 of 30", opens the *Tabs* page:
   a full page of the computer's tabs as rows (grip, name, what the lead pane

@@ -8,7 +8,7 @@ import { glyph } from "./Screen";
 import { KIND_COLOR } from "./StatusMark";
 import { ui, makeStyles, useColors } from "./theme";
 
-/** The tab row's ‹ › buttons: the boards' 32 pt glass circles (44 to the touch with their slop). */
+/** The tab row's ‹ › buttons: plain grey chevrons on a 32 pt square (44 to the touch with their slop), so Back stays the header's only round ‹ (user, 2026-11-07). */
 export const TAB_ARROW = 32;
 
 interface Props {
@@ -31,8 +31,8 @@ interface Props {
 
 /**
  * The tab row inside the pane's header block (the New Blocks board): as wide at one tab as at a
- * hundred. ‹ and › in round glass buttons go to the neighbouring tabs (dimmed where there is
- * none); the middle names this tab, its status dot before the name and its place under it, and
+ * hundred. ‹ and ›, plain grey chevrons fixed at the row's two ends, go to the neighbouring tabs
+ * (dimmed where there is none); the middle names this tab, its status dot before the name and its place under it, and
  * opens the Tabs page. A fling left or right does what › and ‹ do; a screen reader gets Next tab
  * / Previous tab as actions. The header around it draws the ground and the one hairline.
  */
@@ -67,7 +67,7 @@ export function TabBar({ title, kind, dot, number, count, prev, next, onPrev, on
       hitSlop={6}
       style={({ pressed }) => [styles.arrow, pressed && styles.pressed]}
     >
-      <Icon name={icon} size={glyph(18, 13)} color={to === null ? colors.borderStrong : colors.text} />
+      <Icon name={icon} size={glyph(20, 13)} color={to === null ? colors.borderStrong : colors.textMuted} />
     </Pressable>
   );
   return (
@@ -105,16 +105,7 @@ export function TabBar({ title, kind, dot, number, count, prev, next, onPrev, on
 
 const useStyles = makeStyles((colors) => ({
   bar: { flexDirection: "row", alignItems: "center", gap: 8 },
-  arrow: {
-    width: TAB_ARROW,
-    height: TAB_ARROW,
-    borderRadius: TAB_ARROW / 2,
-    backgroundColor: colors.glass,
-    borderWidth: 1,
-    borderColor: colors.glassRim,
-    alignItems: "center",
-    justifyContent: "center",
-  },
+  arrow: { width: TAB_ARROW, height: TAB_ARROW, alignItems: "center", justifyContent: "center" },
   middle: { flex: 1, minWidth: 0, minHeight: 34, alignItems: "center", justifyContent: "center" },
   titleLine: { flexDirection: "row", alignItems: "center", gap: 6, maxWidth: "100%" },
   dot: { width: 7, height: 7, borderRadius: 4 },

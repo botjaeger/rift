@@ -220,7 +220,7 @@ card cannot answer (a password, other input, a view-only device), and from an al
   `src/ui/Marked.tsx`; marked output stays a selectable field, its text as styled pieces); and
   **⋯**, a second round glass button. The header block (the New Blocks board: the computer's row,
   the tab row and the search field on the chrome, one hairline under all of it) holds the **tab
-  row** (`src/ui/TabBar.tsx`): ‹ and › in 32 pt glass circles go to the
+  row** (`src/ui/TabBar.tsx`): ‹ and › (plain grey chevrons fixed at the row's ends, 32 pt, no round ground: Back is the header's only round ‹) go to the
   previous and next tab, the new pane sliding in from the side it comes from (a fling across the
   row does the same); the middle, the tab's status dot (grey while the pane opens), its name with
   ⌄ and "tab 2 of 30", opens the Tabs page.
