@@ -1567,6 +1567,12 @@ impl Session {
         self.size
     }
 
+    /// The cell size in pixels the shell was last told (TIOCSWINSZ).
+    pub fn cell_size(&self) -> (u16, u16) {
+        let ws = *self.window_size.lock().unwrap();
+        (ws.cell_width, ws.cell_height)
+    }
+
     /// Id of the shell in the session service (durable sessions); `None`
     /// for a local shell, and for a new one until the service answered.
     pub fn service_id(&self) -> Option<u64> {

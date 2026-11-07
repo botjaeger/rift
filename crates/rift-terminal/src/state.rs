@@ -1467,17 +1467,18 @@ impl PaneState {
         ((cols, rows) != (own_cols, own_rows)).then_some(rift_pty::GridSize { cols, rows })
     }
 
-    /// Size the shell now from the last layout's grid and the phone's fit:
-    /// for a pane that is not drawn (another tab), which layout does not
-    /// reach. Returns whether it is known how (a pane never laid out waits
-    /// for its first layout).
-    pub fn apply_fit(&mut self) -> bool {
-        let Some((cols, rows, cell)) = self.base_grid else {
-            return false;
-        };
+    /// Size the shell now from the last layout's grid and the phone's fit,
+    /// without waiting for a frame: for a pane that is not drawn (another
+    /// tab) and for a window that draws none (on another Space, minimized,
+    /// display asleep). A pane never laid out (a tab restored or opened
+    /// behind another) takes the size it was opened at as its own.
+    pub fn apply_fit(&mut self) {
+        let (cols, rows, cell) = *self.base_grid.get_or_insert_with(|| {
+            let size = self.session.size();
+            (size.cols, size.rows, self.session.cell_size())
+        });
         let (cols, rows) = self.fitted(cols, rows);
         self.session.resize(rift_pty::GridSize { cols, rows }, cell);
-        true
     }
 
     /// Publish the program's size before its input can start a process.

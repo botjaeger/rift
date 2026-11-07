@@ -1836,7 +1836,7 @@ on the desktop (also for shells a phone started while no window is open).
   naming the device. The phone follows and drives it like any pane. The next
   Rift window shows these shells as tabs (with a toast) and the gateway lets
   go of them. At most 8 at a time.
-- **Copy to phones** (`remote_clipboard`, *Copy to phones too*, off by default): what a program copies with OSC 52 also reaches the phones that may operate. A phone's tap is a click for a program that tracks the mouse, its several lines reach the program as one paste, and a window in use keeps its size, focused and touched within the last minute (`fit`): a full-screen program is captured at the phone's size for the phone alone, about every 2 s at most once it pauses, and the live frame shows otherwise. A window left alone fits the phone live until it is touched again.
+- **Copy to phones** (`remote_clipboard`, *Copy to phones too*, off by default): what a program copies with OSC 52 also reaches the phones that may operate. A phone's tap is a click for a program that tracks the mouse, its several lines reach the program as one paste, and a window in use keeps its size, focused and touched within the last minute (`fit`): a full-screen program is captured at the phone's size for the phone alone, about every 2 s at most once it pauses, and the live frame shows otherwise. A window left alone fits the phone live until it is touched again, in whichever pane the phone views: the active tab's, a tab behind it (one never shown included) and one in a window that draws no frame (another Space, minimized, display asleep).
 - **Cloudflare tunnel** (`remote_tunnel`, *Use a Cloudflare tunnel instead*; no server needed): the gateway
   runs a relay on a loopback port of this computer and gives it a public
   address with a Cloudflare quick tunnel (`cloudflared tunnel --url`,
@@ -1968,8 +1968,10 @@ on the desktop (also for shells a phone started while no window is open).
   lists each computer in a card: its line says where it is (*This network · 30 tabs*, *Over the
   relay*, *Can't reach it · last seen 2 h ago*, with *paired 3 Nov* when two pairings share a
   name), *New tab* (also on one it cannot reach, whose sheet says it is offline); one that cannot be reached offers *Try again* (or *Pair again*) and *Unpair*
-  (in red, asking first) in the card, and any card swipes left for *Unpair*. A card shows five
-  tabs, what needs you first (tinted), then what works, failed and idles, and *Show all N tabs*
+  (in red, asking first) in the card, and any card swipes left for *Unpair*. A card shows up to five
+  tabs in the computer's tab order (window by window, then each tab strip's; a tab never moves
+  when its state changes); past five, the five that matter most (what needs you, tinted, then what
+  works, failed and idles), and *Show all N tabs*
   opens the *Tabs* page for the rest. Each row has the tab's name (cut once at its end; the pane
   count stays: "project2 · 2 panes") and says what its lead pane does in words (*Waiting for you ·
   Make this edit?*, *npm run dev · running*, *cargo test · failed with 101*, *Idle · last: echo

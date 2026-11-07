@@ -23075,7 +23075,6 @@ impl App {
                 return Response::error("bad request: cols and rows are both numbers or both null");
             }
         };
-        let active = self.win.active;
         let Some(i) = self.win.tabs.iter().position(|t| t.pane(pane).is_some()) else {
             return Response::error("no such pane");
         };
@@ -23086,10 +23085,9 @@ impl App {
             if p.fit.is_none() {
                 p.session.shadow_clear();
             }
-            // layout sizes the panes it draws; one in another tab is sized now
-            if i != active {
-                p.apply_fit();
-            }
+            // sized now, drawn or not: a window that draws no frame (another
+            // Space, display asleep) or a tab never shown would never get it
+            p.apply_fit();
         }
         if let Some(w) = &self.win.window {
             w.request_redraw();

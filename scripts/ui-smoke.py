@@ -5306,6 +5306,80 @@ assert cap_stat("away.txt", "grid") == "40x12" and cap_stat("away.txt", "paused"
 assert answer(cp2, "away.json")["screen"]["cols"] == 40, answer(cp2, "away.json")
 assert cap_stat("back.txt", "grid") == own_grid and cap_stat("back.txt", "paused") == "true", cap_line("back.txt")
 
+# A phone's fit reaches every pane of a window nobody is at: the active tab's and
+# a tab never drawn (a launch configuration's tab behind another kept the size it
+# opened at; a window that draws no frame never sized its active tab either),
+# also in a window other than the one served. sz.py writes its pty's size
+# (TIOCGWINSZ) as it changes. A window in use keeps every pane's own size
+fa = scratch / "fit-all"
+(fa / "cfg/rift/launch_configs").mkdir(parents=True)
+(fa / "data").mkdir()
+(fa / "sz.py").write_text(
+    "import fcntl, os, struct, sys, termios, time\n"
+    "fd = os.open('/dev/tty', os.O_RDONLY)\n"
+    "while True:\n"
+    "    rows, cols = struct.unpack('HHHH', fcntl.ioctl(fd, termios.TIOCGWINSZ, bytes(8)))[:2]\n"
+    "    with open(sys.argv[1] + '.tmp', 'w') as f:\n"
+    "        f.write(f'{cols}x{rows}')\n"
+    "    os.replace(sys.argv[1] + '.tmp', sys.argv[1])\n"
+    "    time.sleep(0.05)\n")
+(fa / "send.sh").write_text(
+    "#!/bin/sh\n"
+    "# send.sh BIN OUT TAB JSON: PANE = the first pane of tab TAB, counted as status does\n"
+    "pane=$(\"$1\" ctl request '{\"cmd\":\"status\"}' | python3 -I -c "
+    "'import json,sys; print(json.load(sys.stdin)[\"tabs\"][int(sys.argv[1])][\"panes\"][0][\"id\"])' \"$3\")\n"
+    "\"$1\" ctl request \"$(printf '%s' \"$4\" | sed \"s/PANE/$pane/\")\" > \"$2\" 2>&1\n"
+    "touch \"$2.done\"\n")
+(fa / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
+    'remote_listen = "127.0.0.1:0"\nremote_access = true\n')
+(fa / "cfg/rift/launch_configs/three.yaml").write_text(
+    "name: three\nwindows:\n  - tabs:\n" + "".join(
+        f"      - title: t{i}\n        layout:\n          cwd: {fa}\n          commands:\n"
+        f"            - exec: python3 -I {fa / 'sz.py'} {fa / f't{i}.txt'}\n" for i in range(3))
+    + "active_tab_index: 0\n")
+def fa_send(out, tab, cols):
+    size = "null" if cols is None else cols
+    rows = "null" if cols is None else 12
+    req = f'{{"cmd":"remote-fit","pane":PANE,"cols":{size},"rows":{rows}}}'
+    return [f"sh sh {shlex.quote(str(fa / 'send.sh'))} {shlex.quote(str(binary))} "
+            f"{shlex.quote(str(fa / out))} {tab} {shlex.quote(req)} >/dev/null 2>&1 &",
+            f"wait_file {fa / out}.done 15000"]
+def fa_snap(tag):
+    return f"sh for i in 0 1 2; do cp {fa}/t$i.txt {fa}/{tag}-t$i.txt; done"
+def fa_sizes(tag):
+    return [(fa / f"{tag}-t{i}.txt").read_text() for i in range(3)]
+# the window's tabs: the first shell, then t0 (active), t1 and t2 (never drawn);
+# status counts them 0..3, the second window's tab is 4
+(fa / "t.rift").write_text("\n".join([
+    "resize 1100 800", "wait_prompt", "focus false", "wait 200",
+    "key cmd+p", "type Launch configuration: three", "wait 400", "key enter",
+    *[f"wait_file {fa / f't{i}.txt'} 20000" for i in range(3)], "wait 500",
+    # Settings covers t0: no frame lays its pane out, as in a window that draws none
+    "key cmd+,", "wait 300",
+    # a second window takes focus, and is left alone too: the first is parked
+    "new_window", "wait_prompt", "focus false", "wait 300", fa_snap("own"),
+    *fa_send("fit-t2.json", 3, 40), *fa_send("fit-t0.json", 1, 40), "wait 800", fa_snap("away"),
+    # someone at the first window: every pane its own size, a new fit too
+    "window 0", "focus true", "wait 300", *fa_send("fit-t1.json", 2, 40), "wait 800",
+    fa_snap("used"), f"dump {fa}/used.txt",
+    # left alone again: the fits apply; a release gives the size back
+    "focus false", *fa_send("off-t2.json", 3, None), "wait 800", fa_snap("left"),
+    "quit"]) + "\n")
+with (fa / "log.txt").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(fa / "t.rift"), "--headless"],
+                        env=dict(env, XDG_CONFIG_HOME=str(fa / "cfg"), XDG_DATA_HOME=str(fa / "data"),
+                                 BASH_SILENCE_DEPRECATION_WARNING="1"),
+                        stdout=log, stderr=log, timeout=120).returncode
+assert rc == 0, died("fit-all run failed", fa / "log.txt")
+for name in ["fit-t2.json", "fit-t0.json", "fit-t1.json", "off-t2.json"]:
+    assert json.loads((fa / name).read_text())["ok"] is True, (name, (fa / name).read_text())
+own = fa_sizes("own")
+assert "40x12" not in own, own
+assert fa_sizes("away") == ["40x12", own[1], "40x12"], (own, fa_sizes("away"))
+assert fa_sizes("used") == own, (own, fa_sizes("used"))
+assert fa_sizes("left") == ["40x12", "40x12", own[2]], (own, fa_sizes("left"))
+
 # A phone's paste and tap. `cat -v` shows what reaches a program. Several lines
 # go whole to one with bracketed paste and are refused for one without, so no
 # line is submitted; a tap is a click only where the program tracks the mouse

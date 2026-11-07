@@ -828,6 +828,10 @@ the window:
 - **Left alone or not focused**: the pane's PTY takes that size, live, so
   programs such as Claude Code reflow to the phone's width; the desktop draws
   the smaller grid. Touching the window gives the pane its own size back.
+  Any pane of any window: the active tab's, one in another tab (a tab never
+  shown since it opened takes the size it opened at as its own) and one in a
+  window that draws no frame (on another Space, minimized, under Settings, the
+  display asleep) is sized when the fit arrives, not at the next frame.
 
 A capture the program's output has moved on from carries `age_ms` (whole
 seconds, from 3 s on: the phone says how old it is), and past 10 s gives way
