@@ -177,11 +177,19 @@ describe("Portals summary and cards", () => {
     expect(homeSummary([])).toEqual([]);
   });
 
-  it("shows the tabs that matter first, at most five, each state in tab order", () => {
+  it("shows the tabs in the computer's tab order, whatever their states", () => {
     const order = homeRows([{ id: "a", kind: "idle" }, { id: "b", kind: "working" }, { id: "c", kind: "needs" }, { id: "d", kind: "idle" }, { id: "e", kind: "failed" }] as const);
-    expect(order.map((r) => r.id)).toEqual(["c", "b", "e", "a", "d"]);
-    const thirty = Array.from({ length: 30 }, (_, i) => ({ id: `t${i}`, kind: i === 20 ? ("needs" as const) : ("idle" as const) }));
-    expect(homeRows(thirty).map((r) => r.id)).toEqual(["t20", "t0", "t1", "t2", "t3"]);
+    expect(order.map((r) => r.id)).toEqual(["a", "b", "c", "d", "e"]);
+    // a tab that starts working, or asks, keeps its place
+    const ceremo = { id: "ceremo", kind: "idle" as const };
+    const flow = { id: "flow", kind: "idle" as const };
+    expect(homeRows([ceremo, { id: "rift", kind: "idle" as const }, flow]).map((r) => r.id)).toEqual(["ceremo", "rift", "flow"]);
+    expect(homeRows([ceremo, { id: "rift", kind: "working" as const }, { ...flow, kind: "needs" as const }]).map((r) => r.id)).toEqual(["ceremo", "rift", "flow"]);
+  });
+
+  it("past five keeps the five that matter most, still in tab order", () => {
+    const thirty = Array.from({ length: 30 }, (_, i) => ({ id: `t${i}`, kind: i === 20 ? ("needs" as const) : i === 25 ? ("working" as const) : ("idle" as const) }));
+    expect(homeRows(thirty).map((r) => r.id)).toEqual(["t0", "t1", "t2", "t20", "t25"]);
   });
 });
 

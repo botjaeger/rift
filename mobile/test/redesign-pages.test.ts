@@ -196,10 +196,13 @@ describe("Portals page", () => {
     const summary = findAll(tree, (n) => n.type === "Text" && textOf(n).includes("needs you"))[0]!;
     expect(textOf(summary)).toBe("● 1 needs you · 29 idle");
   });
-  it("a card of 30 tabs shows the five that matter, what needs you first, and a way to the rest", () => {
+  it("a card of 30 tabs shows the five that matter in the computer's tab order, and a way to the rest", () => {
     const rows = findAll(tree, (n) => n.props.accessibilityHint === "Opens the tab");
     expect(rows).toHaveLength(5);
-    expect(String(rows[0]!.props.accessibilityLabel)).toMatch(/^project21, Needs you/);
+    const labels = rows.map((r) => String(r.props.accessibilityLabel));
+    expect(labels.some((l) => /^project21, Needs you/.test(l))).toBe(true);
+    const numbers = labels.map((l) => Number(/^project(\d+)/.exec(l)?.[1]));
+    expect(numbers).toEqual([...numbers].sort((a, b) => a - b));
     const all = findAll(tree, (n) => n.props.accessibilityLabel === "Show all 30 tabs on studio-mac")[0]!;
     expect(textOf(all)).toBe("Show all 30 tabs");
     (all.props.onPress as () => void)();

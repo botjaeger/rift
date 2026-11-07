@@ -294,7 +294,7 @@ function HostCard({ host, rows, now, answerHere, twin }: { host: HostView; rows:
 
 /**
  * Portals (the home screen): one line that counts the tabs by state, then each paired computer
- * with the tabs that matter most (what needs you first) and a way to the rest.
+ * with its tabs in its own tab order (past five, the five that matter most) and a way to the rest.
  */
 export default function PortalsScreen() {
   const colors = useColors();

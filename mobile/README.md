@@ -116,9 +116,10 @@ card cannot answer (a password, other input, a view-only device), and from an al
   offline). A card that cannot be reached offers its fixes as rows in the card: **Try again** (it
   connects at once, backoff reset) or **Pair again** when it refused this phone's key (other
   failures say why under the name, in full), and **Unpair** in red, which asks first (as the
-  card's swipe left does). A connected card shows five of its tabs, the ones that matter first:
-  what needs you (tinted), then what works, what failed and what idles, each in tab order
-  (`now.ts` `homeRows`); **Show all N tabs** opens the Tabs page for the rest. A row: a 36 pt tile
+  card's swipe left does). A connected card shows up to five of its tabs, always in the computer's
+  tab order (window by window, then each tab strip's order; a tab never moves when its state
+  changes); past five, the five that matter most: what needs you (tinted), then what works, what
+  failed and what idles (`now.ts` `homeRows`); **Show all N tabs** opens the Tabs page for the rest. A row: a 36 pt tile
   (the coding agent's logo — Claude Code's on an orange tint, Codex, OpenCode —, `>_` for a
   shell), the tab's name (cut once at its end; a split tab's
   "· 2 panes" stays whole, in the name's white), and under it what its lead pane does, in Inter

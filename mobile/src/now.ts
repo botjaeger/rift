@@ -519,9 +519,20 @@ export const HOME_ROWS = 5;
 
 const RANK: Record<TabKind, number> = { needs: 0, working: 1, failed: 2, idle: 3 };
 
-/** A card's rows: what needs you first, then what works, what failed, what idles (each in tab order), the first `max`. */
+/**
+ * A card's rows, in the computer's tab order: all of them up to `max`; past that the `max` that
+ * matter most (what needs you, then what works, what failed, what idles; the earlier tab first).
+ * A tab never moves on the card because its state changed.
+ */
 export function homeRows<T extends { kind: TabKind }>(rows: readonly T[], max = HOME_ROWS): T[] {
-  return [...rows].sort((a, b) => RANK[a.kind] - RANK[b.kind]).slice(0, max);
+  const kept = new Set(
+    rows
+      .map((r, i) => ({ r, i }))
+      .sort((a, b) => RANK[a.r.kind] - RANK[b.r.kind] || a.i - b.i)
+      .slice(0, max)
+      .map((x) => x.i),
+  );
+  return rows.filter((_, i) => kept.has(i));
 }
 
 /** The Tabs sheet's filter. */
