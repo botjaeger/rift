@@ -8,6 +8,15 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.27.1 — 2026-11-07
+
+### Fixed
+
+- **Your phone's screen size in every tab** — A program you open on your phone now fits the
+  phone's screen in every tab, also in a tab you have not looked at on the computer since Rift
+  started, so its lines no longer run off the right edge. While you are using the window on
+  the computer, it keeps its own size as before.
+
 ## 0.27.0 — 2026-11-07
 
 ### New

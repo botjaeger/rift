@@ -6,6 +6,15 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.9.0 · update 1 — 2026-11-07
+
+Portals keeps your computer's tab order.
+
+### Fixed
+
+- **Tab order on Portals** — A computer's tabs are listed in the order its tab strip shows them,
+  and a tab no longer moves when it starts working or needs you.
+
 ## 0.9.0 — 2026-11-07
 
 Every screen redrawn to the new plan, with the real Claude, Codex and OpenCode logos.
