@@ -6,7 +6,17 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
-## 0.9.0 · update 3 — 2026-11-07
+## 0.9.0 · update 4 — 2026-11-08
+
+Smooth scrolling in Claude Code and the shell.
+
+### Improved
+
+- **Smooth scrolling** — In Claude Code (its classic screen) and the shell, the screen scrolls
+  like any list on your phone, with its own momentum, through everything above what it shows,
+  instead of waiting on the computer for every step. New output no longer pulls the view down
+  while your finger is on it. Needs Rift 0.28.0 on the computer.
+- **Flicks** — A flick keeps its speed more faithfully when the phone is busy drawing.
 
 Lighter tab arrows in the pane header.
 

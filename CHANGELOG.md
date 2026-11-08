@@ -8,7 +8,18 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
-## 0.27.1 — 2026-11-07
+## 0.28.0 — 2026-11-08
+
+Scrolling on your phone feels like any other app's list in Claude Code and the shell.
+
+### Improved
+
+- **Smooth scrolling on your phone** — In Claude Code (its classic screen) and the shell, your
+  phone now has the lines above what it shows and scrolls them itself, with its own momentum,
+  instead of asking the computer to move one step at a time. New output no longer pulls the view
+  down while your finger is on it (Rift for iPhone and Android 0.9.0 · update 4).
+- **Fast flicks in full-screen programs** — A quick flick on your phone over Codex, vim or htop
+  now moves them as far as your finger went; part of a fast flick used to be lost.
 
 ### Fixed
 
