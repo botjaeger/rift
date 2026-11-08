@@ -8,6 +8,16 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.28.1 — 2026-11-08
+
+### Fixed
+
+- **All your scrollback after an update** — Updating Rift now keeps every line of each tab's
+  history. A tab running a program that redraws all the time, such as Claude Code, used to come
+  back with only its last few hundred lines; on the computer and on your phone you can now scroll
+  back as far as before the update. Lines from before the update come back as plain text with
+  their colors, without command headers or images.
+
 ## 0.28.0 — 2026-11-08
 
 Scrolling on your phone feels like any other app's list in Claude Code and the shell.
