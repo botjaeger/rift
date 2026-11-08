@@ -193,8 +193,7 @@ fn refuses_args(target: ServiceTarget, args: &[String], features: &[String]) -> 
 }
 
 /// Spawn or reattach; the returned stream next delivers the replay, then
-/// `ReplayDone`, then live output. Returns the service's session id and,
-/// for a reattach, the directory the service last saw the shell in.
+/// `ReplayDone`, then live output ([`Opened`]).
 pub fn open(
     target: ServiceTarget,
     shell: Option<&str>,
@@ -202,7 +201,7 @@ pub fn open(
     cwd: Option<&std::path::Path>,
     env: Vec<(String, String)>,
     ws: WindowSize,
-) -> std::io::Result<(UnixStream, u64, Option<String>)> {
+) -> std::io::Result<Opened> {
     let (mut s, features) = connect_features()?;
     if refuses_args(target, &args, &features) {
         return Err(std::io::Error::new(
@@ -256,16 +255,35 @@ pub fn open(
         // nobody would ever reach the shell just started
         kill(session);
     }
-    attached.map(|()| (s, session, known_cwd))
+    attached.map(|from| Opened {
+        stream: s,
+        session,
+        known_cwd,
+        from,
+    })
+}
+
+/// A shell [`open`] started or reattached.
+pub struct Opened {
+    /// Streams the replay, then `ReplayDone`, then live output.
+    pub stream: UnixStream,
+    /// The service's id for the shell.
+    pub session: u64,
+    /// For a reattach, the directory the service last saw the shell in.
+    pub known_cwd: Option<String>,
+    /// The byte the replay starts at (0: the shell's first; later when
+    /// older output was no longer retained).
+    pub from: u64,
 }
 
 /// Attach to `session` just spawned or to reattach, then send the size.
+/// Returns the byte the replay starts at.
 fn attach_new(
     s: &mut UnixStream,
     session: u64,
     target: ServiceTarget,
     ws: WindowSize,
-) -> std::io::Result<()> {
+) -> std::io::Result<u64> {
     ipc::send_json(
         s,
         &Request::Attach {
@@ -273,13 +291,13 @@ fn attach_new(
             from_seq: 0,
         },
     )?;
-    match next_event(s)? {
-        Event::Attached { .. } => {}
+    let from = match next_event(s)? {
+        Event::Attached { from_seq, .. } => from_seq,
         Event::Error { message } => {
             return Err(std::io::Error::new(ErrorKind::NotFound, message));
         }
         other => return Err(std::io::Error::other(format!("unexpected {other:?}"))),
-    }
+    };
     if matches!(target, ServiceTarget::Attach(_)) {
         // the window size may have changed while detached
         ipc::send_json(
@@ -293,7 +311,7 @@ fn attach_new(
             },
         )?;
     }
-    Ok(())
+    Ok(from)
 }
 
 /// Reattach to `session` on a fresh connection after the service dropped

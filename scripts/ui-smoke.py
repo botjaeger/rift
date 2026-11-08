@@ -4904,6 +4904,69 @@ assert left_window.startswith("windows=2 window=1 "), left_window[:400]
 assert 'title="LEFTOVER"' in left_window, left_window[:2000]
 assert not list(left.glob("*.toml")), "the reopened window kept its restart file"
 
+# an update restart keeps a durable pane's scrollback beyond what the
+# session service retained (8 MB): 300 numbered lines, then 9 MB of
+# redraws (carriage returns, as an agent's spinner), leave the service only
+# the redraws. The window asked to restart (prepare-restart with the
+# update's token) keeps its scrollback; the restarted window finds all 300
+# lines, each once, and the kept file is gone once read
+kr = scratch / "kept-scrollback"
+for sub in ("cfg/rift", "data/rift"):
+    (kr / sub).mkdir(parents=True, exist_ok=True)
+(kr / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = true\ndurable_sessions = true\nsync_os_theme = false\n')
+kr_env = dict(env, XDG_CONFIG_HOME=str(kr / "cfg"), XDG_DATA_HOME=str(kr / "data"),
+              RIFT_PERSIST_SESSION="1", BASH_SILENCE_DEPRECATION_WARNING="1")
+kr_token = os.urandom(16).hex()
+(kr / "data/rift/update-pending.json").write_text(json.dumps(
+    {"from": "0.0.1", "to": "0.0.2", "old_path": str(kr / "app.old"),
+     "new_path": str(kr / "app"), "token": kr_token}))
+kr_request = json.dumps({"cmd": "prepare-restart", "token": kr_token})
+(kr / "rawctl.py").write_text(
+    "import pathlib, socket, sys\n"
+    "for sock in pathlib.Path(sys.argv[1]).glob('*.sock'):\n"
+    "    s = socket.socket(socket.AF_UNIX)\n"
+    "    s.settimeout(10)\n"
+    "    s.connect(str(sock))\n"
+    "    s.sendall(sys.argv[2].encode() + b'\\n')\n"
+    "    pathlib.Path(sys.argv[3]).write_text(s.makefile().readline())\n")
+(kr / "a.rift").write_text("\n".join([
+    "resize 1000 700", "wait_prompt",
+    "type seq -f 'kept-%04g' 1 300; head -c 9000000 /dev/zero | tr '\\\\0' '\\\\r'; echo DONE\\n",
+    "wait 4000", "wait_prompt", "wait 800",
+    "sh python3 " + " ".join(shlex.quote(str(a)) for a in
+                             (kr / "rawctl.py", kr / "data/rift/control", kr_request, kr / "asked.json"))
+    + " >/dev/null 2>&1 &",
+    "wait 15000", "quit"]) + "\n")
+try:
+    with (kr / "a.log").open("w") as log:
+        rc = subprocess.run([str(binary), "--script", str(kr / "a.rift"), "--headless"],
+                            env=kr_env, stdout=log, stderr=log, timeout=120).returncode
+    assert rc == 0, died("kept-scrollback first run failed", kr / "a.log")
+    assert json.loads((kr / "asked.json").read_text()).get("ok") is True, (kr / "asked.json").read_text()
+    kr_files = list((kr / "data/rift/restart").glob("main-*.toml"))
+    kr_kept = list((kr / "data/rift/restart").glob("scrollback-*.json"))
+    assert len(kr_files) == 1 and len(kr_kept) == 1, died("no restart files", kr / "a.log")
+    assert kr_kept[0].stat().st_mode & 0o777 == 0o600, oct(kr_kept[0].stat().st_mode)
+    (kr / "data/rift/update-pending.json").unlink()
+    (kr / "b.rift").write_text("\n".join([
+        "wait 3000", "key cmd+f", "type kept-0", "wait 800", f"dump {kr}/b.txt",
+        "key escape", "quit"]) + "\n")
+    with (kr / "b.log").open("w") as log:
+        rc = subprocess.run([str(binary), "--script", str(kr / "b.rift"), "--headless"],
+                            env=dict(kr_env, RIFT_RESTORE_SESSION=str(kr_files[0])),
+                            stdout=log, stderr=log, timeout=120).returncode
+finally:
+    for pid in session_daemons(kr / "data"):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+assert rc == 0, died("kept-scrollback restart run failed", kr / "b.log")
+kr_found = re.search(r"matches=(\d+) total=(\d+)", (kr / "b.txt").read_text())
+assert kr_found and kr_found[2] == "300", (kr_found and kr_found[0], (kr / "b.txt").read_text()[:3000])
+assert not kr_kept[0].exists(), "the kept scrollback stayed after the restart read it"
+
 # --- remote access (mobile companion, window side) ---
 # The gateway's `remote-input` request reaches the window only while
 # remote_access is on (independent of control_api); a command runs only at a

@@ -131,6 +131,7 @@ impl Background {
             observer,
             replay: None,
             service: Some(rift_pty::ServiceTarget::Spawn),
+            kept: None,
             clipboard: rift_pty::ClipboardAccess::from_config(&config.clipboard_access),
             ambiguous_wide: config.ambiguous_width == rift_core::AmbiguousWidth::Wide,
         })

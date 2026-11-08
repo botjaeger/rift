@@ -2,6 +2,7 @@ pub mod abs_term;
 pub mod daemon;
 pub mod graphics;
 pub mod ipc;
+pub mod kept;
 pub mod launchd;
 pub mod privacy;
 pub mod service;

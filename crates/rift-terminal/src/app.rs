@@ -8420,7 +8420,13 @@ impl App {
             }
             .env(),
         );
-        let opts = |service, replay| SpawnOptions {
+        // a shell reattached after an update restart: the scrollback its
+        // window kept, beyond what the service retained
+        let kept = match service {
+            Some(rift_pty::ServiceTarget::Attach(shell)) => rift_pty::kept::take(shell),
+            _ => None,
+        };
+        let opts = |service, replay, kept| SpawnOptions {
             id,
             size,
             cell_size,
@@ -8432,14 +8438,15 @@ impl App {
             observer: observer.clone(),
             replay,
             service,
+            kept,
             clipboard,
             ambiguous_wide,
         };
-        match Session::spawn(opts(service, replay.clone())) {
+        match Session::spawn(opts(service, replay.clone(), kept)) {
             Ok(s) => s,
             Err(e) if service.is_some() => {
                 log::warn!("session service: {e}");
-                let s = Session::spawn(opts(None, replay)).expect("spawn shell");
+                let s = Session::spawn(opts(None, replay, None)).expect("spawn shell");
                 self.toast_error(format!(
                     "Session service unavailable ({e}); this shell is local"
                 ));
@@ -20491,6 +20498,7 @@ impl App {
                 if let Err(e) = rift_core::session_state::save_to(&file, &self.saved_session()) {
                     return Response::error(format!("{}: {e}", file.display()));
                 }
+                self.keep_scrollback();
                 self.save_session();
                 self.restart_requested = true;
                 ok(None)
@@ -24965,9 +24973,33 @@ impl App {
         if let Err(e) = rift_core::session_state::save_to(&own, &self.saved_session()) {
             log::warn!("restart file {}: {e}", own.display());
         }
+        // last, so the new window's replay starts close to it
+        self.keep_scrollback();
         self.save_session();
         self.end_hotkey_window_shells();
         self.exit_app(event_loop);
+    }
+
+    /// Before an update restart: every durable pane's scrollback, for the
+    /// window that reattaches its shell (`rift_pty::kept`): the service
+    /// replays only its last output, which a program redrawing all the
+    /// time fills with redraws.
+    fn keep_scrollback(&self) {
+        // the drop-down window's shells end with this process
+        let windows = std::iter::once(&*self.win).chain(self.parked.iter().map(|w| &**w));
+        let panes = windows
+            .filter(|w| w.dropdown.is_none())
+            .flat_map(|w| w.tabs.iter().flat_map(|t| &t.panes));
+        for pane in panes {
+            let (Some(shell), Some(kept)) =
+                (pane.session.service_id(), pane.session.kept_scrollback())
+            else {
+                continue;
+            };
+            if let Err(e) = rift_pty::kept::save(shell, &kept) {
+                log::warn!("keeping pane {}'s scrollback: {e}", pane.session.id);
+            }
+        }
     }
 
     /// At start: what waits for the first frame (`confirm_start`), and how
@@ -25104,6 +25136,8 @@ impl App {
             // validated in take_env: a restart file
             let _ = std::fs::remove_file(file);
         }
+        // scrollback a failed restart kept and no pane took
+        rift_pty::kept::remove_stale();
         // the other processes' windows open here, at the next turn of the
         // event loop (`open_queued_windows`)
         if launch.restart_others {

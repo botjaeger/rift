@@ -1615,6 +1615,15 @@ stay right, then continues live. Nothing is shown twice, and automatic
 terminal replies (device attributes, image OKs) are not re-sent during the
 replay. Commands that finished before the reattach keep their own finish
 time and do not appear again in Notifications.
+An update's restart also keeps each durable pane's whole scrollback: just
+before it quits, the window writes every pane's lines (styled text, the
+primary screen's) to `<data dir>/restart/scrollback-<shell>.json` (0600),
+with the output position each line was drawn at; the new window shows the
+lines from before the replay's first byte above the replay, so a program
+that redraws all the time (an agent's spinner fills the 8 MiB with
+redraws) still comes back with all its history. Those older lines are
+plain text with their colors: no block headers or images. The file is
+deleted once read, and one a failed restart left behind after an hour.
 A computer reboot ends the service and its shells: the saved layout starts
 fresh shells, with saved block output when enabled.
 

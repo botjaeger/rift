@@ -733,6 +733,9 @@ pub struct SpawnOptions {
     pub replay: Option<Replay>,
     /// Run the shell in the session service (durable sessions).
     pub service: Option<ServiceTarget>,
+    /// With a reattach: the scrollback its window kept across an update
+    /// restart ([`crate::kept::take`]), shown above what the service replays.
+    pub kept: Option<crate::kept::Kept>,
     /// What OSC 52 may do with the system clipboard.
     pub clipboard: ClipboardAccess,
     /// East Asian Ambiguous characters take two cells (`ambiguous_width`).
@@ -787,6 +790,8 @@ enum Source {
         hidden: Arc<AtomicBool>,
         /// The connection `PtyWriter` sends input on (replaced on resume).
         conn: Arc<Mutex<ServiceConn>>,
+        /// Scrollback the window before an update restart kept.
+        kept: Option<crate::kept::Kept>,
     },
 }
 
@@ -802,6 +807,8 @@ struct Opened {
     /// fills the pane's cwd once the replay is done when no OSC 7 in
     /// the retained output did (a long-running job prints no prompt).
     known_cwd: Option<String>,
+    /// The byte the replay starts at.
+    from: u64,
     /// Reattach after the byte `u64` (see [`crate::service::resume`]).
     resume: Resume,
 }
@@ -912,6 +919,37 @@ impl Reader {
         (self.observer)(self.id, SessionEvent::Notice(message.into()));
     }
 
+    /// Output up to byte `seq` is parsed: mark the lines above the cursor's
+    /// as drawn ([`crate::kept::Marks`]). On the alternate screen, the
+    /// primary's history (its screen waits unchanged below).
+    fn note_mark(&self, seq: u64) {
+        use alacritty_terminal::term::TermMode;
+        let term = self.ctx.term.lock();
+        let scrolled = self.ctx.scrolled.load(Ordering::Acquire);
+        let boundary = if term.mode().contains(TermMode::ALT_SCREEN) {
+            scrolled
+        } else {
+            scrolled + term.grid().cursor.point.line.0.max(0) as u64
+        };
+        self.ctx.marks.lock().unwrap().note(seq, boundary);
+    }
+
+    /// Parse kept lines ([`crate::kept::Kept::prelude`]) and scroll them
+    /// all into history: the replay then starts on an empty screen, with
+    /// the cursor home, as on a fresh one.
+    fn feed_kept(&self, bytes: &[u8]) {
+        let mut parser: vte::ansi::Processor = vte::ansi::Processor::new();
+        let mut scanner = OscScanner::new();
+        feed(&mut parser, &mut scanner, bytes, &self.ctx);
+        let row = self.ctx.term.lock().grid().cursor.point.line.0.max(0);
+        let home = if row > 0 {
+            format!("\x1b[{row}S\x1b[H")
+        } else {
+            "\x1b[H".into()
+        };
+        feed(&mut parser, &mut scanner, home.as_bytes(), &self.ctx);
+    }
+
     /// One read's worth of output: to the shadow while a capture takes it,
     /// else parsed. A capture given up here hands over all it held, in order.
     /// `None`: the Term did not change. Else true when it held a marker.
@@ -967,6 +1005,7 @@ impl Reader {
                 job,
                 hidden,
                 conn,
+                kept,
             } => {
                 use crate::ipc::{Event as Ev, Frame, read_frame};
                 let attach = matches!(target, ServiceTarget::Attach(_));
@@ -977,6 +1016,7 @@ impl Reader {
                         mut stream,
                         session,
                         mut known_cwd,
+                        from,
                         mut resume,
                     },
                 ) = match opened {
@@ -1044,6 +1084,11 @@ impl Reader {
                         "The session service was slow to start this shell; {dropped} bytes \
                          of input typed meanwhile were dropped."
                     ));
+                }
+                // the lines before the replay's first byte, as the window
+                // before an update restart had them
+                if let Some(bytes) = kept.and_then(|k| k.prelude(from)) {
+                    self.feed_kept(&bytes);
                 }
                 // first byte not yet fed to the parser, and resumes since
                 // the last output
@@ -1147,6 +1192,7 @@ impl Reader {
                                 blocks.set_replaying(first);
                             }
                             let marked = self.take_output(&mut parser, &mut scanner, &bytes);
+                            self.note_mark(next_seq);
                             if let (false, Some(marked)) = (replaying, marked) {
                                 self.wake_after(marked);
                             }
@@ -1345,6 +1391,7 @@ impl Session {
             observer,
             replay,
             service,
+            kept,
             clipboard,
             ambiguous_wide,
         } = opts;
@@ -1385,7 +1432,7 @@ impl Session {
                     // a pane split from a reattached shell starts in the
                     // directory the service knows (`known_cwd`) instead of
                     // at the fallback
-                    let (stream, session, known_cwd) = crate::service::open(
+                    let o = crate::service::open(
                         target,
                         shell.as_deref(),
                         args,
@@ -1393,10 +1440,12 @@ impl Session {
                         env,
                         window_size,
                     )?;
+                    let session = o.session;
                     Ok(Opened {
-                        stream,
+                        stream: o.stream,
                         session,
-                        known_cwd,
+                        known_cwd: o.known_cwd,
+                        from: o.from,
                         resume: Box::new(move |from| crate::service::resume(session, from)),
                     })
                 });
@@ -1428,6 +1477,7 @@ impl Session {
                     job: job.clone(),
                     hidden: hidden.clone(),
                     conn: conn.clone(),
+                    kept: kept.filter(|_| matches!(target, ServiceTarget::Attach(_))),
                 };
                 let conn = conn.clone();
                 (
@@ -1498,6 +1548,7 @@ impl Session {
             window_size: window_size_shared.clone(),
             reply: Some(replier),
             notify: Some((id, observer.clone())),
+            marks: Mutex::default(),
         };
 
         // replay a saved transcript before the reader thread starts, so the
@@ -1612,6 +1663,21 @@ impl Session {
     /// The shell runs in the session service (or is being started there).
     pub fn durable(&self) -> bool {
         matches!(self.backend, Backend::Service { .. })
+    }
+
+    /// This durable pane's scrollback for the window that reattaches its
+    /// shell after an update restart ([`crate::kept`]); None for a local
+    /// shell. The primary screen's, also under a full-screen program.
+    pub fn kept_scrollback(&self) -> Option<crate::kept::Kept> {
+        if !self.durable() {
+            return None;
+        }
+        // under the term lock, as a resize remaps the marks
+        let term = self.term.lock();
+        let marks = self.feed_ctx.marks.lock().unwrap().list();
+        let lines =
+            crate::kept::lines_of(term.primary_grid(), self.scrolled.load(Ordering::Acquire));
+        Some(crate::kept::Kept { marks, lines })
     }
 
     /// The working directory when it is on this machine: `None` while the
@@ -1897,6 +1963,7 @@ impl Session {
             &self.scrolled,
             &self.blocks,
             &self.graphics,
+            &self.feed_ctx.marks,
         );
         match &mut self.backend {
             Backend::Local(pty) => pty.on_resize(ws),
@@ -2452,6 +2519,7 @@ fn resize_term(
     scrolled: &AtomicU64,
     blocks: &Mutex<BlockStore>,
     graphics: &Mutex<Graphics>,
+    marks: &Mutex<crate::kept::Marks>,
 ) {
     use alacritty_terminal::term::TermMode;
     // Anchors live on the primary grid, which `Term::resize` reflows even
@@ -2491,6 +2559,11 @@ fn resize_term(
             .lock()
             .unwrap()
             .remap(|abs, col| old.map(&new, base, new_base, abs, col));
+        // a boundary follows the end of the line above it
+        marks.lock().unwrap().remap(|b| match b.checked_sub(1) {
+            Some(last) => old.map(&new, base, new_base, last, old.cols).0 + 1,
+            None => 0,
+        });
     }
 }
 
@@ -2653,6 +2726,9 @@ struct FeedCtx {
     reply: Option<Replier>,
     /// Where notification requests (OSC 9/777/99) go.
     notify: Option<(PaneId, Observer)>,
+    /// Output positions and the history they had built, for an update
+    /// restart ([`crate::kept`]; durable sessions only).
+    marks: Mutex<crate::kept::Marks>,
 }
 
 /// Parse one chunk of terminal output: split it at shell markers, feed each
@@ -2683,6 +2759,7 @@ fn feed(
             &counter,
             &ctx.blocks,
             &ctx.graphics,
+            &ctx.marks,
         );
         *scrolled = counter.load(Ordering::Acquire);
         let mut ws = ctx.window_size.lock().unwrap();
@@ -3238,6 +3315,7 @@ mod tests {
             })),
             reply: None,
             notify: None,
+            marks: Mutex::default(),
         }
     }
 
@@ -3521,6 +3599,7 @@ mod tests {
                 &c.scrolled,
                 &c.blocks,
                 &c.graphics,
+                &c.marks,
             );
             // the alt screen keeps what the program drew
             assert_eq!(abs_text(&c, c.scrolled.load(Ordering::Acquire)), "vim");
@@ -3639,6 +3718,7 @@ mod tests {
                 Ok(Opened {
                     stream,
                     session: 9,
+                    from: 0,
                     known_cwd: None,
                     resume: Box::new(|_| Err(std::io::ErrorKind::NotFound.into())),
                 })
@@ -3710,6 +3790,7 @@ mod tests {
                 &c.scrolled,
                 &c.blocks,
                 &c.graphics,
+                &c.marks,
             );
             assert_eq!(abs_text(&c, 24), "l25", "{rows} rows");
             assert_eq!(abs_text(&c, 29), "l30", "{rows} rows");
@@ -3760,6 +3841,7 @@ mod tests {
             &c.scrolled,
             &c.blocks,
             &c.graphics,
+            &c.marks,
         );
         let after = held(&c);
         // 3 rows went: the rest keep their abs index and text
@@ -3790,6 +3872,23 @@ mod tests {
         std::sync::mpsc::Receiver<()>,
         ExitCell,
     ) {
+        service_reader_kept(Arc::new(c), stream, resume, known_cwd, 0, None)
+    }
+
+    /// [`service_reader_exit`] of a replay starting at byte `from`, with
+    /// the scrollback an earlier window `kept`.
+    fn service_reader_kept(
+        c: Arc<FeedCtx>,
+        stream: std::os::unix::net::UnixStream,
+        resume: Resume,
+        known_cwd: Option<String>,
+        from: u64,
+        kept: Option<crate::kept::Kept>,
+    ) -> (
+        std::thread::JoinHandle<()>,
+        std::sync::mpsc::Receiver<()>,
+        ExitCell,
+    ) {
         let (conn, _conn_peer) = std::os::unix::net::UnixStream::pair().unwrap();
         std::mem::forget(_conn_peer);
         let (exit_tx, exit_rx) = std::sync::mpsc::channel();
@@ -3798,7 +3897,7 @@ mod tests {
         let reader = Reader {
             id: 1,
             exit: exit.clone(),
-            ctx: Arc::new(c),
+            ctx: c,
             shadow: test_shadow(),
             dirty: Arc::new(AtomicBool::new(false)),
             saw_output: Arc::new(AtomicBool::new(false)),
@@ -3808,11 +3907,12 @@ mod tests {
                 }
             }),
         };
-        let source = fake_service(
+        let mut source = fake_service(
             Box::new(move || {
                 Ok(Opened {
                     stream,
                     session: 9,
+                    from,
                     known_cwd,
                     resume,
                 })
@@ -3820,11 +3920,183 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(Mutex::new(ServiceConn::new(conn))),
         );
+        if let Source::Service { kept: k, .. } = &mut source {
+            *k = kept;
+        }
         (
             std::thread::spawn(move || reader.run(source)),
             exit_rx,
             exit,
         )
+    }
+
+    /// Every row of the primary grid, history first, right-trimmed.
+    fn all_rows(term: &Term<EventProxy>) -> Vec<String> {
+        let g = term.grid();
+        let h = g.history_size() as i32;
+        (-h..g.screen_lines() as i32)
+            .map(|r| {
+                let row: String = (0..g.columns()).map(|c| g[Line(r)][Column(c)].c).collect();
+                row.trim_end().to_string()
+            })
+            .collect()
+    }
+
+    /// Run a fake service's output, one frame per chunk with its byte
+    /// position, through a reader whose replay starts at `from`; the pane's
+    /// context afterwards.
+    fn reattach(
+        c: FeedCtx,
+        chunks: &[(u64, Vec<u8>)],
+        from: u64,
+        kept: Option<crate::kept::Kept>,
+    ) -> Arc<FeedCtx> {
+        use crate::ipc::{Event as Ev, send_json, send_output};
+        let (stream, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        for (seq, bytes) in chunks {
+            send_output(&mut peer, 9, *seq, 1, bytes).unwrap();
+        }
+        send_json(&mut peer, &Ev::ReplayDone { session: 9 }).unwrap();
+        send_json(
+            &mut peer,
+            &Ev::Exited {
+                session: 9,
+                code: None,
+            },
+        )
+        .unwrap();
+        let c = Arc::new(c);
+        let (reader, exited, _) = service_reader_kept(
+            c.clone(),
+            stream,
+            Box::new(|_| Err(std::io::ErrorKind::NotFound.into())),
+            None,
+            from,
+            kept,
+        );
+        exited
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        reader.join().unwrap();
+        c
+    }
+
+    /// What a window keeps of its pane for an update restart.
+    fn kept_of(c: &FeedCtx) -> crate::kept::Kept {
+        let term = c.term.lock();
+        crate::kept::Kept {
+            marks: c.marks.lock().unwrap().list(),
+            lines: crate::kept::lines_of(term.grid(), c.scrolled.load(Ordering::Acquire)),
+        }
+    }
+
+    /// A shell whose service kept only its last lines comes back after an
+    /// update restart with every line once: the kept ones above the
+    /// replay, none twice, none lost.
+    #[test]
+    fn a_reattach_shows_kept_lines_above_a_shortened_replay() {
+        let mut seq = 0u64;
+        let chunks: Vec<(u64, Vec<u8>)> = (0..30)
+            .map(|i| {
+                let bytes = format!("line {i}\r\n").into_bytes();
+                let at = seq;
+                seq += bytes.len() as u64;
+                (at, bytes)
+            })
+            .collect();
+        let want: Vec<String> = (0..30).map(|i| format!("line {i}")).collect();
+        let text = |c: &FeedCtx| -> Vec<String> {
+            all_rows(&c.term.lock())
+                .into_iter()
+                .filter(|r| !r.is_empty())
+                .collect()
+        };
+        // the window before the restart saw it all
+        let before = reattach(ctx(20, 5), &chunks, 0, None);
+        assert_eq!(text(&before), want);
+        let kept = kept_of(&before);
+        // the service retained the output from line 20 on
+        let from = chunks[20].0;
+        let after = reattach(ctx(20, 5), &chunks[20..], from, Some(kept.clone()));
+        assert_eq!(text(&after), want);
+        // without the kept lines, only what the service retained
+        let bare = reattach(ctx(20, 5), &chunks[20..], from, None);
+        assert_eq!(text(&bare), want[20..].to_vec());
+        // a replay from the shell's first byte draws everything itself
+        let full = reattach(ctx(20, 5), &chunks, 0, Some(kept));
+        assert_eq!(text(&full), want);
+        // the window before was narrowed after the output (every line
+        // wraps over two rows): its marks follow the reflow
+        let narrowed = reattach(ctx(20, 5), &chunks, 0, None);
+        resize_term(
+            &mut narrowed.term.lock(),
+            GridSize { cols: 4, rows: 5 },
+            &narrowed.scrolled,
+            &narrowed.blocks,
+            &narrowed.graphics,
+            &narrowed.marks,
+        );
+        let after = reattach(ctx(20, 5), &chunks[20..], from, Some(kept_of(&narrowed)));
+        assert_eq!(text(&after), want);
+    }
+
+    /// Kept lines come back as they were drawn: colors, attributes, wide
+    /// characters and a line wrapped over several rows (rewrapped at
+    /// another width).
+    #[test]
+    fn kept_lines_keep_their_styles_and_wrapping() {
+        let source = b"\x1b[1;31mred\x1b[0m plain \x1b[38;2;1;2;3;48;5;200mrgb\x1b[0m\r\n\
+            \xe6\x97\xa5\xe6\x9c\xac wide\r\n\
+            abcdefghijklmnopqrstuvwxyz0123456789\r\n";
+        let a = ctx(20, 4);
+        feed(
+            &mut vte::ansi::Processor::new(),
+            &mut OscScanner::new(),
+            source,
+            &a,
+        );
+        // every line above the cursor's, as a mark at the replay's start
+        let kept = {
+            let term = a.term.lock();
+            let scrolled = a.scrolled.load(Ordering::Acquire);
+            crate::kept::Kept {
+                marks: vec![(0, scrolled + term.grid().cursor.point.line.0 as u64)],
+                lines: crate::kept::lines_of(term.grid(), scrolled),
+            }
+        };
+        let bytes = kept.prelude(0).unwrap();
+        for cols in [20, 13] {
+            let (want, got) = (ctx(cols, 6), ctx(cols, 6));
+            let mut p = vte::ansi::Processor::new();
+            feed(&mut p, &mut OscScanner::new(), source, &want);
+            feed(
+                &mut vte::ansi::Processor::new(),
+                &mut OscScanner::new(),
+                &bytes,
+                &got,
+            );
+            let cells = |c: &FeedCtx| {
+                let t = c.term.lock();
+                let g = t.grid();
+                let h = g.history_size() as i32;
+                (-h..g.screen_lines() as i32)
+                    .flat_map(|r| (0..g.columns()).map(move |col| (r, col)))
+                    .map(|(r, col)| {
+                        let cell = &g[Line(r)][Column(col)];
+                        (cell.c, cell.fg, cell.bg, cell.flags)
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let (got, want) = (cells(&got), cells(&want));
+            let first = got.iter().zip(&want).position(|(g, w)| g != w);
+            assert_eq!(
+                (first, got.len()),
+                (None, want.len()),
+                "at {cols} columns: {:?} != {:?}",
+                first.map(|i| &got[i.saturating_sub(2)..(i + 3).min(got.len())]),
+                first.map(|i| &want[i.saturating_sub(2)..(i + 3).min(want.len())]),
+            );
+        }
     }
 
     #[test]
@@ -3878,6 +4150,7 @@ mod tests {
             job: Arc::new(Mutex::new(None)),
             hidden: Arc::new(AtomicBool::new(false)),
             conn,
+            kept: None,
         }
     }
 
@@ -4035,6 +4308,7 @@ mod tests {
                 Ok(Opened {
                     stream: first,
                     session: 9,
+                    from: 0,
                     known_cwd: None,
                     resume: Box::new(move |_| {
                         let s = second.take().ok_or(std::io::ErrorKind::NotFound)?;
@@ -4136,6 +4410,7 @@ mod tests {
                 Ok(Opened {
                     stream: first,
                     session: 9,
+                    from: 0,
                     known_cwd: None,
                     resume: Box::new(move |_| {
                         let s = second.take().ok_or(std::io::ErrorKind::NotFound)?;
@@ -4749,6 +5024,7 @@ mod tests {
                 &c.scrolled,
                 &c.blocks,
                 &c.graphics,
+                &c.marks,
             )
         };
         resize(20, 5);
@@ -4841,6 +5117,7 @@ mod tests {
                 observer: Arc::new(|_, _| {}),
                 replay: None,
                 service: std::env::var_os("RIFT_PERSIST_SESSION").map(|_| ServiceTarget::Spawn),
+                kept: None,
                 clipboard: ClipboardAccess::Off,
                 ambiguous_wide: false,
             })
