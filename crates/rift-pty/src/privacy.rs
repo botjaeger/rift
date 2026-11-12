@@ -48,7 +48,7 @@ pub fn full_disk_access() -> Option<bool> {
     first_answer(&tcc_dbs())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

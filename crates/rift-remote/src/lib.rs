@@ -18,6 +18,7 @@ pub mod push;
 pub mod registry;
 pub mod relay;
 mod server;
+mod sys;
 pub mod transport;
 mod uplink;
 

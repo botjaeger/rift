@@ -18,7 +18,7 @@ impl App {
     /// Every profile resolves by name, a hidden one too (`default_profile`).
     pub(super) fn resolve_launch(&self, launch: &PaneLaunch) -> Result<Resolved, LaunchError> {
         let path = std::env::var_os("PATH");
-        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        let home = rift_core::sys::home_os().map(std::path::PathBuf::from);
         rift_core::profiles::resolve(
             &self.config.profiles,
             self.config.default_profile.as_deref(),

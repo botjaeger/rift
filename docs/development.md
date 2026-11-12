@@ -11,7 +11,7 @@ How to build, test, verify and release Rift. Agent-specific rules are in
 | Rust | 1.98.0, pinned in `rust-toolchain.toml` (rustup installs it and rustfmt + clippy on first use) |
 | macOS | 11 or newer, Xcode Command Line Tools (`xcode-select --install`) |
 | Linux build packages | `libxkbcommon-dev libwayland-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev pkg-config` |
-| Gate tools | `python3` (test gate: `release-manifest.py --self-test`; ui gate); `shellcheck`, `zsh`, `fish` (shell gate); Node 22 + pnpm via `corepack enable` (mobile gate); `docker` (linux gate) |
+| Gate tools | `python3` (test gate: `release-manifest.py --self-test`; ui gate); `shellcheck`, `zsh`, `fish` (shell gate); Node 22 + pnpm via `corepack enable` (mobile gate); `docker` (linux and windows gates); `mingw-w64` and `rustup target add x86_64-pc-windows-gnu` (windows gate) |
 | Packaging (optional) | `python3` + Pillow (`gen-icon.py`), `dpkg-dev`, `file`, `libfuse2` (AppImage) |
 
 ```sh
@@ -26,7 +26,32 @@ git config core.hooksPath .githooks   # optional: fmt + clippy + docs before eac
 cargo build                      # debug: target/debug/rift-terminal
 cargo build --release            # release (thin LTO): target/release/rift-terminal
 packaging/make-app.sh            # macOS: target/Rift.app
+cargo build --release --target x86_64-pc-windows-gnu   # Windows (cross, mingw-w64): rift-terminal.exe
 ```
+
+### Windows (in progress)
+
+Rift builds for Windows 10 1809+ (ConPTY) and its platform layer is
+tested under Wine (the `windows` gate); it has not yet been verified on a
+Windows machine. What differs there:
+
+- Shells: the default is PowerShell 7 (`pwsh`), else Windows PowerShell,
+  else `%ComSpec%` (cmd). PowerShell gets command blocks through
+  `shell/rift.ps1` (dot-sourced after the user's profile); cmd and others
+  run as a plain terminal. Enter is sent as CR.
+- Panes always run local ConPTY shells: the session service (durable
+  sessions), the control socket (`rift-terminal ctl`), updates, the `rift`
+  command install and phone captures are Unix-only so far (`rift_pty::uds`
+  makes their socket types uninhabited on Windows).
+- `~` is `%USERPROFILE%` when `HOME` is unset (`rift_core::sys::home_os`);
+  config and data stay under `~/.config/rift` and `~/.local/share/rift`.
+- Platform differences live in `rift_core::sys` (and `rift_remote::sys`):
+  process groups (`CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW`, `taskkill
+  /T`), liveness, file modes, PATHEXT, `\\?\`-free `canonicalize`, renames
+  retried while another process holds the file.
+- The vendored `alacritty_terminal` ConPTY backend keeps its pipes as plain
+  blocking files (`Pty::reader_file`, `writer_file`, `child_pid`): Rift reads
+  them on its own thread, as on Unix.
 
 Dev builds optimize dependencies (`[profile.dev.package."*"] opt-level = 2`
 in `Cargo.toml`): text shaping and the GPU path dominate a debug frame, and a
@@ -76,11 +101,12 @@ display-line building). Rendering is verified with the script driver below.
 | `ui` | `scripts/ui-smoke.sh`, which runs `scripts/ui-smoke.py`: isolated scripted input, state assertions and PNG capture, in `RIFT_UI_SHARDS` (default 2) parallel shards (`RIFT_UI_SHARDS=1`: the file serially); `--only NAME[,NAME]` (or `RIFT_UI_ONLY`) runs only the groups holding those sections, in one process; requires Python 3 and a display (or `xvfb-run`) |
 | `ssh` | `scripts/ssh-ui-smoke.py`: actual palette install/cancel, SSH profile timeout/retry, remote blocks and path/shell completions against a disposable Docker SSH server. Scratch keys, HOME and XDG roots; requires Docker and OpenSSH clients. Captures remain in `target/ssh-ui-*`; fixture keys, control masters and container are removed |
 | `leak` | `scripts/leak-soak.py` on the release build: a program redrawing every 20 ms, output far past the scrollback limit, one command printing lines without end, and opening and closing windows, tabs, splits, the palette, Settings, find and the explorer, each repeated in one isolated instance; after a warm-up the memory footprint (macOS `phys_footprint`, which counts GPU buffers; Linux `VmRSS`) must not grow more than 8 MB over the measured cycles. An over-budget result is measured once more in a fresh instance and fails if it repeats. Headless on macOS (the display-asleep path); with the window shown under Xvfb (`RIFT_LEAK_SHOWN=1`) in CI and the `linux` gate. `RIFT_LEAK_CYCLES=N` soaks longer |
-| `linux` | `clippy`, `test`, `doc` and a release build (with `examples/phone` and `rift-relay`) inside the Linux docker image, then `shell`, the scripted UI regressions and the memory soak (Xvfb, software Vulkan) in `packaging/ci-ubuntu.Dockerfile`, which installs the CI runner's packages from `packaging/ci-apt.txt` |
+| `windows` | Cross-compiled for `x86_64-pc-windows-gnu` (mingw-w64): `clippy` on the workspace and the vendored `alacritty_terminal`, a release build, then every test binary under Wine in `packaging/windows-wine.Dockerfile` (`scripts/wine-tests.sh`; the repository is mounted at its own path so compiled-in fixture paths resolve through Wine's `Z:`). One test thread, and a binary is run again only when Docker's x86 emulation itself crashed (`rosetta error`). Wine has no ConPTY or GPU: those need a Windows machine |
+| `linux` | `clippy`, `test`, `doc` and a release build (with `examples/phone` and `rift-relay`) inside the Linux docker image (which also carries PowerShell, for the `rift.ps1` test), then `shell`, the scripted UI regressions and the memory soak (Xvfb, software Vulkan) in `packaging/ci-ubuntu.Dockerfile`, which installs the CI runner's packages from `packaging/ci-apt.txt` |
 
 ```sh
 scripts/gates.sh                 # fmt clippy test doc shell docs mobile
-scripts/gates.sh all             # + release + ui + ssh + leak + linux
+scripts/gates.sh all             # + release + ui + ssh + leak + windows + linux
 scripts/gates.sh clippy test     # a subset
 scripts/gates.sh ui --only NAME  # only these ui-smoke.py sections
 scripts/gates.sh --list
@@ -93,7 +119,7 @@ gate prints one line (`-- test pass 212s`); its output goes to
 every failed gate's log. `RIFT_GATES_VERBOSE=1` (and CI) streams every
 gate's output too. Every gate has a wall-clock limit (`limit_for` in the
 script: 5 min for fmt/shell/docs, 15 for test, 20 for clippy/doc/mobile/leak,
-30 for release/ui/ssh, 90 for linux; `RIFT_GATE_TIMEOUT=<seconds>` overrides
+30 for release/ui/ssh, 60 for windows, 90 for linux; `RIFT_GATE_TIMEOUT=<seconds>` overrides
 them): past it, the processes still running are listed in the log (naming
 the hung test binary), stopped, and the gate fails. Interrupting the run
 stops the running gate and the background `linux` run with everything

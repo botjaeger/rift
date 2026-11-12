@@ -1411,13 +1411,16 @@ struct ClosedTab {
 /// bracketed paste the shell accepts as one buffer (one command, one block);
 /// typed line by line the shell would run each alone, a block apiece.
 fn command_bytes(pane: &PaneState, cmd: &str) -> Vec<u8> {
-    if cmd.contains('\n') && bracketed_paste_on(pane) {
-        let mut b = input::bracketed_paste(cmd);
-        b.push(b'\n');
-        b
+    // Windows: Enter is CR (ConPTY reads LF as Ctrl+J, which PowerShell and
+    // cmd do not run)
+    let enter = if cfg!(windows) { b'\r' } else { b'\n' };
+    let mut b = if cmd.contains('\n') && bracketed_paste_on(pane) {
+        input::bracketed_paste(cmd)
     } else {
-        format!("{cmd}\n").into_bytes()
-    }
+        cmd.as_bytes().to_vec()
+    };
+    b.push(enter);
+    b
 }
 
 /// A link target's URL scheme (RFC 3986: a letter, then letters, digits,
@@ -1434,6 +1437,10 @@ fn scheme_of(target: &str) -> Option<String> {
 /// The local path a link target names: `/abs/path`, or a `file:` URL of
 /// this machine (`file:/p`, `file:///p`, `file://localhost/p`).
 fn local_path_of(target: &str) -> Option<std::path::PathBuf> {
+    // Windows: a drive path (`C:\x`, `C:/x`) is a path, not a `c:` URL
+    if cfg!(windows) && is_drive_path(target) {
+        return Some(target.into());
+    }
     let rest = match scheme_of(target).as_deref() {
         Some("file") => {
             let r = &target["file:".len()..];
@@ -1472,7 +1479,19 @@ fn local_path_of(target: &str) -> Option<std::path::PathBuf> {
             i += 1;
         }
     }
-    Some(String::from_utf8_lossy(&out).into_owned().into())
+    let path = String::from_utf8_lossy(&out).into_owned();
+    // Windows: `file:///C:/x` names `C:/x`
+    if cfg!(windows)
+        && let Some(drive) = path.strip_prefix('/').filter(|p| is_drive_path(p))
+    {
+        return Some(drive.into());
+    }
+    Some(path.into())
+}
+
+/// `C:\…` or `C:/…`: an absolute path on a Windows drive.
+fn is_drive_path(s: &str) -> bool {
+    matches!(s.as_bytes(), [d, b':', b'\\' | b'/', ..] if d.is_ascii_alphabetic())
 }
 
 /// Whether opening `path` would run code (app bundles, scripts, workflows,
@@ -1508,23 +1527,43 @@ fn opens_as_program(path: &std::path::Path) -> bool {
         "kext",
         "osax",
         "service",
+        // Windows: what the shell runs or installs when opened
+        "exe",
+        "com",
+        "bat",
+        "cmd",
+        "ps1",
+        "psm1",
+        "msi",
+        "msix",
+        "appx",
+        "appref-ms",
+        "lnk",
+        "pif",
+        "scr",
+        "cpl",
+        "msc",
+        "hta",
+        "vbs",
+        "vbe",
+        "js",
+        "jse",
+        "wsf",
+        "wsh",
+        "reg",
+        "inf",
     ];
     let program_ext = |p: &std::path::Path| {
         p.extension()
             .and_then(|e| e.to_str())
             .is_some_and(|e| PROGRAM_EXTS.contains(&e.to_ascii_lowercase().as_str()))
     };
-    if program_ext(path) || std::fs::canonicalize(path).is_ok_and(|real| program_ext(&real)) {
+    if program_ext(path) || rift_core::sys::canonicalize(path).is_ok_and(|real| program_ext(&real))
+    {
         return true;
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(m) = std::fs::metadata(path) {
-            return m.is_file() && m.permissions().mode() & 0o111 != 0;
-        }
-    }
-    false
+    // an execute bit (Unix), a PATHEXT extension (Windows)
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && rift_core::sys::is_executable(path, &m))
 }
 
 /// `App::option_meta` over explicit state: `(left, right)` held, and each
@@ -1541,7 +1580,14 @@ fn reveal_external(path: &std::path::Path) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let (opener, args): (&str, Vec<std::ffi::OsString>) =
         ("open", vec!["-R".into(), path.as_os_str().to_owned()]);
-    #[cfg(not(target_os = "macos"))]
+    // Explorer with the item selected (one argument: `/select,<path>`)
+    #[cfg(windows)]
+    let (opener, args): (&str, Vec<std::ffi::OsString>) = ("explorer", {
+        let mut arg = std::ffi::OsString::from("/select,");
+        arg.push(path.as_os_str());
+        vec![arg]
+    });
+    #[cfg(all(unix, not(target_os = "macos")))]
     let (opener, args): (&str, Vec<std::ffi::OsString>) = (
         "xdg-open",
         vec![
@@ -1565,7 +1611,11 @@ fn reveal_external(path: &std::path::Path) -> Result<(), String> {
 fn open_external(target: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let opener = "open";
-    #[cfg(not(target_os = "macos"))]
+    // Explorer hands a document or a web link to its default app (programs
+    // never get here: `opens_as_program` reveals them instead)
+    #[cfg(windows)]
+    let opener = "explorer";
+    #[cfg(all(unix, not(target_os = "macos")))]
     let opener = "xdg-open";
     open_external_with(target, opener)
 }
@@ -2385,7 +2435,7 @@ impl App {
         self.theme.ground_alpha = self.config.opacity();
         self.tab_rules = rift_core::tab_color::resolve_rules(
             &self.config.tab_color_rules,
-            std::env::var("HOME").ok().as_deref(),
+            rift_core::sys::home_var().ok().as_deref(),
         );
         self.reload_pane_themes();
         self.font_size = self.config.font_size();
@@ -2661,7 +2711,7 @@ impl App {
                     .filter(|s| !s.trim().is_empty())
                 {
                     let path = std::env::var_os("PATH");
-                    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+                    let home = rift_core::sys::home_os().map(std::path::PathBuf::from);
                     if rift_core::profiles::find_program(shell, path.as_deref(), home.as_deref())
                         .is_none()
                     {
@@ -15860,9 +15910,9 @@ fn resolve_output_path(dir: Option<&str>, remote: bool, path: &str) -> Option<St
         return None;
     }
     let resolved = if let Some(rest) = path.strip_prefix("~/") {
-        let home = std::env::var("HOME").unwrap_or_default();
+        let home = rift_core::sys::home_var().unwrap_or_default();
         std::path::Path::new(&home).join(rest)
-    } else if path.starts_with('/') {
+    } else if std::path::Path::new(path).is_absolute() {
         std::path::PathBuf::from(path)
     } else {
         std::path::Path::new(dir?).join(path)
@@ -24794,7 +24844,7 @@ impl App {
                     // manifest reaches a path
                     let file = update::download_path(&dir, asset);
                     let taken = update::ready_for(&dir, asset)
-                        .is_some_and(|ready| std::fs::rename(ready, &file).is_ok());
+                        .is_some_and(|ready| rift_core::sys::rename(ready, &file).is_ok());
                     if !taken {
                         update::download(asset, &file)?;
                     }
@@ -25206,6 +25256,11 @@ fn keep_install(p: &rift_core::update::Pending, marker: &std::path::Path) {
 /// A process the update helper started writes to `updates/relaunch.log`;
 /// once it is confirmed, its later output goes nowhere instead of growing
 /// that file for the rest of the session.
+/// Windows: updates never relaunch through the helper there.
+#[cfg(windows)]
+fn quiet_relaunch_output() {}
+
+#[cfg(unix)]
 fn quiet_relaunch_output() {
     let Ok(null) = std::fs::OpenOptions::new().write(true).open("/dev/null") else {
         return;

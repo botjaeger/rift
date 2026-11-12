@@ -81,9 +81,44 @@ pub struct LocalTime {
 }
 
 impl LocalTime {
-    #[cfg(unix)]
     pub fn now() -> Self {
         Self::at(std::time::SystemTime::now())
+    }
+
+    /// The local time of `when`.
+    #[cfg(windows)]
+    pub fn at(when: std::time::SystemTime) -> Self {
+        use windows_sys::Win32::Foundation::{FILETIME, SYSTEMTIME};
+        use windows_sys::Win32::System::Time::{
+            FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime,
+        };
+        // FILETIME: 100 ns ticks since 1601-01-01
+        const EPOCH_DIFF_SECS: u64 = 11_644_473_600;
+        let secs = when
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let ticks = (secs + EPOCH_DIFF_SECS) * 10_000_000;
+        let ft = FILETIME {
+            dwLowDateTime: ticks as u32,
+            dwHighDateTime: (ticks >> 32) as u32,
+        };
+        // SAFETY: plain conversions between stack values
+        unsafe {
+            let mut utc: SYSTEMTIME = std::mem::zeroed();
+            let mut local: SYSTEMTIME = std::mem::zeroed();
+            if FileTimeToSystemTime(&ft, &mut utc) == 0
+                || SystemTimeToTzSpecificLocalTime(std::ptr::null(), &utc, &mut local) == 0
+            {
+                return Self::default();
+            }
+            LocalTime {
+                year: i32::from(local.wYear),
+                month: u32::from(local.wMonth),
+                day: u32::from(local.wDay),
+                hour: u32::from(local.wHour),
+                minute: u32::from(local.wMinute),
+            }
+        }
     }
 
     /// The local time of `when`.
@@ -150,15 +185,9 @@ pub fn user_and_host() -> &'static (String, String) {
     ONCE.get_or_init(|| {
         let user = std::env::var("USER")
             .or_else(|_| std::env::var("LOGNAME"))
+            .or_else(|_| std::env::var("USERNAME"))
             .unwrap_or_default();
-        let mut buf = [0u8; 256];
-        // SAFETY: gethostname writes at most buf.len() bytes into buf
-        let host = if unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } == 0 {
-            let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-            String::from_utf8_lossy(&buf[..end]).into_owned()
-        } else {
-            String::new()
-        };
+        let host = rift_core::sys::hostname();
         let host = host.strip_suffix(".local").unwrap_or(&host).to_string();
         (user, host)
     })

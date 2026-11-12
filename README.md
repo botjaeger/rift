@@ -174,10 +174,11 @@ To run a release:
 - **macOS** 11 or newer (Apple silicon or Intel).
 - **Linux** x86_64 with a Vulkan, OpenGL or software (Mesa) GPU driver, on
   X11 or Wayland.
-- A shell: zsh, bash or fish. Command blocks need one of these; any other
-  shell still runs as a plain terminal.
+- A shell: zsh, bash, fish or PowerShell. Command blocks need one of these;
+  any other shell still runs as a plain terminal.
 
-Windows is not supported yet.
+Windows (10 1809 or newer) builds from source and is being ported; there is
+no Windows release yet ([development notes](docs/development.md#windows-in-progress)).
 
 To build from source, additionally:
 

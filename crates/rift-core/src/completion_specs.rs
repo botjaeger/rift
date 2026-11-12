@@ -1633,7 +1633,7 @@ fn parse_git_remotes(config: &str) -> Vec<(String, String)> {
 /// until one of those files (or a directory an `Include` glob lists)
 /// changes.
 pub fn ssh_hosts_all() -> Arc<Values> {
-    match std::env::var_os("HOME") {
+    match crate::sys::home_os() {
         Some(home) => ssh_hosts_in(PathBuf::from(home)),
         None => Arc::default(),
     }

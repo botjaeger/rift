@@ -1,3 +1,5 @@
+// Unix shells only (zsh, bash, fish).
+#![cfg(unix)]
 //! Completions from the user's own shell (`rift_core::shell_complete`),
 //! run against the real zsh, bash and fish with a scratch home holding a
 //! user-defined completion for `mycmd` (a tool Rift has no spec for). A

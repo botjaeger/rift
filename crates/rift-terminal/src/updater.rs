@@ -152,6 +152,12 @@ fn pid_of(socket: &Path) -> Option<u32> {
 
 /// `pid` still runs. A window this process started (⌘N, a reopened
 /// window) stays a zombie until reaped: reap it here, and count it gone.
+#[cfg(windows)]
+fn alive(pid: u32) -> bool {
+    rift_core::update::pid_alive(pid)
+}
+
+#[cfg(unix)]
 fn alive(pid: u32) -> bool {
     let Ok(p) = i32::try_from(pid) else {
         return false;
@@ -364,6 +370,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn exited_children_are_not_waited_on() {
         // a window this process started and that exited is a zombie until
         // reaped: `alive` reaps it instead of waiting out the deadline

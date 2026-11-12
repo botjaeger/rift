@@ -4,6 +4,7 @@ use std::path::PathBuf;
 pub const RIFT_ZSH: &str = include_str!("../../../shell/rift.zsh");
 pub const RIFT_BASH: &str = include_str!("../../../shell/rift.bash");
 pub const RIFT_FISH: &str = include_str!("../../../shell/rift.fish");
+pub const RIFT_PS1: &str = include_str!("../../../shell/rift.ps1");
 const BASHRC: &str = include_str!("../../../shell/rift-bashrc");
 const BASHRC_CHILD: &str = include_str!("../../../shell/rift-bashrc-child");
 const ZSHENV: &str = include_str!("../../../shell/zdotdir/.zshenv");
@@ -42,6 +43,8 @@ fn write_files() -> std::io::Result<Vec<(String, String)>> {
     let fish_dir = base.join("fish/vendor_conf.d");
     std::fs::create_dir_all(&fish_dir)?;
     write_if_changed(&fish_dir.join("rift.fish"), RIFT_FISH)?;
+    // PowerShell: dot-sourced by the `-Command` `shell_args` passes
+    write_if_changed(&base.join("rift.ps1"), RIFT_PS1)?;
     write_if_changed(&zdotdir.join(".zshenv"), ZSHENV)?;
     write_if_changed(&zdotdir.join(".zprofile"), ZPROFILE)?;
     write_if_changed(&zdotdir.join(".zshrc"), ZSHRC)?;
@@ -101,7 +104,7 @@ fn write_files() -> std::io::Result<Vec<(String, String)>> {
 /// they get `-l`: terminals there run login shells, and users keep PATH setup
 /// (`brew shellenv`, pyenv) in `.zprofile` / `status is-login` blocks.
 pub fn shell_args(program: &str) -> Vec<String> {
-    let name = program.rsplit('/').next().unwrap_or(program);
+    let name = crate::profiles::basename(program);
     if name == "bash"
         && let Some(base) = data_dir()
     {
@@ -113,17 +116,24 @@ pub fn shell_args(program: &str) -> Vec<String> {
     if cfg!(target_os = "macos") && matches!(name, "zsh" | "fish") {
         return vec!["-l".into()];
     }
+    // PowerShell runs the user's profile, then the integration (which wraps
+    // the prompt the profile set), and stays interactive
+    if (name.eq_ignore_ascii_case("pwsh") || name.eq_ignore_ascii_case("powershell"))
+        && let Some(base) = data_dir()
+    {
+        let script = base.join("rift.ps1").to_string_lossy().replace('\'', "''");
+        return vec![
+            "-NoLogo".into(),
+            "-NoExit".into(),
+            "-Command".into(),
+            format!(". '{script}'"),
+        ];
+    }
     Vec::new()
 }
 
 pub(crate) fn is_executable(path: &std::path::Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-    }
-    #[cfg(not(unix))]
-    path.is_file()
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && crate::sys::is_executable(path, &m))
 }
 
 /// The shell Rift will spawn: config override, else `$SHELL`, else zsh.
@@ -133,14 +143,31 @@ pub fn resolve_shell(configured: Option<&str>) -> String {
     if let Some(c) = configured {
         // a path as is, `~/…` and a bare name (`fish`) as Settings saves them
         let path = std::env::var_os("PATH");
-        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let home = crate::sys::home_os().map(PathBuf::from);
         if let Some(found) = crate::profiles::find_program(c, path.as_deref(), home.as_deref()) {
             return found;
         }
         log::warn!("shell {c:?} is not an executable file, falling back");
     }
+    // Windows: PowerShell 7, else Windows PowerShell, else the command
+    // prompt (%ComSpec%)
+    #[cfg(windows)]
+    {
+        let path = std::env::var_os("PATH");
+        if let Some(found) = ["pwsh.exe", "powershell.exe"]
+            .iter()
+            .find_map(|p| crate::profiles::find_program(p, path.as_deref(), None))
+        {
+            return found;
+        }
+        std::env::var("ComSpec")
+            .ok()
+            .filter(exists)
+            .unwrap_or_else(|| r"C:\Windows\System32\cmd.exe".into())
+    }
     // $SHELL, else the first installed of the usual shells: a spawn with a
     // missing binary would abort the app (e.g. minimal Linux without zsh)
+    #[cfg(unix)]
     std::env::var("SHELL")
         .ok()
         .filter(exists)
@@ -156,7 +183,7 @@ pub fn resolve_shell(configured: Option<&str>) -> String {
 /// Basename of the shell (`zsh`, `bash`, `fish`) for labels.
 pub fn shell_name(configured: Option<&str>) -> String {
     let shell = resolve_shell(configured);
-    shell.rsplit('/').next().unwrap_or(&shell).to_string()
+    crate::profiles::basename(&shell).to_string()
 }
 
 /// `$XDG_DATA_HOME/rift`, else `~/.local/share/rift`.
@@ -164,7 +191,7 @@ pub fn data_dir() -> Option<PathBuf> {
     std::env::var_os("XDG_DATA_HOME")
         .filter(|d| !d.is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        .or_else(|| crate::sys::home_os().map(|h| PathBuf::from(h).join(".local/share")))
         .map(|root| crate::config::app_dir(&root))
 }
 
@@ -207,6 +234,18 @@ mod tests {
         assert_eq!(shell_args("/bin/zsh"), login);
         assert_eq!(shell_args("/opt/homebrew/bin/fish"), login);
         assert!(shell_args("/bin/sh").is_empty());
+        // PowerShell dot-sources the integration, quotes in the path doubled
+        let ps = shell_args("/usr/local/bin/pwsh");
+        let script = data_dir().unwrap().join("rift.ps1");
+        assert_eq!(
+            ps,
+            [
+                "-NoLogo".to_string(),
+                "-NoExit".into(),
+                "-Command".into(),
+                format!(". '{}'", script.to_string_lossy().replace('\'', "''")),
+            ]
+        );
     }
 
     /// Runs `script` in `shell` with the hook at `$1`; (stdout, stderr), or
@@ -232,6 +271,74 @@ mod tests {
             String::from_utf8_lossy(&out.stdout).into_owned(),
             String::from_utf8_lossy(&out.stderr).into_owned(),
         ))
+    }
+
+    /// PowerShell's prompt, wrapped by rift.ps1: no D before the first
+    /// prompt, then D with the failed native command's code, the cwd as a
+    /// percent-encoded file URL, and A/B around the user's own prompt.
+    /// Reported and skipped where PowerShell is not installed.
+    #[test]
+    fn powershell_prompt_carries_the_block_markers() {
+        let dir = std::env::temp_dir().join(format!("rift-ps1 a%b-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let hook = dir.join("rift.ps1");
+        std::fs::write(&hook, RIFT_PS1).unwrap();
+        let script = format!(
+            "function prompt {{ 'MINE> ' }}; . '{}'; Set-Location -LiteralPath '{}'; \
+             $first = prompt; $global:LASTEXITCODE = 3; \
+             Write-Error x -ErrorAction SilentlyContinue; $second = prompt; \
+             [Console]::Out.Write($first + '|' + $second)",
+            hook.to_string_lossy().replace('\'', "''"),
+            dir.to_string_lossy().replace('\'', "''"),
+        );
+        let run = |sh: &str, command: &str| {
+            std::process::Command::new(sh)
+                .args([
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    command,
+                ])
+                .output()
+                .ok()
+        };
+        // a real PowerShell names its version (Wine's powershell.exe is a stub
+        // that prints nothing)
+        let real = |sh: &&&str| {
+            run(sh, "$PSVersionTable.PSVersion.Major").is_some_and(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .trim()
+                    .parse::<u32>()
+                    .is_ok_and(|v| v >= 5)
+            })
+        };
+        let out = ["pwsh", "powershell"]
+            .iter()
+            .find(real)
+            .and_then(|sh| run(sh, &script));
+        let _ = std::fs::remove_dir_all(&dir);
+        let Some(out) = out else {
+            eprintln!("BLOCKED: PowerShell is not installed");
+            return;
+        };
+        let text = String::from_utf8_lossy(&out.stdout);
+        let (first, second) = text.split_once('|').unwrap_or_else(|| panic!("{text:?}"));
+        let (a, b) = ("\x1b]133;A\x07", "\x1b]133;B\x07");
+        assert!(!first.contains("133;D"), "{first:?}");
+        assert!(first.contains(&format!("{a}MINE> {b}")), "{first:?}");
+        assert!(second.starts_with("\x1b]133;D;3\x07"), "{second:?}");
+        // the folder's last part, `%` and the blank encoded
+        let leaf = dir
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .replace('%', "%25")
+            .replace(' ', "%20");
+        let osc7 = second.split("\x1b]7;").nth(1).unwrap_or_default();
+        assert!(osc7.starts_with("file://"), "{second:?}");
+        assert!(osc7.contains(&format!("/{leaf}\x07")), "{second:?}");
+        assert!(second.ends_with(&format!("{a}MINE> {b}")), "{second:?}");
     }
 
     /// A user config with `set -u` / `setopt nounset` must not break the
@@ -314,7 +421,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Windows: PowerShell 7, Windows PowerShell or cmd by default, named
+    /// without the folder or `.exe`; a configured bare name runs from PATH.
     #[test]
+    #[cfg(windows)]
+    fn windows_shells_resolve_through_path_and_pathext() {
+        let shell = resolve_shell(None);
+        assert!(shell.to_ascii_lowercase().ends_with(".exe"), "{shell}");
+        assert!(
+            ["pwsh", "powershell", "cmd"].contains(&shell_name(None).to_ascii_lowercase().as_str()),
+            "{shell}"
+        );
+        let cmd = resolve_shell(Some("cmd"));
+        assert!(cmd.to_ascii_lowercase().ends_with(r"\cmd.exe"), "{cmd}");
+        assert_eq!(shell_name(Some("cmd")).to_ascii_lowercase(), "cmd");
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn shell_name_prefers_config() {
         assert_eq!(shell_name(Some("/bin/sh")), "sh");
         assert_eq!(resolve_shell(Some("/bin/sh")), "/bin/sh");

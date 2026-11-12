@@ -237,10 +237,7 @@ fn host_target(args: Vec<String>, host: &str) -> Option<Target> {
 /// Run `cmd`, returning its stdout when it exits within `limit` (killed
 /// otherwise).
 fn run_bounded(mut cmd: Command, limit: Duration) -> Option<String> {
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
+    crate::sys::own_group(&mut cmd);
     let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -265,12 +262,7 @@ fn run_bounded(mut cmd: Command, limit: Duration) -> Option<String> {
 }
 
 fn stop(child: &mut Child) {
-    let _ = Command::new("kill")
-        .args(["-KILL", "--", &format!("-{}", child.id())])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    crate::sys::kill_group(child);
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -296,7 +288,16 @@ pub fn control_path_of(ssh_g: &str) -> Option<PathBuf> {
 
 /// Whether a master connection listens on `path`.
 pub fn socket_alive(path: &Path) -> bool {
-    std::os::unix::net::UnixStream::connect(path).is_ok()
+    #[cfg(unix)]
+    {
+        std::os::unix::net::UnixStream::connect(path).is_ok()
+    }
+    // Windows OpenSSH has no connection sharing (ControlMaster)
+    #[cfg(windows)]
+    {
+        let _ = path;
+        false
+    }
 }
 
 /// When a target's control path was resolved, and to what.
@@ -471,10 +472,7 @@ pub fn fetch(socket: &Path, target: &Target, ask: &Ask) -> Option<Reply> {
         .arg(&target.host)
         // one fixed word: the remote shell runs `sh -c '<SCRIPT>'`
         .arg(format!("sh -c '{SCRIPT}'"));
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
+    crate::sys::own_group(&mut cmd);
     let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -804,6 +802,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn the_script_survives_every_remote_shells_single_quotes() {
         assert!(!SCRIPT.contains('\''));
         assert!(!SCRIPT.contains("\\\\"));

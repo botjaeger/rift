@@ -22,11 +22,8 @@ use windows_sys::Win32::System::Threading::{
 
 use crate::event::{OnResize, WindowSize};
 use crate::tty::Options;
-use crate::tty::windows::blocking::{UnblockedReader, UnblockedWriter};
 use crate::tty::windows::child::ChildExitWatcher;
 use crate::tty::windows::{Pty, cmdline, win32_string};
-
-const PIPE_CAPACITY: usize = crate::event_loop::READ_BUFFER_SIZE;
 
 /// Load the pseudoconsole API from conpty.dll if possible, otherwise use the
 /// standard Windows API.
@@ -234,8 +231,18 @@ pub fn new(config: &Options, window_size: WindowSize) -> Result<Pty> {
         }
     }
 
-    let conin = UnblockedWriter::new(conin, PIPE_CAPACITY);
-    let conout = UnblockedReader::new(conout, PIPE_CAPACITY);
+    // Rift: plain blocking files (see `tty::windows`)
+    // SAFETY: the handles are owned by the pipes and moved into the files
+    let conin = unsafe {
+        <std::fs::File as std::os::windows::io::FromRawHandle>::from_raw_handle(
+            conin.into_raw_handle(),
+        )
+    };
+    let conout = unsafe {
+        <std::fs::File as std::os::windows::io::FromRawHandle>::from_raw_handle(
+            conout.into_raw_handle(),
+        )
+    };
 
     let child_watcher = ChildExitWatcher::new(proc_info.hProcess)?;
     let conpty = Conpty { handle: pty_handle as HPCON, api };

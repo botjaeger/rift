@@ -156,12 +156,16 @@ mod tests {
                 .any(|p| p.lines().any(|l| l.trim_start().starts_with('#')))
         );
         // a shell parses it: bash -n checks the syntax without running it
-        let out = std::process::Command::new("bash")
+        // (reported and skipped where there is no bash: Windows)
+        let Ok(out) = std::process::Command::new("bash")
             .arg("-n")
             .arg("-c")
             .arg(line.trim_end_matches('\r'))
             .output()
-            .expect("bash");
+        else {
+            eprintln!("bash is not installed: syntax check skipped");
+            return;
+        };
         assert!(
             out.status.success(),
             "{}",

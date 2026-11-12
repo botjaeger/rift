@@ -41,6 +41,7 @@ pub mod shell_env;
 pub mod shell_integration;
 pub mod shell_widget;
 pub mod ssh;
+pub mod sys;
 pub mod tab_clock;
 pub mod tab_color;
 pub mod theme;

@@ -92,7 +92,7 @@ impl Notifications {
 /// Directories searched for named sounds, most specific first.
 pub fn sound_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+    if let Some(home) = crate::sys::home_os().map(PathBuf::from) {
         dirs.push(home.join("Library/Sounds"));
         dirs.push(home.join(".local/share/sounds"));
     }
@@ -126,8 +126,9 @@ pub fn resolve_sound(value: &str, event: Event, dirs: &[PathBuf]) -> Option<Path
     if v.eq_ignore_ascii_case("none") {
         return None;
     }
-    if v.contains('/') {
-        let path = match (v.strip_prefix("~/"), std::env::var_os("HOME")) {
+    // a path: `/…`, `~/…`, and on Windows `C:\…` too
+    if v.contains('/') || Path::new(v).is_absolute() {
+        let path = match (v.strip_prefix("~/"), crate::sys::home_os()) {
             (Some(rest), Some(h)) => PathBuf::from(h).join(rest),
             _ => PathBuf::from(v),
         };

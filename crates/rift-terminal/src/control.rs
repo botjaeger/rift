@@ -32,11 +32,18 @@
 //! `menu`, `diff` and `complete`, which read the filesystem and Git: the
 //! UI thread reads the pane's folder (and history), a thread of their own
 //! answers.
+//!
+//! Windows: no server yet (no Unix sockets for Rift there: `rift_pty::uds`),
+//! so its half of this module is unused.
+#![cfg_attr(windows, allow(dead_code))]
 
+#[cfg(unix)]
+use rift_pty::uds::UnixListener;
+use rift_pty::uds::UnixStream;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -582,15 +589,13 @@ impl Drop for Server {
 }
 
 pub fn serve(level: Level, deliver: impl Fn(Pending) + Send + Sync + 'static) -> Option<Server> {
-    if level == Level::Off {
+    // Windows: no Unix sockets for Rift yet (rift_pty::uds)
+    if level == Level::Off || cfg!(windows) {
         return None;
     }
     let dir = dir()?;
     std::fs::create_dir_all(&dir).ok()?;
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).ok()?;
-    }
+    rift_core::sys::set_mode(&dir, 0o700).ok()?;
     // sockets of windows that are gone
     if let Ok(rd) = std::fs::read_dir(&dir) {
         for e in rd.flatten() {
@@ -609,6 +614,16 @@ const MAX_CONNECTIONS: usize = 32;
 const MAX_REQUEST: usize = 1 << 20;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 
+#[cfg(windows)]
+fn start(
+    _path: PathBuf,
+    _level: Level,
+    _deliver: impl Fn(Pending) + Send + Sync + 'static,
+) -> Option<Server> {
+    None
+}
+
+#[cfg(unix)]
 fn start(
     path: PathBuf,
     level: Level,
@@ -972,7 +987,7 @@ pub fn cli(args: &[String]) -> i32 {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

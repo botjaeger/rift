@@ -247,10 +247,7 @@ pub fn scan_path_commands(path: &std::ffi::OsStr) -> Vec<String> {
             // the mode bits need a stat; it follows symlinks (Homebrew's
             // bin is all links), so a link to a directory is not a command
             let is_exec = std::fs::metadata(e.path())
-                .map(|m| {
-                    use std::os::unix::fs::PermissionsExt;
-                    !m.is_dir() && m.permissions().mode() & 0o111 != 0
-                })
+                .map(|m| crate::sys::is_executable(&e.path(), &m))
                 .unwrap_or(false);
             if is_exec && let Some(n) = e.file_name().to_str() {
                 names.push(n.to_string());
@@ -1296,7 +1293,7 @@ fn resolve(word: &str, cwd: &str) -> Option<PathBuf> {
         return None;
     }
     Some(match word.strip_prefix('~') {
-        Some(rest) => PathBuf::from(std::env::var_os("HOME")?).join(rest.trim_start_matches('/')),
+        Some(rest) => PathBuf::from(crate::sys::home_os()?).join(rest.trim_start_matches('/')),
         None => PathBuf::from(cwd).join(word),
     })
 }
@@ -1532,7 +1529,7 @@ fn complete_path(token: &str, cwd: Option<&str>, dirs_only: bool) -> Vec<(Comple
     // orig_dir arithmetic below breaks (bare "~" expanding to $HOME made
     // file_part longer than the token itself → slice-index underflow panic).
     let expanded = if let Some(rest) = token.strip_prefix("~/") {
-        match std::env::var("HOME") {
+        match crate::sys::home_var() {
             Ok(home) => format!("{home}/{rest}"),
             Err(_) => token.to_string(),
         }
@@ -1595,7 +1592,7 @@ fn complete_path(token: &str, cwd: Option<&str>, dirs_only: bool) -> Vec<(Comple
         .collect()
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
@@ -1998,7 +1995,7 @@ mod tests {
 
     #[test]
     fn tilde_slash_expands_and_keeps_prefix() {
-        let Ok(home) = std::env::var("HOME") else {
+        let Ok(home) = crate::sys::home_var() else {
             return;
         };
         if std::fs::read_dir(&home).is_err() {

@@ -212,14 +212,15 @@ pub fn add_worktree(cwd: &std::path::Path, branch: &str) -> Result<PathBuf, Stri
     let dir = worktree_dir(&main, branch).ok_or("No directory for the worktree")?;
     let branch_existed = repo.find_branch(branch, git2::BranchType::Local).is_ok();
     let dir_existed = dir.exists();
-    let out = std::process::Command::new("git")
-        .arg("-C")
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C")
         .arg(cwd)
         .args(["worktree", "add", "-b", branch])
         .arg(&dir)
         .arg("HEAD")
         .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(std::process::Stdio::null())
+        .stdin(std::process::Stdio::null());
+    let out = crate::sys::no_window(&mut cmd)
         .output()
         .map_err(|e| format!("Could not run git: {e}"))?;
     if out.status.success() {
@@ -323,11 +324,27 @@ mod tests {
     }
 
     fn canon(p: &std::path::Path) -> PathBuf {
-        p.canonicalize().unwrap()
+        crate::sys::canonicalize(p).unwrap()
+    }
+
+    /// Worktrees are added with the git command: reported and skipped where
+    /// none is installed (the Wine runner).
+    fn no_git() -> bool {
+        let missing = std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err();
+        if missing {
+            eprintln!("git is not installed: skipped");
+        }
+        missing
     }
 
     #[test]
     fn linked_worktrees_have_their_own_identity_and_the_main_checkout_none() {
+        if no_git() {
+            return;
+        }
         let (root, main) = scratch_repo("wt-id");
         let main_info = query(&main).unwrap();
         assert_eq!(main_info.branch, "main");
@@ -375,6 +392,9 @@ mod tests {
 
     #[test]
     fn adding_a_worktree_fails_cleanly_with_gits_message() {
+        if no_git() {
+            return;
+        }
         let (root, main) = scratch_repo("wt-err");
         // the branch exists: git refuses, nothing is created
         let err = add_worktree(&main, "main").unwrap_err();

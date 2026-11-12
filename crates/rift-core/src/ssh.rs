@@ -169,7 +169,10 @@ const MAX_SOCKET_PATH: usize = 103;
 /// for `<dir>/<40-hex %C>`. `None` otherwise (the profile then connects
 /// without sharing).
 pub fn private_control_dir(dir: &Path) -> Option<PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
+    // Windows OpenSSH has no connection sharing (ControlMaster)
+    if cfg!(windows) {
+        return None;
+    }
     if dir.as_os_str().len() + 1 + 40 > MAX_SOCKET_PATH {
         return None;
     }
@@ -178,8 +181,8 @@ pub fn private_control_dir(dir: &Path) -> Option<PathBuf> {
     if !meta.is_dir() {
         return None;
     }
-    if meta.permissions().mode() & 0o777 != 0o700 {
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).ok()?;
+    if crate::sys::mode(&meta) & 0o777 != 0o700 {
+        crate::sys::set_mode(dir, 0o700).ok()?;
     }
     Some(dir.to_path_buf())
 }
@@ -285,7 +288,7 @@ pub fn installer_script() -> String {
     s
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

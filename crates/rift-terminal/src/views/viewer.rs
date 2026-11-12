@@ -1158,12 +1158,12 @@ impl ViewerState {
 }
 
 fn read_preview(path: &Path) -> std::io::Result<Vec<u8>> {
+    use rift_core::sys::UnixMode;
     use std::io::Read;
-    use std::os::unix::fs::OpenOptionsExt;
     // Nonblocking open plus descriptor metadata closes the FIFO replacement race.
     let file = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NONBLOCK)
+        .nonblocking_open()
         .open(path)?;
     if !file.metadata()?.is_file() {
         return Err(std::io::Error::other("Only regular files can be previewed"));
@@ -2299,6 +2299,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn preview_rejects_special_and_oversized_files_and_loads_text() {
         let dir = std::env::temp_dir().join(format!("rift-preview-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

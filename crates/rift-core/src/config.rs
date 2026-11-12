@@ -1209,10 +1209,7 @@ impl Default for Config {
 }
 
 pub fn config_dir() -> Option<PathBuf> {
-    config_dir_from(
-        std::env::var_os("XDG_CONFIG_HOME"),
-        std::env::var_os("HOME"),
-    )
+    config_dir_from(std::env::var_os("XDG_CONFIG_HOME"), crate::sys::home_os())
 }
 
 /// `config_dir` over explicit env values; an empty `XDG_CONFIG_HOME` counts
@@ -1504,7 +1501,7 @@ fn edit_item(key: &str, value: &toml::Value) -> Option<toml_edit::Item> {
 /// onto the link itself would replace it with a file.
 fn resolve_link(path: &Path) -> std::io::Result<PathBuf> {
     match std::fs::symlink_metadata(path) {
-        Ok(m) if m.file_type().is_symlink() => std::fs::canonicalize(path),
+        Ok(m) if m.file_type().is_symlink() => crate::sys::canonicalize(path),
         _ => Ok(path.to_path_buf()),
     }
 }
@@ -1543,7 +1540,7 @@ pub fn write_atomic(path: &Path, body: &str) -> std::io::Result<()> {
         if let Ok(meta) = std::fs::metadata(&path) {
             std::fs::set_permissions(&tmp, meta.permissions())?;
         }
-        std::fs::rename(&tmp, &path)
+        crate::sys::rename(&tmp, &path)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
@@ -1762,7 +1759,7 @@ impl Config {
     /// the pane the user was in; a configured path that does not exist falls
     /// back to home.
     pub fn start_dir(&self, previous: Option<&str>) -> Option<PathBuf> {
-        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let home = crate::sys::home_os().map(PathBuf::from);
         let setting = self.working_directory.trim();
         let dir = match setting {
             "" | "previous" => previous.map(PathBuf::from).or(home.clone()),
@@ -2546,7 +2543,7 @@ mod tests {
 
     #[test]
     fn start_dir_modes() {
-        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        let Some(home) = crate::sys::home_os().map(PathBuf::from) else {
             return;
         };
         let tmp = std::env::temp_dir();

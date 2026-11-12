@@ -389,7 +389,7 @@ impl App {
         let dir = self
             .pane_ref(pane_id)
             .and_then(|p| p.session.local_cwd())
-            .or_else(|| std::env::var("HOME").ok())
+            .or_else(|| rift_core::sys::home_var().ok())
             .unwrap_or_default();
         let path = std::path::Path::new(&dir).join(name);
         // written masked while `mask_secrets` is on (as shown)
@@ -726,10 +726,10 @@ impl App {
 /// Open without truncating first: a path can change while Replace is open.
 /// NONBLOCK prevents a FIFO substituted for a file from hanging the UI.
 fn write_regular_file(path: &std::path::Path, text: &[u8], replace: bool) -> std::io::Result<()> {
+    use rift_core::sys::UnixMode;
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).custom_flags(libc::O_NONBLOCK);
+    options.write(true).nonblocking_open();
     if replace {
         options.create(true);
     } else {
@@ -772,7 +772,7 @@ fn place_of(
         return (host.map(str::to_string), cwd.map(str::to_string));
     }
     let cwd = cwd.map(|c| {
-        std::fs::canonicalize(c)
+        rift_core::sys::canonicalize(c)
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|_| c.to_string())
     });
@@ -799,7 +799,9 @@ fn file_stem(command: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{file_stem, place_of, write_regular_file};
+    #[cfg(unix)]
+    use super::place_of;
+    use super::{file_stem, write_regular_file};
 
     #[test]
     fn save_never_replaces_a_file_without_confirmation() {
@@ -816,6 +818,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn save_rechecks_special_files_and_accepts_regular_symlinks() {
         use std::os::unix::fs::OpenOptionsExt;
         let dir = std::env::temp_dir().join(format!("rift-save-special-{}", std::process::id()));
@@ -847,6 +850,7 @@ mod tests {
     /// (`/tmp` and `/private/tmp` after a relaunch) and a remote one only
     /// on the same host.
     #[test]
+    #[cfg(unix)]
     fn previous_run_places() {
         let dir = std::env::temp_dir().join(format!("rift-place-{}", std::process::id()));
         let real = dir.join("real");

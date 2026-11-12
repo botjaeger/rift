@@ -25,12 +25,11 @@ pub(crate) struct Stamp(Option<(SystemTime, u64, u64)>);
 
 impl Stamp {
     pub(crate) fn of(path: &Path) -> Stamp {
-        use std::os::unix::fs::MetadataExt;
         Stamp(std::fs::metadata(path).ok().map(|m| {
             (
                 m.modified().unwrap_or(SystemTime::UNIX_EPOCH),
                 m.len(),
-                m.ino(),
+                crate::sys::file_id(&m),
             )
         }))
     }
@@ -183,7 +182,22 @@ pub(crate) mod tests {
     /// the racy window, so the cache trusts what it read.
     pub(crate) fn age(path: &Path, secs_ago: u64) {
         let t = SystemTime::now() - Duration::from_secs(secs_ago);
-        std::fs::File::open(path).unwrap().set_modified(t).unwrap();
+        #[cfg(unix)]
+        let f = std::fs::File::open(path).unwrap();
+        // Windows: setting a time needs write-attributes access, and a
+        // folder opens only with backup semantics
+        #[cfg(windows)]
+        let f = {
+            use std::os::windows::fs::OpenOptionsExt;
+            const FILE_WRITE_ATTRIBUTES: u32 = 0x100;
+            const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+            std::fs::OpenOptions::new()
+                .access_mode(FILE_WRITE_ATTRIBUTES)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                .open(path)
+                .unwrap()
+        };
+        f.set_modified(t).unwrap();
     }
 
     pub(crate) fn scratch(tag: &str) -> PathBuf {
@@ -273,6 +287,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn dir_listing_follows_entries_added_and_removed() {
         let dir = scratch("dir");
         std::fs::write(dir.join("a.txt"), "").unwrap();

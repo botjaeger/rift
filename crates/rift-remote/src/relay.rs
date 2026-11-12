@@ -34,13 +34,13 @@
 
 use crate::protocol::{RelayError, RelayMsg};
 use crate::registry::{RELAY_SECRET_LEN, ROUTING_ID_LEN, ct_eq, decode_key, routing_id};
+use crate::sys::{POLLIN, POLLOUT, poll_fds, pollfd};
 use crate::transport::{self, KEY_LEN, Socket, Timed};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use std::collections::{HashMap, VecDeque};
 use std::io::ErrorKind;
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
-use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
@@ -919,7 +919,7 @@ fn control(shared: &Arc<Shared>, mut ws: Ws, peer: SocketAddr, deadline: Instant
         release_control(shared, &id, generation);
         return;
     }
-    let fd = ws.get_ref().as_raw_fd();
+    let fd = crate::sys::raw(ws.get_ref());
     drop(ws);
     log::info!("relay: gateway {id} online");
     let mut heard = Instant::now();
@@ -966,7 +966,7 @@ fn control(shared: &Arc<Shared>, mut ws: Ws, peer: SocketAddr, deadline: Instant
             break;
         }
         poll_fds(
-            &mut [pollfd(fd, libc::POLLIN)],
+            &mut [pollfd(fd, POLLIN)],
             Duration::from_secs(1).min(cfg.control_ping),
         );
     }
@@ -1027,22 +1027,6 @@ fn connect(shared: &Arc<Shared>, mut phone: Ws, w: Waiting) {
     drop(w);
 }
 
-fn pollfd(fd: i32, events: libc::c_short) -> libc::pollfd {
-    libc::pollfd {
-        fd,
-        events,
-        revents: 0,
-    }
-}
-
-fn poll_fds(fds: &mut [libc::pollfd], timeout: Duration) {
-    let ms = timeout.as_millis().min(i32::MAX as u128) as i32;
-    // SAFETY: `fds` is a valid array of pollfd for the duration of the call
-    unsafe {
-        libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, ms);
-    }
-}
-
 /// Forward binary frames between `phone` and `gateway` until either
 /// closes, sends a text frame, breaks a limit, or both stay silent for the
 /// idle limit. Returns why it ended.
@@ -1054,7 +1038,10 @@ fn splice(shared: &Shared, phone: Ws, gateway: Ws) -> &'static str {
             return "socket error";
         }
     }
-    let fds = [ws[0].get_ref().as_raw_fd(), ws[1].get_ref().as_raw_fd()];
+    let fds = [
+        crate::sys::raw(ws[0].get_ref()),
+        crate::sys::raw(ws[1].get_ref()),
+    ];
     let legs = [Leg::ToGateway, Leg::ToPhone];
     // side i has frames queued that its socket did not take yet
     let mut backlog = [false, false];
@@ -1108,10 +1095,10 @@ fn splice(shared: &Shared, phone: Ws, gateway: Ws) -> &'static str {
         let mut pfds = [0, 1].map(|i| {
             let mut ev = 0;
             if !backlog[1 - i] {
-                ev |= libc::POLLIN;
+                ev |= POLLIN;
             }
             if backlog[i] {
-                ev |= libc::POLLOUT;
+                ev |= POLLOUT;
             }
             pollfd(fds[i], ev)
         });

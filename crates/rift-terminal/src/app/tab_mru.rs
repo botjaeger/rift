@@ -179,7 +179,7 @@ impl App {
         &self,
     ) -> Option<(Vec<crate::views::tab_switcher::Row>, usize)> {
         let (tabs, highlight) = self.switcher_tabs()?;
-        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        let home = rift_core::sys::home_os().map(std::path::PathBuf::from);
         let rows = tabs
             .iter()
             .filter_map(|&i| self.win.tabs.get(i))

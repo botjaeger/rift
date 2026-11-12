@@ -325,7 +325,7 @@ pub fn append_to(path: &Path, batch: Vec<Entry>) -> bool {
         Loaded::Missing => Vec::new(),
         Loaded::Entries(entries) => entries,
         Loaded::Unreadable => {
-            if std::fs::rename(path, path.with_extension("json.bad")).is_err() {
+            if crate::sys::rename(path, path.with_extension("json.bad")).is_err() {
                 return false;
             }
             log::warn!(
@@ -342,35 +342,28 @@ pub fn append_to(path: &Path, batch: Vec<Entry>) -> bool {
 /// The writers' lock (`history.json.lock`, or beside another `.json` file
 /// `path`), held until the returned guard is dropped. `None` when it cannot
 /// be taken: the caller must leave the file alone.
-#[cfg(unix)]
 pub(crate) fn lock(path: &Path) -> Option<WriteLock> {
-    use std::os::unix::fs::OpenOptionsExt;
-    use std::os::unix::io::AsRawFd;
+    use crate::sys::UnixMode;
     let f = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(false)
-        .mode(0o600)
+        .unix_mode(0o600)
         .open(path.with_extension("json.lock"))
         .ok()?;
-    (unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } == 0).then_some(WriteLock(f))
+    // flock on Unix, LockFileEx on Windows (mandatory there, which is why
+    // the lock is a file of its own that nobody reads)
+    f.lock().ok().map(|()| WriteLock(f))
 }
 
-#[cfg(unix)]
 pub(crate) struct WriteLock(std::fs::File);
 
-#[cfg(unix)]
 impl Drop for WriteLock {
     fn drop(&mut self) {
         // A concurrently forked child may retain the open description until
         // exec: closing only our descriptor would leave the writer locked.
         let _ = self.0.unlock();
     }
-}
-
-#[cfg(not(unix))]
-pub(crate) fn lock(_: &Path) -> Option<()> {
-    Some(())
 }
 
 fn load_reader(reader: impl Read) -> Option<Vec<Entry>> {
@@ -424,7 +417,7 @@ pub(crate) fn write_private(path: &Path, body: &[u8]) -> bool {
             // the old file, not an empty one)
             f.sync_all()
         })
-        .and_then(|_| std::fs::rename(&tmp, path));
+        .and_then(|_| crate::sys::rename(&tmp, path));
     if written.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }

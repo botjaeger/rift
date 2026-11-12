@@ -410,13 +410,7 @@ pub fn previous_run_crashed() -> bool {
     else {
         return false;
     };
-    pid != std::process::id() && !process_alive(pid)
-}
-
-fn process_alive(pid: u32) -> bool {
-    // SAFETY: signal 0 only checks that the process exists
-    let r = unsafe { libc::kill(pid as libc::pid_t, 0) };
-    r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    pid != std::process::id() && !crate::sys::process_alive(pid)
 }
 
 /// Atomic write (tmp + rename) — this file is written frequently.
@@ -434,7 +428,7 @@ pub fn save_to(path: &std::path::Path, session: &SavedSession) -> std::io::Resul
     let body = toml::to_string(session).map_err(std::io::Error::other)?;
     let tmp = path.with_extension("toml.tmp");
     std::fs::write(&tmp, body)?;
-    std::fs::rename(&tmp, path)
+    crate::sys::rename(&tmp, path)
 }
 
 /// Where windows leave their layouts for a restart (an update): one file
@@ -475,6 +469,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_marker_of_a_gone_process_means_the_last_run_crashed() {
         with_data_dir(|| {
             let mut child = std::process::Command::new("/bin/sleep")

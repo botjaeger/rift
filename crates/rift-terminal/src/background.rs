@@ -80,7 +80,7 @@ fn write_handoff(sessions: Vec<u64>) {
     if let Ok(json) = serde_json::to_vec(&Handoff { sessions }) {
         let tmp = path.with_extension("json.tmp");
         if std::fs::write(&tmp, json).is_ok() {
-            let _ = std::fs::rename(&tmp, &path);
+            let _ = rift_core::sys::rename(&tmp, &path);
         }
     }
 }
@@ -125,7 +125,7 @@ impl Background {
             cell_size: (8, 16),
             shell: config.shell.clone(),
             args: Vec::new(),
-            working_directory: std::env::var_os("HOME").map(PathBuf::from),
+            working_directory: rift_core::sys::home_os().map(PathBuf::from),
             env: vec![],
             scrollback: config.scrollback_lines(),
             observer,

@@ -411,7 +411,8 @@ file_editor   = "rift"            # explorer and code review ↗: rift | system 
                                   # CLI on PATH first)
 explorer_hidden_files = true      # file explorer lists dotfiles (.git and ignored stay hidden)
 # shell        = "/bin/zsh"       # a path, ~/… or a name on PATH; default: $SHELL
-#                                 # (one that runs nothing: a toast, and $SHELL)
+#                                 # (one that runs nothing: a toast, and $SHELL;
+#                                 # Windows: pwsh, else powershell, else %ComSpec%)
 # default_profile = "dev"         # the profile ⌘T, + and splits open (see Profiles);
 #                                 # unset: `shell` as before
 discover_shells = true            # write new shells from /etc/shells in as [[profiles]]

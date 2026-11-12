@@ -1,5 +1,19 @@
 pub mod abs_term;
+#[cfg(unix)]
 pub mod daemon;
+/// Windows: no session service yet (see [`uds`]); panes run local PTYs.
+#[cfg(windows)]
+pub mod daemon {
+    /// Same bound as the Unix service (`kept` sizes its marks by it).
+    pub const MAX_RETAINED: usize = 8 << 20;
+
+    pub fn run() -> std::io::Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "the session service is not available on Windows yet",
+        ))
+    }
+}
 pub mod graphics;
 pub mod ipc;
 pub mod kept;
@@ -7,6 +21,7 @@ pub mod launchd;
 pub mod privacy;
 pub mod service;
 pub mod session;
+pub mod uds;
 
 pub use alacritty_terminal;
 pub use session::{
@@ -23,6 +38,37 @@ pub use session::{
 /// child stays for its owner (the `Pty`) to reap. Reaping it here would
 /// free its pid while the owner still signals that pid when dropped, so a
 /// new process given the same pid would get the hang-up.
+#[cfg(windows)]
+pub(crate) fn exit_code_of(pid: u32) -> Option<i32> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    const STILL_ACTIVE: u32 = 259;
+    // the Pty's exit watcher holds a handle to the shell: its pid is not
+    // reused while it is open
+    // SAFETY: plain Win32 calls; the handle is closed before returning
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return None;
+        }
+        let mut code = STILL_ACTIVE;
+        for _ in 0..50 {
+            if GetExitCodeProcess(h, &mut code) == 0 {
+                break;
+            }
+            if code != STILL_ACTIVE {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        CloseHandle(h);
+        (code != STILL_ACTIVE).then_some(code as i32)
+    }
+}
+
+#[cfg(unix)]
 pub(crate) fn exit_code_of(pid: u32) -> Option<i32> {
     for _ in 0..50 {
         let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
@@ -50,7 +96,7 @@ pub(crate) fn exit_code_of(pid: u32) -> Option<i32> {
     None
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     /// `exit_code_of` waits half a second for the child to end; a loaded
     /// machine (the Linux gate beside the UI run) can take longer to start

@@ -22,7 +22,7 @@
 
 use std::io;
 use std::path::Path;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -56,7 +56,6 @@ pub fn spawn_helper(
 
 /// The pre-launchd way, and the fallback: a child in its own process group.
 fn spawn_child(program: &Path, args: &[&str], log: Option<&Path>) -> io::Result<()> {
-    use std::os::unix::process::CommandExt;
     let (out, err) = match log {
         Some(path) => {
             let f = append(path)?;
@@ -64,13 +63,9 @@ fn spawn_child(program: &Path, args: &[&str], log: Option<&Path>) -> io::Result<
         }
         None => (Stdio::null(), Stdio::null()),
     };
-    let mut child = Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(out)
-        .stderr(err)
-        .process_group(0)
-        .spawn()?;
+    let mut cmd = Command::new(program);
+    cmd.args(args).stdin(Stdio::null()).stdout(out).stderr(err);
+    let mut child = rift_core::sys::own_group(&mut cmd).spawn()?;
     // no zombie when it exits while this process lives on
     std::thread::Builder::new()
         .name("helper-reap".into())
@@ -111,7 +106,7 @@ pub fn helper_app() -> Option<std::path::PathBuf> {
     None
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 fn bundled_helper_in(program: &Path, isolated: bool) -> Option<PathBuf> {
     if isolated {
         return None;
@@ -130,7 +125,7 @@ fn bundled_helper_in(program: &Path, isolated: bool) -> Option<PathBuf> {
 }
 
 /// The helper app's folder name in `Contents/Library/LoginItems`.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 const HELPER_APP: &str = "Rift Helper.app";
 
 /// How long `open` may take to hand the helper to LaunchServices.
@@ -157,7 +152,7 @@ fn open_helper(app: &Path, name: &str, args: &[&str]) -> io::Result<()> {
 /// The arguments of `open` that start `args` in a new instance of the helper
 /// app at `app`. The gateway writes `<data dir>/remote/gateway.log` itself
 /// (`RIFT_GATEWAY_LOG`): no path fits a fixed list.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 fn open_args(app: &Path, name: &str, args: &[&str]) -> Vec<std::ffi::OsString> {
     let mut out: Vec<std::ffi::OsString> = vec!["-n".into(), "-g".into(), "-j".into(), app.into()];
     if name == "gateway" {
@@ -260,11 +255,11 @@ mod sm {
 }
 
 fn append(path: &Path) -> io::Result<std::fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
+    use rift_core::sys::UnixMode;
     std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .mode(0o600)
+        .unix_mode(0o600)
         .open(path)
 }
 
@@ -351,7 +346,7 @@ fn launchctl_output(args: &[&str]) -> io::Result<std::process::Output> {
 /// Run `cmd` and collect its output, giving up (and killing it) after
 /// `limit`. Both pipes are read while it runs: `launchctl print` lists the
 /// job's environment, which can outgrow a pipe and stall it until read.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 fn output_within(mut cmd: Command, limit: std::time::Duration) -> io::Result<std::process::Output> {
     use std::io::Read;
     let mut child = cmd
@@ -406,7 +401,7 @@ fn launchctl(args: &[&str]) -> io::Result<()> {
 
 /// `dev.rift.<name>.<hash of the data dir>`: one job per helper and data
 /// directory (a scripted run's scratch directory gets its own).
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 fn job_label(name: &str, dir: &Path) -> String {
     // FNV-1a: stable across builds, unlike the std hasher
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -420,7 +415,7 @@ fn job_label(name: &str, dir: &Path) -> String {
 /// The job's property list: the program and this process's environment
 /// (the helper sees what a child would have), run once at load, never kept
 /// alive, scheduled like an app (shells run under it).
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 fn job_plist(
     label: &str,
     program: &Path,
@@ -475,7 +470,7 @@ fn job_plist(
 
 /// Escape text for a property list (control characters other than tab and
 /// newline are not allowed in XML 1.0 and are dropped).
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 fn xml(v: &str) -> String {
     let mut out = String::with_capacity(v.len());
     for c in v.chars() {
@@ -491,7 +486,7 @@ fn xml(v: &str) -> String {
     out
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

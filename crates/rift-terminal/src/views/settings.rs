@@ -1029,7 +1029,7 @@ fn sans(engine: &mut TextEngine, text: &str, size: f32, weight: Weight) -> Buffe
 /// an earlier app name's directory), home shortened to `~`. Resolving it
 /// touches the disk, so callers cache the result.
 fn shown_path(path: Option<std::path::PathBuf>, fallback: &str) -> String {
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let home = rift_core::sys::home_os().map(std::path::PathBuf::from);
     path.map(|p| rift_core::config::tilde_path(&p, home.as_deref()))
         .unwrap_or_else(|| fallback.into())
 }

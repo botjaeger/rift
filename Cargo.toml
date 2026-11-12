@@ -69,6 +69,8 @@ qrcode = { version = "0.14", default-features = false }
 base64 = "0.22"
 # release-manifest signatures (verify only: no RNG, no PEM)
 ed25519-compact = { version = "2.6.0", default-features = false }
+# Windows: process, console and pipe calls (the major alacritty_terminal uses)
+windows-sys = "0.59"
 
 # The VT parser and grid are vendored (vendor/README.md) and extended for
 # VT420/xterm parity: rectangle editing, left/right margins, selective

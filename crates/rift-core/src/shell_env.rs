@@ -801,9 +801,8 @@ fn is_path_like(word: &str) -> bool {
 /// expanded against `$HOME`; relative paths resolve against the process cwd
 /// (best effort — the editor does not track the pane's cwd here).
 fn path_word_is_executable(word: &str) -> bool {
-    use std::os::unix::fs::PermissionsExt;
     let expanded = if let Some(rest) = word.strip_prefix("~/") {
-        match std::env::var("HOME") {
+        match crate::sys::home_var() {
             Ok(home) => format!("{home}/{rest}"),
             Err(_) => return false,
         }
@@ -811,7 +810,7 @@ fn path_word_is_executable(word: &str) -> bool {
         word.to_string()
     };
     std::fs::metadata(&expanded)
-        .map(|m| !m.is_dir() && m.permissions().mode() & 0o111 != 0)
+        .map(|m| crate::sys::is_executable(std::path::Path::new(&expanded), &m))
         .unwrap_or(false)
 }
 
@@ -914,7 +913,7 @@ fn splice(buffer: &str, range: Range<usize>, replacement: &str) -> String {
     out
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

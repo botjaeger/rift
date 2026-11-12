@@ -186,12 +186,12 @@ pub fn discover(shells_file: &Path, path_var: Option<&OsStr>) -> Vec<Profile> {
     groups
         .into_iter()
         .map(|(name, paths)| {
-            let on_path = on_path(&name, path_var).and_then(|p| std::fs::canonicalize(p).ok());
+            let on_path = on_path(&name, path_var).and_then(|p| crate::sys::canonicalize(p).ok());
             let chosen = on_path
                 .and_then(|want| {
                     paths
                         .iter()
-                        .find(|p| std::fs::canonicalize(p).ok().as_ref() == Some(&want))
+                        .find(|p| crate::sys::canonicalize(p).ok().as_ref() == Some(&want))
                 })
                 .unwrap_or(&paths[0]);
             Profile::shell(&name, chosen)
@@ -390,7 +390,7 @@ pub fn find_program(
     if c.is_empty() {
         return None;
     }
-    if c.starts_with('~') || c.contains('/') {
+    if c.starts_with('~') || c.contains('/') || (cfg!(windows) && c.contains('\\')) {
         let p = expand_tilde(c, home);
         return (p.is_absolute() && crate::shell_integration::is_executable(&p))
             .then(|| p.to_string_lossy().into_owned());
@@ -399,9 +399,20 @@ pub fn find_program(
 }
 
 fn on_path(name: &str, path_var: Option<&OsStr>) -> Option<PathBuf> {
+    // Windows: `pwsh` is `pwsh.exe` (any PATHEXT extension)
+    let names: Vec<String> = if cfg!(windows) && Path::new(name).extension().is_none() {
+        std::env::var("PATHEXT")
+            .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into())
+            .split(';')
+            .filter(|e| !e.is_empty())
+            .map(|e| format!("{name}{}", e.to_ascii_lowercase()))
+            .collect()
+    } else {
+        vec![name.to_string()]
+    };
     std::env::split_paths(path_var?)
         .filter(|d| d.is_absolute())
-        .map(|d| d.join(name))
+        .flat_map(|d| names.iter().map(move |n| d.join(n)))
         .find(|p| crate::shell_integration::is_executable(p))
 }
 
@@ -414,11 +425,49 @@ fn expand_tilde(path: &str, home: Option<&Path>) -> PathBuf {
 }
 
 /// The program's basename (`zsh`, `fish`), for labels and shell kinds.
+/// Windows: `C:\…\pwsh.exe` is `pwsh`.
 pub fn basename(program: &str) -> &str {
-    program.rsplit('/').next().unwrap_or(program)
+    let name = program.rsplit('/').next().unwrap_or(program);
+    if !cfg!(windows) {
+        return name;
+    }
+    let name = name.rsplit('\\').next().unwrap_or(name);
+    match name.len().checked_sub(4) {
+        Some(i) if name.is_char_boundary(i) && name[i..].eq_ignore_ascii_case(".exe") => &name[..i],
+        _ => name,
+    }
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    /// A bare name runs from PATH with a PATHEXT extension (`code` is
+    /// `code.cmd`); a backslash path is a path; labels drop `.exe`.
+    #[test]
+    fn programs_resolve_with_pathext_and_backslash_paths() {
+        let dir = std::env::temp_dir().join(format!("rift-pathext-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("tool.cmd"), "@echo off\n").unwrap();
+        std::fs::write(dir.join("notes.txt"), "").unwrap();
+        let path = std::env::join_paths([&dir]).unwrap();
+        let found = find_program("tool", Some(&path), None).expect("tool.cmd");
+        assert!(found.to_ascii_lowercase().ends_with("tool.cmd"), "{found}");
+        // not a program: no PATHEXT extension
+        assert_eq!(find_program("notes", Some(&path), None), None);
+        let full = dir.join("tool.cmd").to_string_lossy().into_owned();
+        assert_eq!(
+            find_program(&full, None, None).as_deref(),
+            Some(full.as_str())
+        );
+        assert_eq!(basename(r"C:\Program Files\PowerShell\7\pwsh.exe"), "pwsh");
+        assert_eq!(basename(r"C:\Windows\System32\cmd.EXE"), "cmd");
+        assert_eq!(basename("bash"), "bash");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

@@ -20,7 +20,7 @@ impl App {
             // spelling. Cache its real path per pane, not once per frame.
             let mut cached = pane.color_cwd.borrow_mut();
             if cached.as_ref().is_none_or(|(old, _)| old != &cwd) {
-                let real = std::fs::canonicalize(&cwd)
+                let real = rift_core::sys::canonicalize(&cwd)
                     .map(|p| p.to_string_lossy().into_owned())
                     .unwrap_or_else(|_| cwd.clone());
                 *cached = Some((cwd.clone(), real));

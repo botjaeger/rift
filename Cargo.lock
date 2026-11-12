@@ -3074,6 +3074,7 @@ dependencies = [
  "serde_yaml_ng",
  "toml",
  "toml_edit",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3090,6 +3091,7 @@ dependencies = [
  "rift-core",
  "serde",
  "serde_json",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3106,6 +3108,7 @@ dependencies = [
  "sha2",
  "snow",
  "tungstenite",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3154,6 +3157,7 @@ dependencies = [
  "unicode-normalization",
  "unicode-segmentation",
  "wgpu",
+ "windows-sys 0.59.0",
  "winit",
  "zeno",
 ]

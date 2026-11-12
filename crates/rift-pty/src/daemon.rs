@@ -13,9 +13,9 @@
 //! and replays) instead of letting memory grow. The service exits once it
 //! has no shells and no clients for [`IDLE_EXIT`].
 
+use crate::uds::{UnixListener, UnixStream};
 use std::collections::{HashMap, VecDeque};
 use std::io::Read;
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
@@ -610,7 +610,7 @@ fn service_env(mut env: Vec<(String, String)>, id: u64) -> Vec<(String, String)>
     env
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
@@ -879,7 +879,7 @@ mod tests {
         let _held = std::fs::File::open(&sock).unwrap();
         // another instance replaced the socket
         std::fs::write(dir.join("other"), b"b").unwrap();
-        std::fs::rename(dir.join("other"), &sock).unwrap();
+        rift_core::sys::rename(dir.join("other"), &sock).unwrap();
         assert!(!unlink_if_ours(&sock, mine));
         assert!(sock.exists(), "the other instance's socket survives");
         assert!(unlink_if_ours(&sock, file_id(&sock)));

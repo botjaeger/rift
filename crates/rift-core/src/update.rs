@@ -537,8 +537,8 @@ pub fn update_cache(f: impl FnOnce(&mut Cache)) {
 
 /// Atomic write (unique tmp + rename), readable by the user only.
 fn write_atomic(path: &Path, body: &[u8]) -> std::io::Result<()> {
+    use crate::sys::UnixMode;
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -548,10 +548,10 @@ fn write_atomic(path: &Path, body: &[u8]) -> std::io::Result<()> {
     let written = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .mode(0o600)
+        .unix_mode(0o600)
         .open(&tmp)
         .and_then(|mut f| f.write_all(body));
-    if let Err(e) = written.and_then(|()| std::fs::rename(&tmp, path)) {
+    if let Err(e) = written.and_then(|()| crate::sys::rename(&tmp, path)) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
@@ -773,7 +773,7 @@ fn prefetch_with(dir: &Path, asset: &Asset, allow_file: bool, max: u64) -> Resul
     let part = dir.join(format!("prefetch-{}.{}", std::process::id(), asset.kind));
     download_with(asset, &part, allow_file, max)?;
     let ready = ready_path(dir, asset);
-    std::fs::rename(&part, &ready).map_err(|e| {
+    crate::sys::rename(&part, &ready).map_err(|e| {
         let _ = std::fs::remove_file(&part);
         format!("{}: {e}", ready.display())
     })?;
@@ -903,6 +903,20 @@ pub fn install_target_for(
 }
 
 /// `access(dir, W_OK)`, telling a read-only volume (`EROFS`) apart.
+#[cfg(windows)]
+pub fn dir_access(dir: &Path) -> DirAccess {
+    let probe = dir.join(format!(".rift-access-{}", std::process::id()));
+    match std::fs::File::create(&probe) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            DirAccess::Writable
+        }
+        Err(_) => DirAccess::Denied,
+    }
+}
+
+/// `access(dir, W_OK)`, telling a read-only volume (`EROFS`) apart.
+#[cfg(unix)]
 pub fn dir_access(dir: &Path) -> DirAccess {
     use std::os::unix::ffi::OsStrExt;
     let Ok(c) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else {
@@ -922,11 +936,10 @@ pub fn dir_access(dir: &Path) -> DirAccess {
     }
 }
 
+#[cfg(unix)]
 unsafe extern "C" {
     #[link_name = "access"]
     fn libc_access(path: *const std::ffi::c_char, mode: i32) -> i32;
-    #[link_name = "kill"]
-    fn libc_kill(pid: i32, sig: i32) -> i32;
     #[cfg(target_os = "macos")]
     fn renamex_np(from: *const std::ffi::c_char, to: *const std::ffi::c_char, flags: u32) -> i32;
 }
@@ -1072,13 +1085,7 @@ fn staged_path_of(target: &InstallTarget) -> Option<PathBuf> {
 
 /// `pid` exists (`kill(pid, 0)`; a process of another user counts).
 pub fn pid_alive(pid: u32) -> bool {
-    let Ok(pid) = i32::try_from(pid) else {
-        return false;
-    };
-    pid > 0
-        && (unsafe { libc_kill(pid, 0) } == 0
-            // EPERM is 1 on macOS and Linux
-            || std::io::Error::last_os_error().raw_os_error() == Some(1))
+    pid > 0 && crate::sys::process_alive(pid)
 }
 
 /// Run `cmd` to completion within `limit` (killed after it), returning its
@@ -1155,15 +1162,15 @@ pub enum LockError {
 /// Take the install lock in `dir`; a lock whose process is gone is stale
 /// and taken over.
 pub fn try_lock(dir: &Path) -> Result<InstallLock, LockError> {
+    use crate::sys::UnixMode;
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
     std::fs::create_dir_all(dir).map_err(|e| LockError::Io(format!("{}: {e}", dir.display())))?;
     let path = dir.join("install.lock");
     let guard = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(false)
-        .mode(0o600)
+        .unix_mode(0o600)
         .open(dir.join("install.guard"))
         .map_err(|e| LockError::Io(format!("{}: {e}", dir.display())))?;
     match guard.try_lock() {
@@ -1182,7 +1189,7 @@ pub fn try_lock(dir: &Path) -> Result<InstallLock, LockError> {
         match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .mode(0o600)
+            .unix_mode(0o600)
             .open(&path)
         {
             Ok(mut f) => {
@@ -1334,7 +1341,7 @@ fn swap(current: &Path, staged: &Path, old: &Path) -> Result<(), String> {
     }
     if exchange(staged, current).is_ok() {
         // `staged` now holds the previous app
-        if let Err(e) = std::fs::rename(staged, old) {
+        if let Err(e) = crate::sys::rename(staged, old) {
             let _ = exchange(staged, current);
             remove_any(staged);
             return Err(fail(e));
@@ -1342,19 +1349,19 @@ fn swap(current: &Path, staged: &Path, old: &Path) -> Result<(), String> {
         return Ok(());
     }
     if current.is_file() && std::fs::hard_link(current, old).is_ok() {
-        if let Err(e) = std::fs::rename(staged, current) {
+        if let Err(e) = crate::sys::rename(staged, current) {
             remove_any(old);
             remove_any(staged);
             return Err(fail(e));
         }
         return Ok(());
     }
-    std::fs::rename(current, old).map_err(|e| {
+    crate::sys::rename(current, old).map_err(|e| {
         remove_any(staged);
         fail(e)
     })?;
-    if let Err(e) = std::fs::rename(staged, current) {
-        let _ = std::fs::rename(old, current);
+    if let Err(e) = crate::sys::rename(staged, current) {
+        let _ = crate::sys::rename(old, current);
         remove_any(staged);
         return Err(fail(e));
     }
@@ -1373,16 +1380,16 @@ pub fn restore_old(p: &Pending) -> Result<(), String> {
         return Ok(());
     }
     if cur.is_file() && old.is_file() {
-        return std::fs::rename(old, cur).map_err(|e| format!("{}: {e}", cur.display()));
+        return crate::sys::rename(old, cur).map_err(|e| format!("{}: {e}", cur.display()));
     }
     let failed = cur.with_file_name(format!(
         "{}.failed",
         cur.file_name().unwrap_or_default().to_string_lossy()
     ));
     remove_any(&failed);
-    std::fs::rename(cur, &failed).map_err(|e| format!("{}: {e}", cur.display()))?;
-    if let Err(e) = std::fs::rename(old, cur) {
-        let _ = std::fs::rename(&failed, cur);
+    crate::sys::rename(cur, &failed).map_err(|e| format!("{}: {e}", cur.display()))?;
+    if let Err(e) = crate::sys::rename(old, cur) {
+        let _ = crate::sys::rename(&failed, cur);
         return Err(format!("{}: {e}", cur.display()));
     }
     remove_any(&failed);
@@ -1454,11 +1461,9 @@ fn stage_dmg(staged: &Path, dmg: &Path) -> Result<(), String> {
 /// Copy the AppImage to `staged` (beside the current one: same filesystem
 /// for the rename), executable.
 fn stage_appimage(staged: &Path, file: &Path) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
     remove_any(staged);
     std::fs::copy(file, staged).map_err(|e| format!("{}: {e}", staged.display()))?;
-    std::fs::set_permissions(staged, std::fs::Permissions::from_mode(0o755))
-        .map_err(|e| format!("{}: {e}", staged.display()))?;
+    crate::sys::set_mode(staged, 0o755).map_err(|e| format!("{}: {e}", staged.display()))?;
     Ok(())
 }
 
@@ -1561,7 +1566,11 @@ pub fn spawn_helper(
     env: &[(String, String)],
     unset: &[&str],
 ) -> std::io::Result<()> {
-    use std::os::unix::process::CommandExt;
+    // the helper is a POSIX shell script; Windows installs are never an
+    // InstallTarget that reaches it
+    if cfg!(windows) {
+        return Err(std::io::ErrorKind::Unsupported.into());
+    }
     let mut cmd = std::process::Command::new("/bin/sh");
     cmd.arg("-c")
         .arg(HELPER)
@@ -1576,8 +1585,8 @@ pub fn spawn_helper(
         .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .process_group(0);
+        .stderr(std::process::Stdio::null());
+    crate::sys::own_group(&mut cmd);
     for k in unset {
         cmd.env_remove(k);
     }
@@ -1587,7 +1596,7 @@ pub fn spawn_helper(
     cmd.spawn().map(drop)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

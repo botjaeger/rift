@@ -238,7 +238,7 @@ pub fn save(id: &str, t: &Transcript) {
         .and_then(|mut f| std::io::Write::write_all(&mut f, &body))
         .is_ok();
     if ok {
-        let _ = std::fs::rename(&tmp, &path);
+        let _ = crate::sys::rename(&tmp, &path);
     }
 }
 

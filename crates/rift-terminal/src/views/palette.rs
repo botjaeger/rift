@@ -944,7 +944,7 @@ pub fn new_file_items(path: Result<&std::path::Path, &str>) -> Vec<MatchedItem> 
 
 /// `path` with a leading `~/` (or a lone `~`) as the home directory.
 pub fn expand_home(path: &str) -> std::path::PathBuf {
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let home = rift_core::sys::home_os().map(std::path::PathBuf::from);
     match (path.strip_prefix("~/"), home) {
         (Some(rest), Some(home)) => home.join(rest),
         (None, Some(home)) if path == "~" => home,
@@ -1634,9 +1634,13 @@ mod tests {
     fn worktree_row_says_where_the_branch_goes() {
         let main = std::path::Path::new("/src/rift");
         let rows = worktree_items(" wt-2 ", Some(main));
+        // the platform's separator inside the worktrees folder
+        let at = std::path::Path::new("/src")
+            .join("rift.worktrees")
+            .join("wt-2");
         assert_eq!(
             rows[0].item.title,
-            "Create branch wt-2 from HEAD in /src/rift.worktrees/wt-2"
+            format!("Create branch wt-2 from HEAD in {}", at.display())
         );
         assert_eq!(rows[0].item.action, PaletteAction::CreateWorktree);
         assert_eq!(

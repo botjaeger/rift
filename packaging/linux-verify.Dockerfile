@@ -36,5 +36,20 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
       python3 \
     && rm -rf /var/lib/apt/lists/*
 
+# PowerShell, whose integration (shell/rift.ps1) the test gate runs: the
+# official build, pinned (no ICU: invariant globalization)
+ARG TARGETARCH
+RUN case "$TARGETARCH" in \
+      amd64) a=x64 s=6f6015203c47806c5cc444c19d8ed019695e610fbd948154264bf9ca8e157561 ;; \
+      arm64) a=arm64 s=c0159b03e85f44ae1e7697818a011558da6c813d0aae848bf5ac13bf435d8624 ;; \
+      *) echo "no PowerShell build for $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+ && curl -fsSL -o /tmp/pwsh.tgz \
+      "https://github.com/PowerShell/PowerShell/releases/download/v7.4.6/powershell-7.4.6-linux-$a.tar.gz" \
+ && echo "$s  /tmp/pwsh.tgz" | sha256sum -c - \
+ && mkdir -p /opt/pwsh && tar xzf /tmp/pwsh.tgz -C /opt/pwsh && rm /tmp/pwsh.tgz \
+ && chmod +x /opt/pwsh/pwsh && ln -s /opt/pwsh/pwsh /usr/local/bin/pwsh
+
 ENV WINIT_UNIX_BACKEND=x11 \
-    RIFT_NO_NOTIFY=1
+    RIFT_NO_NOTIFY=1 \
+    DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1

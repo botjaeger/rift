@@ -250,7 +250,7 @@ pub fn import_allowed(scripted: bool, opt_in: Option<&std::ffi::OsStr>) -> bool 
 /// Load `shell`'s history (see [`source_for`]), dedupe (keep most recent
 /// occurrence), cap. Oldest first.
 pub fn load_shell_history(shell: &str, cap: usize) -> Vec<String> {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+    let Some(home) = crate::sys::home_os().map(PathBuf::from) else {
         return Vec::new();
     };
     let env_path = |k: &str| {

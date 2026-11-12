@@ -10,7 +10,7 @@
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use std::time::Instant;
 
 /// Longest a commit (hooks included) or a push may take.
@@ -213,7 +213,7 @@ fn git(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::fs;

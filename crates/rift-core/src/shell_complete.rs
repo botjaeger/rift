@@ -274,23 +274,14 @@ impl Running {
 
 /// SIGKILL the server's process group (created for it: `process_group(0)`).
 fn kill_group(child: &Child) {
-    if let Ok(pid) = libc::pid_t::try_from(child.id()) {
-        // SAFETY: plain syscall on a process group this process created
-        unsafe { libc::killpg(pid, libc::SIGKILL) };
-    }
+    crate::sys::kill_group(child);
 }
 
 /// Kill the server's process group (the shell and whatever its completion
 /// functions started) and reap it.
 fn stop_child(child: &mut Child) {
-    let pid = child.id();
     // the group was created for this child (`process_group(0)`)
-    let _ = Command::new("kill")
-        .args(["-KILL", "--", &format!("-{pid}")])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    crate::sys::kill_group(child);
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -384,11 +375,8 @@ impl Completer {
             return false;
         }
         let mut cmd = self.command();
-        {
-            use std::os::unix::process::CommandExt;
-            // own process group: a timeout stops the functions it ran too
-            cmd.process_group(0);
-        }
+        // own process group: a timeout stops the functions it ran too
+        crate::sys::own_group(&mut cmd);
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());

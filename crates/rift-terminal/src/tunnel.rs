@@ -266,7 +266,7 @@ impl Tunnel {
             let path = self.dir.join("tunnel.json");
             let tmp = self.dir.join("tunnel.json.tmp");
             if std::fs::write(&tmp, text).is_ok() {
-                let _ = std::fs::rename(&tmp, &path);
+                let _ = rift_core::sys::rename(&tmp, &path);
             }
         }
         self.state = Some(state);
@@ -336,6 +336,7 @@ mod tests {
 
     /// A fake cloudflared: logs a tunnel address, writes its pid, then
     /// stays up until it is killed.
+    #[cfg(unix)]
     fn fake_cloudflared(dir: &Path) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let bin = dir.join("cloudflared");
@@ -350,12 +351,14 @@ mod tests {
         bin
     }
 
+    #[cfg(unix)]
     fn alive(pid: i32) -> bool {
         // SAFETY: signal 0 only checks that the process exists
         unsafe { libc::kill(pid, 0) == 0 }
     }
 
     #[test]
+    #[cfg(unix)]
     fn the_tunnel_finds_its_address_and_never_outlives_its_owner() {
         let dir = std::env::temp_dir().join(format!("rift-tunnel-run-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

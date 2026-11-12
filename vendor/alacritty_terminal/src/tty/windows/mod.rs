@@ -9,20 +9,22 @@ use crate::event::{OnResize, WindowSize};
 use crate::tty::windows::child::ChildExitWatcher;
 use crate::tty::{ChildEvent, EventedPty, EventedReadWrite, Options, Shell};
 
+// Rift: the pipes stay plain blocking files (Rift reads them on its own
+// thread; alacritty's event loop is never used), so the unblocking wrappers
+// are not built.
+#[allow(dead_code)]
 mod blocking;
 mod child;
 mod conpty;
 
-use blocking::{UnblockedReader, UnblockedWriter};
 use conpty::Conpty as Backend;
-use miow::pipe::{AnonRead, AnonWrite};
 use polling::{Event, Poller};
 
 pub const PTY_CHILD_EVENT_TOKEN: usize = 1;
 pub const PTY_READ_WRITE_TOKEN: usize = 2;
 
-type ReadPipe = UnblockedReader<AnonRead>;
-type WritePipe = UnblockedWriter<AnonWrite>;
+type ReadPipe = std::fs::File;
+type WritePipe = std::fs::File;
 
 pub struct Pty {
     // XXX: Backend is required to be the first field, to ensure correct drop order. Dropping
@@ -40,15 +42,30 @@ pub fn new(config: &Options, window_size: WindowSize, _window_id: u64) -> Result
 impl Pty {
     fn new(
         backend: impl Into<Backend>,
-        conout: impl Into<ReadPipe>,
-        conin: impl Into<WritePipe>,
+        conout: ReadPipe,
+        conin: WritePipe,
         child_watcher: ChildExitWatcher,
     ) -> Self {
-        Self { backend: backend.into(), conout: conout.into(), conin: conin.into(), child_watcher }
+        Self { backend: backend.into(), conout, conin, child_watcher }
     }
 
     pub fn child_watcher(&self) -> &ChildExitWatcher {
         &self.child_watcher
+    }
+
+    /// Rift: the console's output pipe (blocking reads).
+    pub fn reader_file(&self) -> &std::fs::File {
+        &self.conout
+    }
+
+    /// Rift: the console's input pipe (blocking writes).
+    pub fn writer_file(&self) -> &std::fs::File {
+        &self.conin
+    }
+
+    /// Rift: the shell's process id (0 if Windows did not say).
+    pub fn child_pid(&self) -> u32 {
+        self.child_watcher.pid().map_or(0, |p| p.get())
     }
 }
 
@@ -61,15 +78,14 @@ impl EventedReadWrite for Pty {
     type Reader = ReadPipe;
     type Writer = WritePipe;
 
+    /// Rift: only the child watcher can be polled (the pipes are blocking).
     #[inline]
     unsafe fn register(
         &mut self,
         poll: &Arc<Poller>,
         interest: polling::Event,
-        poll_opts: polling::PollMode,
+        _poll_opts: polling::PollMode,
     ) -> io::Result<()> {
-        self.conin.register(poll, with_key(interest, PTY_READ_WRITE_TOKEN), poll_opts);
-        self.conout.register(poll, with_key(interest, PTY_READ_WRITE_TOKEN), poll_opts);
         self.child_watcher.register(poll, with_key(interest, PTY_CHILD_EVENT_TOKEN));
 
         Ok(())
@@ -80,10 +96,8 @@ impl EventedReadWrite for Pty {
         &mut self,
         poll: &Arc<Poller>,
         interest: polling::Event,
-        poll_opts: polling::PollMode,
+        _poll_opts: polling::PollMode,
     ) -> io::Result<()> {
-        self.conin.register(poll, with_key(interest, PTY_READ_WRITE_TOKEN), poll_opts);
-        self.conout.register(poll, with_key(interest, PTY_READ_WRITE_TOKEN), poll_opts);
         self.child_watcher.register(poll, with_key(interest, PTY_CHILD_EVENT_TOKEN));
 
         Ok(())
@@ -91,8 +105,6 @@ impl EventedReadWrite for Pty {
 
     #[inline]
     fn deregister(&mut self, _poll: &Arc<Poller>) -> io::Result<()> {
-        self.conin.deregister();
-        self.conout.deregister();
         self.child_watcher.deregister();
 
         Ok(())

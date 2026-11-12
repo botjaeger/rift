@@ -100,7 +100,7 @@ pub fn resolve_rules(rules: &[TabColorRule], home: Option<&str>) -> Vec<TabColor
             }
             _ => dir.to_string(),
         };
-        if let Ok(real) = std::fs::canonicalize(&expanded) {
+        if let Ok(real) = crate::sys::canonicalize(&expanded) {
             let real = real.to_string_lossy().into_owned();
             if real != expanded {
                 out.push(TabColorRule {
@@ -202,6 +202,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn resolved_rules_match_the_real_path_too() {
         let base = std::env::temp_dir().join(format!("rift-tabrule-{}", std::process::id()));
         let real = base.join("real");
@@ -214,7 +215,7 @@ mod tests {
             dir: link.to_string_lossy().into_owned(),
             color: "cyan".into(),
         }];
-        let cwd = std::fs::canonicalize(&real).unwrap();
+        let cwd = crate::sys::canonicalize(&real).unwrap();
         let cwd = cwd.to_string_lossy();
         assert_eq!(
             for_dir(&rules, &cwd, None),

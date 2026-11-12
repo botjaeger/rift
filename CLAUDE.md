@@ -50,7 +50,8 @@ scripts/gates.sh ui            # scripted UI regressions (scripts/ui-smoke.py), 
 scripts/gates.sh ui --only NAME  # one section's group (python3 scripts/ui-smoke.py BIN --list)
 scripts/gates.sh ssh           # palette/profile/install/completion against a disposable Docker SSH server
 scripts/gates.sh leak          # memory soak: repeated work must level off (scripts/leak-soak.py)
-scripts/gates.sh all           # + release build + scripted UI + SSH journey + memory soak + Linux gates in docker (beside the others)
+scripts/gates.sh windows       # cross-compiled Windows build: clippy, release build, tests under Wine (docker)
+scripts/gates.sh all           # + release build + scripted UI + SSH journey + memory soak + Windows + Linux gates in docker (beside the others)
 scripts/gates.sh --list        # what each gate runs
 cargo run                      # dev build + launch (binary: rift-terminal)
 cargo test -p rift-core osc   # one module's tests
@@ -147,10 +148,14 @@ lives outside the workspace in `mobile/` (pnpm; the `mobile` gate).
   block model (`block.rs`), shell tokenizer, completion providers, git2
   worker, shell-integration materializer, transcripts (`transcript.rs`), Rift's
   own command history ranked by directory (`command_history.rs`), SSH
-  profiles (`ssh.rs`), session state, update check and install (`update.rs`).
+  profiles (`ssh.rs`), session state, update check and install (`update.rs`),
+  and every Unix/Windows difference (`sys.rs`: process groups, liveness, file
+  modes, PATHEXT, home, `canonicalize`, `rename`) — platform code goes there,
+  not inline `cfg` in feature modules.
 - **rift-pty** — one `Session` per pane. Spawns through
-  `alacritty_terminal::tty`, or, with `durable_sessions`, through the per-user
-  session service (`daemon.rs`, `service.rs`, `ipc.rs`). A reader thread
+  `alacritty_terminal::tty` (ConPTY on Windows), or, with `durable_sessions`,
+  through the per-user session service (`daemon.rs`, `service.rs`, `ipc.rs`;
+  Unix only so far: `uds.rs` stubs its socket types on Windows). A reader thread
   splits output at marker boundaries (`feed`), feeds segments to the vte
   parser, and applies markers to the `BlockStore` and the inline-image model
   (`graphics.rs`).

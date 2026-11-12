@@ -13,6 +13,7 @@
 //! [`qr_matrix`] / [`qr_terminal`].
 
 pub use crate::protocol::Permission;
+use crate::sys::{self, UnixMode};
 use crate::transport::{self, KEY_LEN};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
@@ -20,9 +21,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::os::fd::AsRawFd;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -339,7 +338,7 @@ pub struct PairingLink {
 
 fn ensure_dir(dir: &Path) -> io::Result<()> {
     std::fs::create_dir_all(dir)?;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+    sys::set_mode(dir, 0o700)
 }
 
 /// Replace `dir/name` with `body` atomically (0600).
@@ -355,11 +354,11 @@ fn write_atomic(dir: &Path, name: &str, body: &[u8]) -> io::Result<()> {
         let mut f = OpenOptions::new()
             .write(true)
             .create_new(true)
-            .mode(0o600)
+            .unix_mode(0o600)
             .open(&tmp)?;
         f.write_all(body)?;
         f.sync_all()?;
-        std::fs::rename(&tmp, dir.join(name))
+        sys::rename(&tmp, &dir.join(name))
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
@@ -368,18 +367,15 @@ fn write_atomic(dir: &Path, name: &str, body: &[u8]) -> io::Result<()> {
 }
 
 /// Run `f` holding the registry's exclusive lock (a `flock` on the
-/// directory itself, so no extra file is needed).
+/// directory itself, so no extra file is needed; Windows: `.lock` in it).
 fn locked<T>(dir: &Path, f: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
     ensure_dir(dir)?;
-    let handle = File::open(dir)?;
+    let handle = sys::dir_lock_file(dir)?;
     loop {
-        // SAFETY: flock on a descriptor we own.
-        if unsafe { libc::flock(handle.as_raw_fd(), libc::LOCK_EX) } == 0 {
-            break;
-        }
-        let e = io::Error::last_os_error();
-        if e.kind() != io::ErrorKind::Interrupted {
-            return Err(e);
+        match handle.lock() {
+            Ok(()) => break,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
         }
     }
     let _guard = RegistryLock(handle);
@@ -556,10 +552,9 @@ pub struct DevicesStamp {
 
 /// The stamp of `devices.json` as it is now (a `stat`, no read).
 pub fn devices_stamp(dir: &Path) -> Option<DevicesStamp> {
-    use std::os::unix::fs::MetadataExt as _;
     let m = std::fs::metadata(dir.join(DEVICES_FILE)).ok()?;
     Some(DevicesStamp {
-        inode: m.ino(),
+        inode: sys::file_id(&m),
         len: m.len(),
         modified: m.modified().ok(),
     })
@@ -702,7 +697,7 @@ pub(crate) fn append_history(dir: &Path, entry: &Entry) -> io::Result<()> {
             let mut f = OpenOptions::new()
                 .append(true)
                 .create(true)
-                .mode(0o600)
+                .unix_mode(0o600)
                 .open(&path)?;
             return f.write_all(format!("{line}\n").as_bytes());
         }
@@ -789,9 +784,8 @@ pub fn gateway_running(dir: &Path) -> bool {
     let Ok(f) = File::open(dir.join(LOCK_FILE)) else {
         return false;
     };
-    // SAFETY: flock on a descriptor we own; closing it releases the lock
-    let r = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    r != 0 && io::Error::last_os_error().kind() == io::ErrorKind::WouldBlock
+    // closing the file releases the probe's lock
+    matches!(f.try_lock(), Err(std::fs::TryLockError::WouldBlock))
 }
 
 pub(crate) fn write_status(dir: &Path, status: &Status) -> io::Result<()> {
@@ -812,19 +806,16 @@ pub(crate) fn lock_gateway(dir: &Path) -> io::Result<Option<File>> {
         .create(true)
         .truncate(false)
         .write(true)
-        .mode(0o600)
+        .unix_mode(0o600)
         .open(dir.join(LOCK_FILE))?;
     for attempt in 0..5 {
         if attempt > 0 {
             std::thread::sleep(Duration::from_millis(20));
         }
-        // SAFETY: flock on a descriptor we own
-        if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-            return Ok(Some(f));
-        }
-        let e = io::Error::last_os_error();
-        if e.kind() != io::ErrorKind::WouldBlock {
-            return Err(e);
+        match f.try_lock() {
+            Ok(()) => return Ok(Some(f)),
+            Err(std::fs::TryLockError::WouldBlock) => {}
+            Err(std::fs::TryLockError::Error(e)) => return Err(e),
         }
     }
     Ok(None)
@@ -979,38 +970,10 @@ pub fn addresses(listen: SocketAddr) -> Vec<SocketAddr> {
     if !listen.ip().is_unspecified() {
         return vec![listen];
     }
-    ipv4_addrs()
+    sys::ipv4_addrs()
         .into_iter()
         .map(|ip| SocketAddr::new(IpAddr::V4(ip), listen.port()))
         .collect()
-}
-
-fn ipv4_addrs() -> Vec<Ipv4Addr> {
-    let mut out = Vec::new();
-    let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
-    // SAFETY: getifaddrs fills a linked list we only read, then free once
-    unsafe {
-        if libc::getifaddrs(&mut list) != 0 {
-            return out;
-        }
-        let mut cur = list;
-        while let Some(ifa) = cur.as_ref() {
-            let up = ifa.ifa_flags & libc::IFF_UP as libc::c_uint != 0;
-            if up
-                && let Some(sa) = ifa.ifa_addr.as_ref()
-                && i32::from(sa.sa_family) == libc::AF_INET
-            {
-                let sin = &*(ifa.ifa_addr as *const libc::sockaddr_in);
-                let ip = Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
-                if !ip.is_loopback() && !ip.is_link_local() && !out.contains(&ip) {
-                    out.push(ip);
-                }
-            }
-            cur = ifa.ifa_next;
-        }
-        libc::freeifaddrs(list);
-    }
-    out
 }
 
 /// The QR code of `text` as rows of modules, `true` = dark, without the
@@ -1185,10 +1148,10 @@ mod rfc3339 {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     fn scratch(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!(

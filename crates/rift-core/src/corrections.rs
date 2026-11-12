@@ -158,7 +158,7 @@ fn cd_typo(words: &[&str], output: &str, cwd: Option<&Path>) -> Option<String> {
     }
     let (mut base, mut out, rest) = if let Some(rest) = arg.strip_prefix("~/") {
         (
-            PathBuf::from(std::env::var_os("HOME")?),
+            PathBuf::from(crate::sys::home_os()?),
             String::from("~/"),
             rest,
         )
@@ -258,7 +258,9 @@ mod tests {
     const TYPO_MANY: &str = include_str!("../testdata/corrections/git-typo-many.txt");
     const BASH_CD: &str = include_str!("../testdata/corrections/bash-cd.txt");
     const ZSH_CD: &str = include_str!("../testdata/corrections/zsh-cd.txt");
+    #[cfg(unix)]
     const BASH_EXEC: &str = include_str!("../testdata/corrections/bash-exec-denied.txt");
+    #[cfg(unix)]
     const ZSH_EXEC: &str = include_str!("../testdata/corrections/zsh-exec-denied.txt");
     const MKDIR: &str = include_str!("../testdata/corrections/mkdir-denied.txt");
     const REDIRECT: &str = include_str!("../testdata/corrections/bash-redirect-denied.txt");
@@ -355,12 +357,16 @@ mod tests {
             fix("cd my_docs", 1, BASH_CD, Some(&dir)).as_deref(),
             Some("cd my\\ docs")
         );
-        // absolute paths too
-        let abs = format!("cd {}/projets", dir.display());
-        assert_eq!(
-            fix(&abs, 1, BASH_CD, None),
-            Some(format!("cd {}/projects", dir.display()))
-        );
+        // absolute paths too (a bash path: a Windows `C:\…` is a quoted word
+        // to bash)
+        #[cfg(unix)]
+        {
+            let abs = format!("cd {}/projets", dir.display());
+            assert_eq!(
+                fix(&abs, 1, BASH_CD, None),
+                Some(format!("cd {}/projects", dir.display()))
+            );
+        }
         // nothing close, an existing directory, unknown cwd, other output
         assert_eq!(fix("cd zzzzzz", 1, BASH_CD, Some(&dir)), None);
         assert_eq!(fix("cd projects", 1, BASH_CD, Some(&dir)), None);
@@ -378,6 +384,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn chmod_a_script_without_the_execute_bit() {
         let dir = scratch("chmod");
         std::fs::write(dir.join("run.sh"), "#!/bin/sh\necho ran\n").unwrap();

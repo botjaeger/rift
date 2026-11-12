@@ -124,7 +124,7 @@ pub fn php_installs(home: &Path, prefixes: &[PathBuf]) -> Vec<Runtime> {
         if !bin.join("php").is_file() {
             return;
         }
-        let real = std::fs::canonicalize(bin.join("php")).unwrap_or(bin.join("php"));
+        let real = crate::sys::canonicalize(bin.join("php")).unwrap_or(bin.join("php"));
         if seen.contains(&real) {
             return;
         }
@@ -144,7 +144,7 @@ pub fn php_installs(home: &Path, prefixes: &[PathBuf]) -> Vec<Runtime> {
             if !formula {
                 continue;
             }
-            let version = std::fs::canonicalize(&dir)
+            let version = crate::sys::canonicalize(&dir)
                 .ok()
                 .and_then(|real| version_from_path(&real))
                 .unwrap_or_else(|| name.trim_start_matches("php@").to_string());
@@ -188,7 +188,7 @@ pub fn python_installs(home: &Path, prefixes: &[PathBuf], pyenv: Option<&Path>) 
             if !dir.join("bin/python3").is_file() {
                 continue;
             }
-            let version = std::fs::canonicalize(&dir)
+            let version = crate::sys::canonicalize(&dir)
                 .ok()
                 .and_then(|real| version_from_path(&real))
                 .unwrap_or_else(|| short.to_string());
@@ -243,14 +243,14 @@ pub fn python_version(bin: &Path, cwd: &Path) -> Option<String> {
     {
         return Some(pyenv_version(root, cwd));
     }
-    version_from_path(&std::fs::canonicalize(bin).ok()?)
+    version_from_path(&crate::sys::canonicalize(bin).ok()?)
 }
 
 /// The PHP version of `bin` (as the shell reports it): from its install
 /// path, else by asking it once in the background (`None` until it
 /// answers; the chip repaints with the next frame).
 pub fn php_version(bin: &Path) -> Option<String> {
-    let real = std::fs::canonicalize(bin).ok()?;
+    let real = crate::sys::canonicalize(bin).ok()?;
     if let Some(v) = version_from_path(&real) {
         return Some(v);
     }
@@ -264,10 +264,11 @@ pub fn php_version(bin: &Path) -> Option<String> {
     let _ = std::thread::Builder::new()
         .name("php-version".into())
         .spawn(move || {
-            let v = std::process::Command::new(&real)
-                .args(["-r", "echo PHP_VERSION;"])
+            let mut cmd = std::process::Command::new(&real);
+            cmd.args(["-r", "echo PHP_VERSION;"])
                 .stdin(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            let v = crate::sys::no_window(&mut cmd)
                 .output()
                 .ok()
                 .filter(|o| o.status.success())

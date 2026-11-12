@@ -24,7 +24,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
 DEFAULT=(fmt clippy test doc shell docs mobile)
-ALL=(fmt clippy test doc shell docs mobile release ui ssh leak linux)
+ALL=(fmt clippy test doc shell docs mobile release ui ssh leak windows linux)
 
 describe() {
     cat <<'EOF'
@@ -43,6 +43,8 @@ ui       isolated scripted UI regressions (display or xvfb-run required), RIFT_U
 ssh      real palette/profile/install/completion journey against a disposable SSH server in Docker (scripts/ssh-ui-smoke.py)
 leak     memory soak on the release build: repeated identical work (a ticking program, output past scrollback, a command printing lines without end,
          opening and closing tabs, splits and overlays) must level off (scripts/leak-soak.py; ~5 min)
+windows  cross-compiled for x86_64-pc-windows-gnu (mingw-w64): clippy (workspace + vendored alacritty_terminal) and a release build, then
+         every test binary under Wine in packaging/windows-wine.Dockerfile (scripts/wine-tests.sh; docker). Not ConPTY, GPU or windows: those need Windows
 linux    clippy + test + doc + release build in packaging/linux-verify.Dockerfile, then shell + scripted UI (xvfb, RIFT_UI_SHARDS shards) + leak on the CI runner's packages in packaging/ci-ubuntu.Dockerfile (docker)
 EOF
 }
@@ -203,6 +205,36 @@ gate_linux() {
         rift-ci-ubuntu bash -c 'scripts/gates.sh shell && xvfb-run -a scripts/gates.sh ui leak'
 }
 
+WIN_TARGET=x86_64-pc-windows-gnu
+# Build the Windows test binaries; their names, one per line, in
+# target/<target>/win-tests.txt (scripts/wine-tests.sh runs them).
+windows_test_list() {
+    local list="${CARGO_TARGET_DIR:-target}/$WIN_TARGET/win-tests.txt"
+    cargo test --workspace --locked --no-run --target "$WIN_TARGET" --message-format=json |
+        grep -o '"executable":"[^"]*/deps/[^"]*"' | cut -d'"' -f4 | xargs -n1 basename >"$list" &&
+        [[ -s $list ]]
+}
+gate_windows() {
+    have x86_64-w64-mingw32-gcc || { echo "mingw-w64 not installed (brew install mingw-w64)"; return 1; }
+    have docker || { echo "docker not installed"; return 1; }
+    rustup target list --installed | grep -qx "$WIN_TARGET" ||
+        { echo "rust target missing: rustup target add $WIN_TARGET"; return 1; }
+    phase "clippy ($WIN_TARGET)" \
+        cargo clippy --workspace --all-targets --locked --target "$WIN_TARGET" -- -D warnings || return 1
+    # the only vendored crate with Windows code (the ConPTY backend)
+    phase "clippy vendored alacritty_terminal ($WIN_TARGET)" \
+        env CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}/vendor" \
+        cargo clippy --manifest-path vendor/alacritty_terminal/Cargo.toml --all-targets --all-features \
+        --locked --target "$WIN_TARGET" -- -D warnings || return 1
+    phase "release build ($WIN_TARGET)" cargo build --release --locked --target "$WIN_TARGET" || return 1
+    phase "test binaries ($WIN_TARGET)" windows_test_list || return 1
+    phase "image (windows-wine)" \
+        docker build -q --platform linux/amd64 -t rift-wine -f packaging/windows-wine.Dockerfile packaging || return 1
+    phase "tests (wine)" \
+        docker run --rm --init --platform linux/amd64 -v "$PWD:$PWD" rift-wine \
+        sh "$PWD/scripts/wine-tests.sh" "$PWD"
+}
+
 # One step of a gate, timed: `-- <name> pass 312s (14:02:11–14:07:23)`.
 phase() {
     local name=$1 t0=$SECONDS at rc
@@ -223,6 +255,7 @@ limit_for() {
         fmt | shell | docs) s=300 ;;
         clippy | doc | mobile | leak) s=1200 ;;
         linux) s=5400 ;;
+        windows) s=3600 ;;
         *) s=1800 ;;
     esac
     echo "${RIFT_GATE_TIMEOUT:-$s}"

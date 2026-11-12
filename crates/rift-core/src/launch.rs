@@ -454,11 +454,11 @@ fn convert_layout(raw: &RawLayout) -> Result<LaunchLayout, String> {
 /// `~` / `~/x` via `$HOME`; anything else (including `~user`) is left alone.
 pub(crate) fn expand_tilde(s: &str) -> PathBuf {
     if s == "~" {
-        if let Some(home) = std::env::var_os("HOME") {
+        if let Some(home) = crate::sys::home_os() {
             return PathBuf::from(home);
         }
     } else if let Some(rest) = s.strip_prefix("~/")
-        && let Some(home) = std::env::var_os("HOME")
+        && let Some(home) = crate::sys::home_os()
     {
         return PathBuf::from(home).join(rest);
     }
@@ -475,7 +475,7 @@ pub fn launch_dir() -> Option<PathBuf> {
 /// `$XDG_DATA_HOME/warp-terminal[-preview]/tab_configs` on Linux. Read-only:
 /// Rift never writes there.
 pub fn warp_tab_config_dirs() -> Vec<PathBuf> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = crate::sys::home_os().map(PathBuf::from);
     let mut dirs = Vec::new();
     if cfg!(target_os = "macos") {
         if let Some(h) = &home {
@@ -959,7 +959,7 @@ active_tab_index: 1
 "#;
 
     fn home() -> PathBuf {
-        PathBuf::from(std::env::var_os("HOME").expect("HOME"))
+        PathBuf::from(crate::sys::home_os().expect("HOME"))
     }
 
     fn scratch(tag: &str) -> PathBuf {

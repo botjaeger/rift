@@ -1,8 +1,8 @@
 //! Client side of the session service: connect (starting the service when
 //! it is not running), then spawn or reattach a shell.
 
+use crate::uds::UnixStream;
 use std::io::ErrorKind;
-use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::WindowSize;
@@ -79,12 +79,18 @@ fn retire_if_empty(s: &mut UnixStream, path: &std::path::Path) -> bool {
         _ => return false,
     }
     // the kernel's word for who serves the socket, not the hello's
-    let Some(pid) = ipc::peer_pid(s).and_then(|p| libc::pid_t::try_from(p).ok()) else {
+    let Some(pid) = ipc::peer_pid(s) else {
         return false;
     };
     log::info!("session service {pid} is from an earlier release and runs no shell: replacing it");
-    if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
-        return false;
+    #[cfg(unix)]
+    {
+        let Ok(pid) = libc::pid_t::try_from(pid) else {
+            return false;
+        };
+        if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
+            return false;
+        }
     }
     // its socket, not its pid: an exited process its parent has not reaped
     // yet still answers kill(pid, 0)
@@ -105,7 +111,7 @@ fn handshake(s: UnixStream) -> std::io::Result<UnixStream> {
 /// `handshake`, also returning the features the service listed.
 fn handshake_features(mut s: UnixStream) -> std::io::Result<(UnixStream, Vec<String>)> {
     // keystrokes go to this socket: only to a service run by this user
-    if ipc::peer_uid(&s) != Some(unsafe { libc::getuid() }) {
+    if ipc::peer_uid(&s) != Some(ipc::my_uid()) {
         return Err(std::io::Error::new(
             ErrorKind::PermissionDenied,
             "session service socket belongs to another user",
@@ -408,7 +414,7 @@ fn ask_privacy(s: &mut UnixStream, features: &[String]) -> ServicePrivacy {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::io::Write;

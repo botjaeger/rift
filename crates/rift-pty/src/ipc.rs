@@ -256,6 +256,12 @@ pub fn socket_path() -> Option<std::path::PathBuf> {
 /// Created 0700 by the caller. `None` when the `/tmp` directory exists but
 /// is not this user's private directory: another user who created it first
 /// could swap the socket directory inside it for one of their own.
+#[cfg(windows)]
+pub fn socket_dir(_name: &str) -> Option<std::path::PathBuf> {
+    None // no Unix sockets for Rift's services on Windows yet (crate::uds)
+}
+
+#[cfg(unix)]
 pub fn socket_dir(name: &str) -> Option<std::path::PathBuf> {
     let data_dir = rift_core::shell_integration::data_dir()?;
     let uid = unsafe { libc::getuid() };
@@ -269,6 +275,7 @@ pub fn socket_dir(name: &str) -> Option<std::path::PathBuf> {
 
 /// Make `dir` (0700) or accept it when it is a real directory owned by `uid`
 /// that no one else can write to (earlier versions made it 0755).
+#[cfg(unix)]
 fn private_dir(dir: &std::path::Path, uid: u32) -> bool {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt};
     let _ = std::fs::DirBuilder::new().mode(0o700).create(dir);
@@ -278,6 +285,7 @@ fn private_dir(dir: &std::path::Path, uid: u32) -> bool {
     }
 }
 
+#[cfg(unix)]
 fn socket_dir_for(data_dir: &std::path::Path, name: &str, uid: u32) -> std::path::PathBuf {
     let dir = data_dir.join(name);
     // Leave room for "/<pid>.sock" and keep separate XDG data dirs isolated.
@@ -297,8 +305,33 @@ fn socket_dir_for(data_dir: &std::path::Path, name: &str, uid: u32) -> std::path
         .join(name)
 }
 
+/// The uid this process runs as (0 on Windows, where no socket ever
+/// connects: see [`crate::uds`]).
+pub fn my_uid() -> u32 {
+    #[cfg(unix)]
+    {
+        // SAFETY: getuid cannot fail
+        unsafe { libc::getuid() }
+    }
+    #[cfg(windows)]
+    {
+        0
+    }
+}
+
+#[cfg(windows)]
+pub fn peer_uid(s: &crate::uds::UnixStream) -> Option<u32> {
+    match *s {}
+}
+
+#[cfg(windows)]
+pub fn peer_pid(s: &crate::uds::UnixStream) -> Option<u32> {
+    match *s {}
+}
+
 /// Uid of the process at the other end of a Unix socket.
-pub fn peer_uid(s: &std::os::unix::net::UnixStream) -> Option<u32> {
+#[cfg(unix)]
+pub fn peer_uid(s: &crate::uds::UnixStream) -> Option<u32> {
     use std::os::fd::AsRawFd;
     let fd = s.as_raw_fd();
     #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd"))]
@@ -335,7 +368,8 @@ pub fn peer_uid(s: &std::os::unix::net::UnixStream) -> Option<u32> {
 }
 
 /// Process id at the other end of a Unix socket, as the kernel knows it.
-pub fn peer_pid(s: &std::os::unix::net::UnixStream) -> Option<u32> {
+#[cfg(unix)]
+pub fn peer_pid(s: &crate::uds::UnixStream) -> Option<u32> {
     use std::os::fd::AsRawFd;
     let fd = s.as_raw_fd();
     #[cfg(target_os = "macos")]
@@ -382,7 +416,7 @@ pub fn now_ms() -> u64 {
         .unwrap_or_default()
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

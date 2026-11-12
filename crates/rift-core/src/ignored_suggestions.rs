@@ -170,7 +170,7 @@ pub fn update(path: &Path, changes: &[Change]) -> bool {
         Loaded::Missing => Vec::new(),
         Loaded::Commands(c) => c,
         Loaded::Unreadable => {
-            if std::fs::rename(path, path.with_extension("json.bad")).is_err() {
+            if crate::sys::rename(path, path.with_extension("json.bad")).is_err() {
                 return false;
             }
             log::warn!(

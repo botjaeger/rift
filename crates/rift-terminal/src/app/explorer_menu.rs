@@ -130,7 +130,7 @@ impl App {
         // the folder must still be inside the explorer's root, as its real
         // path: a symlinked folder leading out of it is refused
         if let Some(root) = self.win.explorer.root.as_deref() {
-            let real = |p: &std::path::Path| std::fs::canonicalize(p).ok();
+            let real = |p: &std::path::Path| rift_core::sys::canonicalize(p).ok();
             let inside =
                 matches!((real(&dir), real(root)), (Some(d), Some(r)) if d.starts_with(&r));
             if !inside {

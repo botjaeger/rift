@@ -265,8 +265,8 @@ pub fn save(service: u64, kept: &Kept) -> std::io::Result<()> {
 }
 
 fn save_in(dir: &std::path::Path, service: u64, kept: &Kept) -> std::io::Result<()> {
+    use rift_core::sys::UnixMode;
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
     std::fs::create_dir_all(dir)?;
     let path = path_in(dir, service);
     let tmp = path.with_extension("json.tmp");
@@ -274,11 +274,11 @@ fn save_in(dir: &std::path::Path, service: u64, kept: &Kept) -> std::io::Result<
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .mode(0o600)
+        .unix_mode(0o600)
         .open(&tmp)?;
     f.write_all(&serde_json::to_vec(kept).map_err(std::io::Error::other)?)?;
     drop(f);
-    std::fs::rename(&tmp, &path)
+    rift_core::sys::rename(&tmp, &path)
 }
 
 /// The scrollback kept for `service`, removed as it is read; None when
@@ -323,7 +323,7 @@ fn remove_stale_in(dir: &std::path::Path) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

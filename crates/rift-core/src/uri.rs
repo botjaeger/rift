@@ -144,12 +144,25 @@ pub fn file_url_path(url: &str) -> Option<PathBuf> {
     let rest = rest.split(['?', '#']).next().unwrap_or(rest);
     // a folder's URL ends in `/`; its path does not (the root aside)
     let path = crate::osc::percent_decode(rest);
+    // Windows: `file:///C:/Users/me` names `C:/Users/me`
+    let path = match path.strip_prefix('/') {
+        Some(p) if cfg!(windows) && is_drive(p) => p,
+        _ => &path,
+    };
     let trimmed = path.trim_end_matches('/');
     Some(PathBuf::from(if trimmed.is_empty() {
         "/"
+    } else if is_drive(trimmed) && trimmed.len() == 2 {
+        // `C:` alone is the drive's current folder, not its root
+        &path[..3.min(path.len())]
     } else {
         trimmed
     }))
+}
+
+/// `C:` or `C:/…`: a path on a Windows drive.
+fn is_drive(s: &str) -> bool {
+    matches!(s.as_bytes(), [d, b':'] | [d, b':', b'/' | b'\\', ..] if d.is_ascii_alphabetic())
 }
 
 /// The link for a URL macOS hands the app (`application:openURLs:`, an
@@ -279,7 +292,7 @@ mod tests {
 
     #[test]
     fn opens_tabs_and_windows_in_folders() {
-        let dir = std::env::temp_dir().canonicalize().unwrap();
+        let dir = crate::sys::canonicalize(std::env::temp_dir()).unwrap();
         let encoded = dir.to_string_lossy().replace(' ', "%20");
         assert_eq!(
             parse(&format!("rift://action/new_tab?path={encoded}")),
@@ -294,7 +307,7 @@ mod tests {
 
     #[test]
     fn decodes_and_expands_the_path() {
-        let home = std::env::var("HOME").unwrap();
+        let home = crate::sys::home_var().unwrap();
         assert_eq!(
             parse("rift://action/new_tab?path=%7E"),
             Ok(UriAction::NewTab(Some(PathBuf::from(&home))))
@@ -412,7 +425,11 @@ mod tests {
         std::fs::write(&file, "x").unwrap();
         // a folder, and a file (its folder), round-trip through the parser
         let tab = open_path_link(&dir, false).unwrap();
-        assert!(tab.starts_with("rift://action/new_tab?path=/"), "{tab}");
+        let root = if cfg!(windows) { "C%3A" } else { "/" };
+        assert!(
+            tab.starts_with(&format!("rift://action/new_tab?path={root}")),
+            "{tab}"
+        );
         assert_eq!(parse(&tab), Ok(UriAction::NewTab(Some(dir.clone()))));
         assert_eq!(
             parse(&open_path_link(&file, false).unwrap()),
@@ -441,22 +458,39 @@ mod tests {
         );
         assert_eq!(file_url_path("file://other-host/srv/x"), None);
         assert_eq!(file_url_path("https://example.com/x"), None);
+        // Windows: a drive path, its root kept a root
+        if cfg!(windows) {
+            assert_eq!(
+                file_url_path("file:///C:/a%20dir/"),
+                Some(PathBuf::from("C:/a dir"))
+            );
+            assert_eq!(file_url_path("file:///D:/"), Some(PathBuf::from("D:/")));
+        }
     }
 
     #[test]
     fn opened_documents_become_links() {
         // what Finder and the Dock hand over: a folder's file URL (with
         // its trailing slash), a file's, a rift:// link
-        let dir = std::env::temp_dir()
-            .canonicalize()
+        let dir = crate::sys::canonicalize(std::env::temp_dir())
             .unwrap()
             .join(format!("rift odoc {}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.txt"), "").unwrap();
-        let url = format!("file://{}/", percent_encode(&dir.to_string_lossy()));
+        // the URL form of the folder: `/tmp/x`, or on Windows `/C:/Temp/x`
+        let url_path = if cfg!(windows) {
+            format!("/{}", dir.to_string_lossy().replace('\\', "/"))
+        } else {
+            dir.to_string_lossy().into_owned()
+        };
+        let url = format!("file://{}/", percent_encode(&url_path));
         let link = opened_url_link(&url).unwrap();
-        assert_eq!(parse(&link), Ok(UriAction::NewTab(Some(dir.clone()))));
-        let file = format!("file://{}/a.txt", percent_encode(&dir.to_string_lossy()));
+        let got = match parse(&link) {
+            Ok(UriAction::NewTab(Some(p))) => p,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(crate::sys::canonicalize(&got).unwrap(), dir);
+        let file = format!("file://{}/a.txt", percent_encode(&url_path));
         assert_eq!(
             parse(&opened_url_link(&file).unwrap()),
             Ok(UriAction::NewTab(Some(dir.clone())))

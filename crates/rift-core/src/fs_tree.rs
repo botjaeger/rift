@@ -42,7 +42,7 @@ pub fn root_for(cwd: &Path) -> PathBuf {
     git2::Repository::discover(cwd)
         .ok()
         .and_then(|r| r.workdir().map(Path::to_path_buf))
-        .map(|p| p.canonicalize().unwrap_or(p))
+        .map(|p| crate::sys::canonicalize(&p).unwrap_or(p))
         .unwrap_or_else(|| cwd.to_path_buf())
 }
 
@@ -81,8 +81,8 @@ pub fn listing_limit(
     // mismatch would skip the ignore check
     let workdir = repo
         .and_then(|r| r.workdir())
-        .map(|w| w.canonicalize().unwrap_or_else(|_| w.to_path_buf()));
-    let base = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+        .map(|w| crate::sys::canonicalize(w).unwrap_or_else(|_| w.to_path_buf()));
+    let base = crate::sys::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
     let mut scanned = 0usize;
     let mut out: Vec<Entry> = read
         .take_while(|_| {
@@ -248,7 +248,10 @@ mod tests {
             .map(|e| e.name)
             .collect();
         assert_eq!(shown, ["src", "A.md", "b.txt"]);
-        assert_eq!(root_for(&dir.join("src")), dir.canonicalize().unwrap());
+        assert_eq!(
+            root_for(&dir.join("src")),
+            crate::sys::canonicalize(&dir).unwrap()
+        );
         assert_eq!(
             rel_key(&dir, &dir.join("src/main.rs")).as_deref(),
             Some("src/main.rs")

@@ -118,7 +118,7 @@ impl App {
             "shell" => {
                 // a bare name is looked up on PATH: the setting holds a path
                 let path = std::env::var_os("PATH");
-                let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+                let home = rift_core::sys::home_os().map(std::path::PathBuf::from);
                 let found = rift_core::profiles::find_program(t, path.as_deref(), home.as_deref())
                     .ok_or_else(|| format!("{t} is not an executable"))?;
                 c.shell = Some(if t.starts_with('/') || t.starts_with('~') {

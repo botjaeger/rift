@@ -1,3 +1,7 @@
+// Windows: a GUI program (no console window of its own); the command-line
+// forms print to the console they were started from (`windows_console`)
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod a11y;
 mod agent_status;
 mod app;
@@ -53,7 +57,18 @@ fn open_path_link(path: &std::path::Path, new_window: bool) -> Result<String, St
     rift_core::uri::open_path_link(&abs, new_window)
 }
 
+/// Windows: print to the console Rift was started from, if any (the home
+/// folder is `rift_core::sys::home_os`).
+#[cfg(windows)]
+fn windows_setup() {
+    use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+    // SAFETY: plain Win32 call; failure (no parent console) changes nothing
+    unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
+}
+
 fn main() {
+    #[cfg(windows)]
+    windows_setup();
     // restart variables are read once and not passed on to shells
     updater::take_env();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();

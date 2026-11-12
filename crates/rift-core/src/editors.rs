@@ -122,7 +122,7 @@ pub fn label(id: &str) -> String {
 fn mac_bundle(app: &str) -> Option<PathBuf> {
     let name = format!("{app}.app");
     let mut roots = vec![PathBuf::from("/Applications")];
-    if let Some(home) = std::env::var_os("HOME") {
+    if let Some(home) = crate::sys::home_os() {
         roots.push(PathBuf::from(home).join("Applications"));
     }
     roots
@@ -132,10 +132,10 @@ fn mac_bundle(app: &str) -> Option<PathBuf> {
 }
 
 /// `cli` on `PATH`.
+/// `cli` on `PATH` (Windows: with a PATHEXT extension, `code` is
+/// `code.cmd`).
 fn on_path(cli: &str) -> Option<PathBuf> {
-    std::env::split_paths(&std::env::var_os("PATH")?)
-        .map(|d| d.join(cli))
-        .find(|p| p.is_file())
+    crate::profiles::find_program(cli, std::env::var_os("PATH").as_deref(), None).map(PathBuf::from)
 }
 
 impl Editor {
@@ -152,7 +152,12 @@ impl Editor {
                 vec!["-a".into(), self.mac_app.into(), path.into()],
             );
         }
-        (self.cli.into(), vec![path.into()])
+        // the resolved file: Windows spawns `code.cmd` only by its full name
+        let program = on_path(self.cli).map_or_else(
+            || self.cli.to_string(),
+            |p| p.to_string_lossy().into_owned(),
+        );
+        (program, vec![path.into()])
     }
 
     /// Program and argv that open `path` at `line` (1-based) and `col`:

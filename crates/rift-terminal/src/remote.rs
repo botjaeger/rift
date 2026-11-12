@@ -1088,15 +1088,16 @@ fn valid_upload_name(name: &str) -> bool {
 /// never a link to one (nothing is written, nor a mode changed, through a
 /// link).
 fn save_upload(dir: &Path, ext: &str, bytes: &[u8], now: SystemTime) -> std::io::Result<PathBuf> {
+    use rift_core::sys::UnixMode as _;
     use std::io::Write as _;
-    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
     if !rift_remote::valid_upload_ext(ext) {
         return Err(std::io::Error::other("not an extension Rift saves"));
     }
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)?;
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(dir)?;
     if !std::fs::symlink_metadata(dir)?.file_type().is_dir() {
         return Err(std::io::Error::other(format!(
             "{} is not a folder",
@@ -1104,7 +1105,7 @@ fn save_upload(dir: &Path, ext: &str, bytes: &[u8], now: SystemTime) -> std::io:
         )));
     }
     // an existing folder too: nobody else lists or reads it
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    rift_core::sys::set_mode(dir, 0o700)?;
     let ms = now
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis());
@@ -1114,7 +1115,7 @@ fn save_upload(dir: &Path, ext: &str, bytes: &[u8], now: SystemTime) -> std::io:
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .mode(0o600)
+        .unix_mode(0o600)
         .open(&path)?;
     if let Err(e) = f.write_all(bytes).and_then(|()| f.sync_all()) {
         let _ = std::fs::remove_file(&path);
@@ -1435,6 +1436,12 @@ fn end_background_shells() {
 
 /// Append stdout and stderr to `<dir>/gateway.log` (started over past
 /// 1 MiB), as the bootstrapped job's `StandardOutPath` does.
+/// Windows: `spawn_managed` already started the gateway with its output in
+/// the log (a launched job never needs this there).
+#[cfg(windows)]
+fn log_to_file(_dir: &Path) {}
+
+#[cfg(unix)]
 fn log_to_file(dir: &Path) {
     use std::os::fd::AsRawFd;
     let path = dir.join("gateway.log");
@@ -1474,7 +1481,7 @@ fn relay_for(tunnel: &mut crate::tunnel::Tunnel, config: &RemoteConfig) -> Optio
 fn any_window() -> bool {
     control::sockets()
         .iter()
-        .any(|p| std::os::unix::net::UnixStream::connect(p).is_ok())
+        .any(|p| rift_pty::uds::UnixStream::connect(p).is_ok())
 }
 
 fn pair(dir: &Path, args: &[String]) -> i32 {
@@ -1726,14 +1733,12 @@ fn pretty_hostname(text: &str) -> Option<String> {
 }
 
 fn network_hostname() -> String {
-    let mut buf = [0u8; 256];
-    // SAFETY: the buffer outlives the call and its length is passed
-    let r = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
-    if r != 0 {
-        return "unknown".into();
+    let host = rift_core::sys::hostname();
+    if host.is_empty() {
+        "unknown".into()
+    } else {
+        host
     }
-    let n = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-    String::from_utf8_lossy(&buf[..n]).into_owned()
 }
 
 // ── the window side ──
@@ -1862,9 +1867,8 @@ pub fn pasted_toast(device: &str, name: &str) -> String {
 /// `<dir>/gateway.log` (started over past 1 MiB). A gateway already holding
 /// the lock makes the new one exit at once.
 pub fn spawn_managed(dir: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(dir)?;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    rift_core::sys::set_mode(dir, 0o700)?;
     let path = dir.join("gateway.log");
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > 1 << 20) {
         std::fs::write(&path, b"")?;
@@ -2147,6 +2151,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn uploads_are_saved_privately_under_a_name_made_here_and_pruned() {
         use std::os::unix::fs::PermissionsExt as _;
         let root = std::env::temp_dir().join(format!("rift-uploads-{}", std::process::id()));
@@ -2227,6 +2232,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn an_uploads_folder_that_is_a_link_is_never_written_through() {
         use std::os::unix::fs::PermissionsExt as _;
         let root = std::env::temp_dir().join(format!("rift-uplink-{}", std::process::id()));

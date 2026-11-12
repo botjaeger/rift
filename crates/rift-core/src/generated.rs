@@ -107,7 +107,7 @@ pub fn mark_orphans(profiles: &mut [Profile], shells_file: &Path, path_var: Opti
         .unwrap_or_default();
     let canonical: Vec<PathBuf> = listed
         .iter()
-        .filter_map(|p| std::fs::canonicalize(p).ok())
+        .filter_map(|p| crate::sys::canonicalize(p).ok())
         .collect();
     for p in profiles.iter_mut() {
         p.orphaned = p.is_generated()
@@ -116,7 +116,7 @@ pub fn mark_orphans(profiles: &mut [Profile], shells_file: &Path, path_var: Opti
                     return true;
                 };
                 let found = PathBuf::from(found);
-                let canon = std::fs::canonicalize(&found).ok();
+                let canon = crate::sys::canonicalize(&found).ok();
                 !listed.contains(&found) && !canon.is_some_and(|c| canonical.contains(&c))
             });
     }
@@ -196,7 +196,7 @@ pub fn mark_orphans_default(profiles: &mut [Profile], shells_file: &Path) {
 }
 
 fn home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    crate::sys::home_os().map(PathBuf::from)
 }
 
 /// Whether `command` (as a profile writes it) runs the executable `path`:
@@ -207,7 +207,7 @@ fn same_program(command: &str, path: &str, path_var: Option<&OsStr>) -> bool {
     }
     let canon = |c: &str| {
         profiles::find_program(c, path_var, home().as_deref())
-            .and_then(|p| std::fs::canonicalize(p).ok())
+            .and_then(|p| crate::sys::canonicalize(p).ok())
     };
     matches!((canon(command), canon(path)), (Some(a), Some(b)) if a == b)
 }
@@ -224,7 +224,7 @@ fn free_name(profiles: &[Profile], base: &str) -> String {
         .expect("a free name")
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

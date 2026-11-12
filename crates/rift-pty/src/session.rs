@@ -167,7 +167,7 @@ const MAX_PENDING_INPUT: usize = 64 * 1024;
 /// The connection to the session service that input and requests go on.
 pub(crate) struct ServiceConn {
     /// `None` until the service answered the spawn or attach.
-    stream: Option<std::os::unix::net::UnixStream>,
+    stream: Option<crate::uds::UnixStream>,
     /// `Some` while the connection is down: input waits here, in order, and
     /// goes out on the replacement (see [`ServiceConn::reconnected`]).
     pending: Option<Vec<u8>>,
@@ -179,8 +179,8 @@ pub(crate) struct ServiceConn {
 }
 
 impl ServiceConn {
-    #[cfg(test)]
-    fn new(stream: std::os::unix::net::UnixStream) -> Self {
+    #[cfg(all(test, unix))]
+    fn new(stream: crate::uds::UnixStream) -> Self {
         Self {
             stream: Some(stream),
             pending: None,
@@ -237,7 +237,7 @@ impl ServiceConn {
 
     /// Switch to `stream` and send the input held meanwhile. Returns the
     /// number of input bytes that were dropped (pending was full).
-    fn reconnected(&mut self, stream: std::os::unix::net::UnixStream, session: u64) -> usize {
+    fn reconnected(&mut self, stream: crate::uds::UnixStream, session: u64) -> usize {
         self.stream = Some(stream);
         let held = self.pending.take().unwrap_or_default();
         self.input(session, &held);
@@ -539,7 +539,7 @@ impl InputQueue {
     }
 
     /// Bytes queued and not yet written.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn queued(&self) -> usize {
         self.queued.load(Ordering::Acquire)
     }
@@ -610,10 +610,15 @@ pub(crate) fn open_pty(
         working_directory,
         drain_on_exit: false,
         env: tty_env,
+        // quote each argument for CreateProcess the way std does
+        #[cfg(windows)]
+        escape_args: true,
     };
     let pty = tty::new(&tty_opts, window_size, id)?;
     // alacritty configures the master fd non-blocking (it polls with mio);
-    // we use a dedicated blocking reader thread instead
+    // we use a dedicated blocking reader thread instead (Windows: the
+    // vendored ConPTY pipes are blocking already)
+    #[cfg(unix)]
     unsafe {
         use std::os::fd::AsRawFd;
         let fd = pty.file().as_raw_fd();
@@ -623,7 +628,44 @@ pub(crate) fn open_pty(
     Ok(pty)
 }
 
+/// The PTY's output, for the reader thread.
+fn pty_reader(pty: &tty::Pty) -> std::io::Result<File> {
+    #[cfg(unix)]
+    return pty.file().try_clone();
+    #[cfg(windows)]
+    return pty.reader_file().try_clone();
+}
+
+/// The PTY's input, for keystrokes and replies.
+fn pty_writer(pty: &tty::Pty) -> std::io::Result<File> {
+    #[cfg(unix)]
+    return pty.file().try_clone();
+    #[cfg(windows)]
+    return pty.writer_file().try_clone();
+}
+
+/// The shell's process id.
+fn pty_pid(pty: &tty::Pty) -> u32 {
+    #[cfg(unix)]
+    return pty.child().id();
+    #[cfg(windows)]
+    return pty.child_pid();
+}
+
+/// Windows: ConPTY does not tell the console's foreground process.
+#[cfg(windows)]
+pub(crate) fn foreground_job_name(_pty: &tty::Pty) -> Option<String> {
+    None
+}
+
+/// Windows: ConPTY does not expose the console's input mode.
+#[cfg(windows)]
+pub(crate) fn input_hidden(_pty: &tty::Pty) -> bool {
+    false
+}
+
 /// Executable name of the PTY's foreground job when it is not the shell.
+#[cfg(unix)]
 pub(crate) fn foreground_job_name(pty: &tty::Pty) -> Option<String> {
     use std::os::fd::AsRawFd;
     let pgrp = unsafe { libc::tcgetpgrp(pty.file().as_raw_fd()) };
@@ -638,6 +680,7 @@ pub(crate) fn foreground_job_name(pty: &tty::Pty) -> Option<String> {
 /// executable is named after a version: Claude Code's native install runs
 /// `~/.local/share/claude/versions/2.1.296` through a `claude` link, and
 /// the job must still read as the agent. Empty when the OS does not say.
+#[cfg(unix)]
 fn process_name(pid: i32) -> String {
     #[cfg(target_os = "macos")]
     let name = {
@@ -696,7 +739,7 @@ fn argv0(pid: i32) -> Option<String> {
     Some(String::from_utf8_lossy(&rest[..end]).into_owned())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn argv0(pid: i32) -> Option<String> {
     let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
     let first = cmdline.split(|&b| b == 0).next()?;
@@ -706,6 +749,7 @@ fn argv0(pid: i32) -> Option<String> {
 /// The terminal reads a line without echo: ECHO off in canonical mode, as
 /// `sudo`, `ssh` and `read -s` set it (full-screen programs turn ICANON
 /// off too). The master shares the line discipline's settings.
+#[cfg(unix)]
 pub(crate) fn input_hidden(pty: &tty::Pty) -> bool {
     use std::os::fd::AsRawFd;
     let mut t: libc::termios = unsafe { std::mem::zeroed() };
@@ -800,7 +844,7 @@ type Open = Box<dyn FnOnce() -> std::io::Result<Opened> + Send>;
 
 /// A shell the session service started or reattached.
 struct Opened {
-    stream: std::os::unix::net::UnixStream,
+    stream: crate::uds::UnixStream,
     /// The service's id for it.
     session: u64,
     /// The reattached shell's directory as the service last saw it:
@@ -815,7 +859,7 @@ struct Opened {
 
 /// Opens a fresh service connection streaming output after the given byte;
 /// true when output before it was no longer retained.
-type Resume = Box<dyn FnMut(u64) -> std::io::Result<(std::os::unix::net::UnixStream, bool)> + Send>;
+type Resume = Box<dyn FnMut(u64) -> std::io::Result<(crate::uds::UnixStream, bool)> + Send>;
 
 /// Consecutive resumes (no output in between) before the pane gives up.
 const MAX_RESUMES: u32 = 5;
@@ -835,7 +879,7 @@ const RESUME_WINDOW: std::time::Duration = if cfg!(test) {
 fn resume_patiently(
     resume: &mut Resume,
     from: u64,
-) -> std::io::Result<(std::os::unix::net::UnixStream, bool)> {
+) -> std::io::Result<(crate::uds::UnixStream, bool)> {
     let until = std::time::Instant::now() + RESUME_WINDOW;
     let mut wait = std::time::Duration::from_millis(100);
     loop {
@@ -886,16 +930,12 @@ impl Reader {
     /// Before blocking on input: a synchronized update (DECSET 2026) holds
     /// output until its end marker; if the program stalls, show what it
     /// drew once vte's timeout expires. Returns true when it flushed.
-    fn sync_timeout(
-        &self,
-        parser: &mut vte::ansi::Processor,
-        fd: &impl std::os::fd::AsRawFd,
-    ) -> bool {
+    fn sync_timeout(&self, parser: &mut vte::ansi::Processor, fd: &impl WaitReadable) -> bool {
         let Some(deadline) = parser.sync_timeout().sync_timeout() else {
             return false;
         };
         let wait = deadline.saturating_duration_since(std::time::Instant::now());
-        if wait_readable(fd, wait) {
+        if fd.wait_readable(wait) {
             return false;
         }
         let mut term = self.ctx.term.lock();
@@ -1418,8 +1458,8 @@ impl Session {
                     window_size,
                     id,
                 )?;
-                let writer = PtyWriter::File(Arc::new(pty.file().try_clone()?));
-                let source = Source::Pty(pty.file().try_clone()?, pty.child().id());
+                let writer = PtyWriter::File(Arc::new(pty_writer(&pty)?));
+                let source = Source::Pty(pty_reader(&pty)?, pty_pid(&pty));
                 (Backend::Local(pty), writer, source)
             }
             Some(target) => {
@@ -2291,6 +2331,8 @@ struct ShadowState {
 
 /// How a capture reaches the program.
 enum ShadowSignal {
+    /// Unix only: ConPTY has no way to tell a size without resizing.
+    #[cfg(unix)]
     Local(Arc<std::fs::File>),
     Service {
         session: Arc<AtomicU64>,
@@ -2300,7 +2342,10 @@ enum ShadowSignal {
 
 fn shadow_signal(backend: &Backend, writer: &InputQueue) -> Option<ShadowSignal> {
     Some(match backend {
+        #[cfg(unix)]
         Backend::Local(pty) => ShadowSignal::Local(Arc::new(pty.file().try_clone().ok()?)),
+        #[cfg(windows)]
+        Backend::Local(_) => return None,
         Backend::Service { session, .. } => ShadowSignal::Service {
             session: session.clone(),
             queue: writer.tx.clone(),
@@ -2345,6 +2390,7 @@ impl Shadow {
     fn signal(&self, state: &mut ShadowState, ws: WindowSize) {
         state.stats.signals += 1;
         match &self.signal {
+            #[cfg(unix)]
             Some(ShadowSignal::Local(file)) => {
                 use alacritty_terminal::tty::ToWinsize;
                 use std::os::fd::AsRawFd;
@@ -3027,7 +3073,61 @@ fn place_image(
     parser.advance(&mut abs, seq.as_bytes());
 }
 
+/// What the reader blocks on: a PTY or a service socket.
+trait WaitReadable {
+    /// Block until there are bytes to read or `wait` passes. False on
+    /// timeout; errors and hangups return true (read() reports them).
+    fn wait_readable(&self, wait: std::time::Duration) -> bool;
+}
+
+#[cfg(unix)]
+impl<T: std::os::fd::AsRawFd> WaitReadable for T {
+    fn wait_readable(&self, wait: std::time::Duration) -> bool {
+        wait_readable(self, wait)
+    }
+}
+
+/// Windows: an anonymous pipe cannot be polled; peek at it until `wait`
+/// passes (only while a synchronized update stalls).
+#[cfg(windows)]
+impl WaitReadable for File {
+    fn wait_readable(&self, wait: std::time::Duration) -> bool {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::Pipes::PeekNamedPipe;
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            let mut avail = 0u32;
+            // SAFETY: a valid pipe handle owned by `self`; no buffer is read
+            let ok = unsafe {
+                PeekNamedPipe(
+                    self.as_raw_handle(),
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                    &mut avail,
+                    std::ptr::null_mut(),
+                )
+            };
+            if ok == 0 || avail > 0 {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+}
+
+#[cfg(windows)]
+impl WaitReadable for crate::uds::UnixStream {
+    fn wait_readable(&self, _: std::time::Duration) -> bool {
+        match *self {}
+    }
+}
+
 /// Block until `file` has bytes to read or `wait` passes. False on timeout.
+#[cfg(unix)]
 fn wait_readable(file: &impl std::os::fd::AsRawFd, wait: std::time::Duration) -> bool {
     let mut pfd = libc::pollfd {
         fd: file.as_raw_fd(),
@@ -3049,15 +3149,7 @@ fn wait_readable(file: &impl std::os::fd::AsRawFd, wait: std::time::Duration) ->
 /// only empty and `localhost` OSC 7 hosts local).
 fn local_host() -> &'static str {
     static HOST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    HOST.get_or_init(|| {
-        let mut buf = [0u8; 256];
-        // SAFETY: gethostname writes at most buf.len() bytes into buf
-        if unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } != 0 {
-            return String::new();
-        }
-        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-        String::from_utf8_lossy(&buf[..end]).into_owned()
-    })
+    HOST.get_or_init(rift_core::sys::hostname)
 }
 
 fn apply_marker(marker: Marker, term: &Term<EventProxy>, scrolled: u64, ctx: &FeedCtx) {
@@ -3179,7 +3271,7 @@ fn extract_text(
     out.trim().to_string()
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

@@ -1,11 +1,16 @@
 //! Bounded background tools: the deadline includes input and inherited pipes.
 
-use std::io::{self, Read, Write};
+use std::io;
+#[cfg(unix)]
+use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
 fn nonblocking(pipe: &impl AsRawFd) -> io::Result<()> {
     // SAFETY: the caller owns this open pipe; preserve its existing flags.
     let flags = unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_GETFL) };
@@ -17,6 +22,7 @@ fn nonblocking(pipe: &impl AsRawFd) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn drain(pipe: &mut Option<impl Read>, out: &mut Vec<u8>, max: usize) -> io::Result<bool> {
     let Some(reader) = pipe else { return Ok(false) };
     let mut changed = false;
@@ -43,6 +49,7 @@ fn drain(pipe: &mut Option<impl Read>, out: &mut Vec<u8>, max: usize) -> io::Res
 /// Run a tool without a terminal, retaining at most `max` bytes per stream.
 /// Drain excess bytes so a full pipe cannot deadlock it. Timeout stops its
 /// private process group; no pipe-reader threads survive the call.
+#[cfg(unix)]
 pub(crate) fn output(
     command: &mut Command,
     input: Option<&[u8]>,
@@ -151,7 +158,87 @@ pub(crate) fn output(
     result
 }
 
-#[cfg(test)]
+/// Windows: anonymous pipes cannot be non-blocking, so each stream gets a
+/// reader thread. On a timeout the process tree is killed; that closes the
+/// pipes and ends the threads (a thread on a pipe some escaped process still
+/// holds ends when that process does — it is never joined).
+#[cfg(windows)]
+pub(crate) fn output(
+    command: &mut Command,
+    input: Option<&[u8]>,
+    limit: Duration,
+    max: usize,
+) -> io::Result<Output> {
+    use std::io::{Read, Write};
+    use std::sync::mpsc;
+    fn reader(mut pipe: impl Read + Send + 'static, max: usize) -> mpsc::Receiver<Vec<u8>> {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut out = Vec::new();
+            let mut buf = [0; 16 * 1024];
+            loop {
+                match pipe.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => out.extend_from_slice(&buf[..n.min(max.saturating_sub(out.len()))]),
+                }
+            }
+            let _ = tx.send(out);
+        });
+        rx
+    }
+    let mut child = crate::sys::own_group(command)
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    if let (Some(mut pipe), Some(input)) = (child.stdin.take(), input) {
+        let input = input.to_vec();
+        std::thread::spawn(move || {
+            let _ = pipe.write_all(&input);
+        });
+    }
+    let out = child.stdout.take().map(|p| reader(p, max));
+    let err = child.stderr.take().map(|p| reader(p, max));
+    let deadline = Instant::now() + limit;
+    let collect = |rx: &Option<mpsc::Receiver<Vec<u8>>>| -> Option<Vec<u8>> {
+        let rx = rx.as_ref()?;
+        rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .ok()
+    };
+    let result = (|| {
+        let stdout = collect(&out);
+        let stderr = collect(&err);
+        loop {
+            if let Some(status) = child.try_wait()? {
+                if let (Some(stdout), Some(stderr)) = (stdout, stderr) {
+                    return Ok(Output {
+                        status,
+                        stdout,
+                        stderr,
+                    });
+                }
+                break;
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Err(io::Error::new(io::ErrorKind::TimedOut, "tool timed out"))
+    })();
+    if result.is_err() {
+        crate::sys::kill_group(&child);
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    result
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

@@ -420,8 +420,16 @@ fn parse_osc(buf: &[u8]) -> Option<Marker> {
             },
             None => ("", rest),
         };
+        let mut path = percent_decode(path);
+        // a Windows shell's file://host/C:/Users/… names C:/Users/…
+        if let [b'/', d, b':', rest @ ..] = path.as_bytes()
+            && d.is_ascii_alphabetic()
+            && matches!(rest.first(), None | Some(b'/' | b'\\'))
+        {
+            path.remove(0);
+        }
         return Some(Marker::Cwd {
-            path: percent_decode(path),
+            path,
             host: clip(&percent_decode(host)),
         });
     }
@@ -669,6 +677,26 @@ mod tests {
                 host: "mac.local".into()
             }]
         );
+    }
+
+    #[test]
+    fn a_windows_drive_path_loses_the_url_slash() {
+        let mut s = OscScanner::new();
+        for (url, want) in [
+            ("file://PC/C:/Users/maya/my%20dir", "C:/Users/maya/my dir"),
+            ("file://PC/d:", "d:"),
+            ("file://PC/C:%5CUsers", "C:\\Users"),
+            // not a drive: kept as it came
+            ("file://h/CD:/x", "/CD:/x"),
+            ("file://h/C:x", "/C:x"),
+        ] {
+            let input = format!("\x1b]7;{url}\x07");
+            let got = markers(&mut s, input.as_bytes());
+            assert!(
+                matches!(&got[..], [Marker::Cwd { path, .. }] if path == want),
+                "{url}: {got:?}"
+            );
+        }
     }
 
     #[test]

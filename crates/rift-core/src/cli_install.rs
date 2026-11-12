@@ -15,7 +15,7 @@ pub fn default_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os(DIR_ENV).filter(|d| !d.is_empty()) {
         return Some(PathBuf::from(dir));
     }
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/bin"))
+    crate::sys::home_os().map(|h| PathBuf::from(h).join(".local/bin"))
 }
 
 /// What an install did.
@@ -62,8 +62,8 @@ pub fn install(binary: &Path, dir: &Path) -> Result<Installed, String> {
     // made beside it, then renamed over it: never a moment without a command
     let fresh = dir.join(format!(".{NAME}.{}.tmp", std::process::id()));
     let _ = std::fs::remove_file(&fresh);
-    std::os::unix::fs::symlink(binary, &fresh).map_err(|e| format!("{}: {e}", dir.display()))?;
-    if let Err(e) = std::fs::rename(&fresh, &link) {
+    symlink(binary, &fresh).map_err(|e| format!("{}: {e}", dir.display()))?;
+    if let Err(e) = crate::sys::rename(&fresh, &link) {
         let _ = std::fs::remove_file(&fresh);
         return Err(format!("{}: {e}", link.display()));
     }
@@ -71,6 +71,20 @@ pub fn install(binary: &Path, dir: &Path) -> Result<Installed, String> {
         link,
         unchanged: false,
     })
+}
+
+#[cfg(unix)]
+fn symlink(binary: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(binary, link)
+}
+
+/// Symlinks need Developer Mode or admin rights on Windows.
+#[cfg(windows)]
+fn symlink(_: &Path, _: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "installing the 'rift' command is not supported on Windows yet",
+    ))
 }
 
 /// A link target that is a Rift binary (an older build or bundle).
@@ -81,12 +95,12 @@ fn is_rift_binary(target: &Path) -> bool {
 /// Whether `dir` is one of `path`'s entries (a `$PATH` value).
 pub fn on_path(dir: &Path, path: Option<&std::ffi::OsStr>) -> bool {
     let Some(path) = path else { return false };
-    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let canon = |p: &Path| crate::sys::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let want = canon(dir);
     std::env::split_paths(path).any(|p| canon(&p) == want)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
