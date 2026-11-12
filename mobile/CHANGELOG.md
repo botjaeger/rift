@@ -6,6 +6,27 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.9.0 · update 5 — 2026-11-12
+
+See how fast your phone reaches your computer, and what you type shows up sooner.
+
+### New
+
+- **Connection speed** — In Connection (tap the computer's status line), a page shows the round
+  trip to your computer live, with its median, slowest and jitter; the traffic each way; how many
+  screen updates arrive a second; and how long typing and scrolling take to show on your phone.
+
+### Improved
+
+- **Typing to screen** — While a program answers what you type, its updates show at once instead
+  of at the phone's usual pace. Fastest with Rift 0.29.0 on the computer.
+
+### Fixed
+
+- **Running clocks** — A running command's sheet counts up with its card instead of standing
+  still, and a card opened later no longer starts behind.
+- **Rows in Diagnostics** — Labels and values sit in the middle of their rows.
+
 ## 0.9.0 · update 4 — 2026-11-08
 
 Smooth scrolling in Claude Code and the shell.

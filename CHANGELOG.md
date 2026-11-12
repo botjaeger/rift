@@ -8,6 +8,17 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.29.0 — 2026-11-12
+
+Typing from your phone shows up sooner.
+
+### Improved
+
+- **Typing from your phone** — What you type or send from your phone into Claude Code, the shell
+  or another program on its normal screen now reaches the phone within a frame or two, instead of
+  waiting for the computer's next regular check. The phone's new Connection speed page shows the
+  delay (Rift for iPhone and Android 0.9.0 · update 5).
+
 ## 0.28.1 — 2026-11-08
 
 ### Fixed
