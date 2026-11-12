@@ -228,6 +228,40 @@ describe("terminal touch scrolling", () => {
   });
 });
 
+describe("following the end", () => {
+  const screen = {
+    cols: 20, rows: 4, alt: false, cursor: null, fg: null, bg: null, rules: new Map(), stale: false, ageMs: null,
+    lines: [0, 1, 2, 3].map((n) => [[String(n), null, null, 0]]),
+  };
+  const ended = (y: number) => ({ nativeEvent: { contentOffset: { x: 0, y }, contentSize: { width: 300, height: 1000 }, layoutMeasurement: { width: 300, height: 300 } } });
+
+  it("the view's own scroll ending above the end (iOS's momentum end, output grew meanwhile) keeps it following; a finger's does not", () => {
+    const h = harness(false, { screen, canScroll: false });
+    const view = h.find(h.tree, (n) => n.type === "ScrollView")!;
+    const scroller = { scrollTo: vi.fn(), scrollToEnd: vi.fn() };
+    (view.props.ref as { current: unknown }).current = scroller;
+    const moved = () => scroller.scrollTo.mock.calls.length + scroller.scrollToEnd.mock.calls.length;
+    const call = (name: string, ...args: unknown[]) => (view.props[name] as (...a: unknown[]) => void)(...args);
+    // a new tab: the program's output arrives after the view mounted, and the view scrolls itself to it
+    call("onContentSizeChange", 300, 1000);
+    expect(moved()).toBeGreaterThan(0);
+    call("onMomentumScrollEnd", ended(400));
+    const before = moved();
+    call("onContentSizeChange", 300, 1100);
+    expect(moved()).toBeGreaterThan(before);
+    // the user drags up and lets go there: new output leaves the view where they put it
+    call("onScrollBeginDrag");
+    call("onScrollEndDrag", ended(200));
+    call("onMomentumScrollEnd", ended(150));
+    vi.advanceTimersByTime(400);
+    const read = moved();
+    call("onContentSizeChange", 300, 1200);
+    vi.advanceTimersByTime(400);
+    expect(moved()).toBe(read);
+    h.unmount();
+  });
+});
+
 describe("the lines above a primary screen (feature `history`)", () => {
   // Rift's view of a pane, its first row line 500 of numbering 7
   const styled = (alt = false) => ({

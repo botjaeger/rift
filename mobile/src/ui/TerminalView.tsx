@@ -58,7 +58,7 @@ import { promptText, textToCopy } from "@/selection";
 import { SelectionBar } from "./SelectionBar";
 import * as haptics from "@/haptics";
 import { rowWithPaste } from "@/controlKeys";
-import { CELL_RATIO, rowKeys, textRoom, cellAt, cursorScrollY, drawnText, fitArea, fitFont, lastTextRow, lineAt, linkAt, markLinks, openableLink, ordered, screenLinks, screenSpan, selectionText, wordAt, wordStep, type Cell, LINE_RATIO, rowPieces, rowSegments, screenDefaults, segmentColors, showsKeyRow, type Piece, type ScreenLink } from "@/terminal";
+import { CELL_RATIO, rowKeys, textRoom, atEnd, cellAt, cursorScrollY, drawnText, fitArea, fitFont, lastTextRow, lineAt, linkAt, markLinks, openableLink, ordered, screenLinks, screenSpan, selectionText, wordAt, wordStep, type Cell, LINE_RATIO, rowPieces, rowSegments, screenDefaults, segmentColors, showsKeyRow, type Piece, type ScreenLink } from "@/terminal";
 import { ControlRow, NO_STICKY, type Sticky } from "./ControlRow";
 import { ScreenSkeleton } from "./PaneLoading";
 import { useOpenShell } from "./useOpenShell";
@@ -799,9 +799,20 @@ export function TerminalView({
     });
   }, [historyOn, online, cache, drawnFrom, drawnTo, sbTop, retry, hostKey, paneId]);
 
+  // the screen as last rendered: the second try below runs after newer frames came, and an older
+  // screen's cursor would scroll the view back up to where the end was then
+  const latest = useRef({ screen, keepHeight });
+  useEffect(() => {
+    latest.current = { screen, keepHeight };
+  });
+  // a finger moved the view since this view last moved itself: only then does a scroll's end say
+  // whether the user follows (iOS also ends this view's own scrolls with a momentum end, its offset
+  // already behind the screen that grew meanwhile, which read as "scrolled up" for good)
+  const userScroll = useRef(false);
   const toEnd = () => {
-    const go = () => {
+    const go = ({ screen, keepHeight }: typeof latest.current) => {
       if (!stick.current) return;
+      userScroll.current = false;
       // under a question card: the program kept its height, so its last text, not its blank rows
       if (keepHeight && screen) {
         const y = (lastTextRow(screen.lines) + 1) * rowHeight.current + PADDING - local.current.viewH;
@@ -813,19 +824,21 @@ export function TerminalView({
         else scroller.current?.scrollToEnd({ animated: false });
       }
     };
-    go();
+    go({ screen, keepHeight });
     // again once the layout (and the keyboard's animation) has settled
-    setTimeout(go, 350);
+    setTimeout(() => go(latest.current), 350);
   };
   const onScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
-    const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
-    stick.current = contentOffset.y + layoutMeasurement.height >= contentSize.height - BOTTOM_SLOP;
-    setFollowing(stick.current);
     trackLocal(e);
+    if (!userScroll.current) return;
+    const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
+    stick.current = atEnd(contentOffset.y, contentSize.height, layoutMeasurement.height, BOTTOM_SLOP);
+    setFollowing(stick.current);
   };
   // a finger on the scroller is reading, not following: new output must not pull the view back
   // to the end under it (judged again where the drag or its fling ends)
   const onDragStart = () => {
+    userScroll.current = true;
     stick.current = false;
     setFollowing(false);
   };

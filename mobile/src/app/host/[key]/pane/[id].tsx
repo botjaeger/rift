@@ -94,6 +94,8 @@ export default function PaneScreen() {
   const insets = useSafeAreaInsets();
   const list = useRef<FlashListRef<PaneItem>>(null);
   const atBottom = useRef(true);
+  // a finger moved the list since it last scrolled itself (onScrollEnd)
+  const dragged = useRef(false);
   const [menu, setMenu] = useState(false);
   // the computer menu (the header's name)
   const [computers, setComputers] = useState(false);
@@ -145,7 +147,9 @@ export default function PaneScreen() {
     // the list shrinks as the keyboard comes up (and grows as it goes): keep its end in sight once
     // it has (the screen's own ScrollView follows its end itself)
     const toEnd = () => {
-      if (atBottom.current) list.current?.scrollToEnd({ animated: false });
+      if (!atBottom.current) return;
+      dragged.current = false;
+      list.current?.scrollToEnd({ animated: false });
     };
     const settled = Keyboard.addListener("keyboardDidShow", toEnd);
     const closed = Keyboard.addListener("keyboardDidHide", toEnd);
@@ -333,15 +337,21 @@ export default function PaneScreen() {
   const selectionScope = useRef<SelectionScopeHandle>(null);
   // Judged when a drag or fling ends, not on every scroll event: the list shrinking under the
   // keyboard also reports a scroll, with the end now out of reach, and that read as "scrolled up".
+  // Only a scroll a finger started: iOS also ends the list's own scrolls (to the end) with a
+  // momentum end, its offset behind output that came meanwhile.
   const onScrollEnd = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
-    const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
-    atBottom.current = atEnd(contentOffset.y, contentSize.height, layoutMeasurement.height, BOTTOM_SLOP);
+    if (dragged.current) {
+      const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
+      atBottom.current = atEnd(contentOffset.y, contentSize.height, layoutMeasurement.height, BOTTOM_SLOP);
+    }
     // the selected field moved: a tap on it (or its handles) must still keep the selection
     selectionScope.current?.refresh();
   }, []);
 
   const onContentSizeChange = useCallback(() => {
-    if (atBottom.current) list.current?.scrollToEnd({ animated: false });
+    if (!atBottom.current) return;
+    dragged.current = false;
+    list.current?.scrollToEnd({ animated: false });
   }, []);
 
   // the tab's panes: the picker below the header switches between them
@@ -769,6 +779,7 @@ export default function PaneScreen() {
                     : {}
                 }
                 onScrollBeginDrag={() => {
+                  dragged.current = true;
                   atBottom.current = false;
                 }}
                 onScrollEndDrag={onScrollEnd}
