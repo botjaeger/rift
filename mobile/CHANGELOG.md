@@ -6,6 +6,30 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.9.0 · update 6 — 2026-11-13
+
+A new tab follows its output to the end, and cards show what they hide.
+
+### Improved
+
+- **Cards** — A card says how many lines of output it hides ("299 more lines"), and while you
+  search, it shows the line that matched instead of its first line.
+- **Block sheet** — Long output fills the sheet and scrolls inside its box, with Copy staying in
+  place; a command without output takes one line. The subtitle no longer repeats the folder.
+- **Tabs** — Each row starts with its program's icon, so tabs in the same folder are told apart.
+- **Time on tab** — The time chip reads "2m on tab" instead of "last 2m".
+- **Changes chip** — When it doesn't fit, it shows the number of changed files instead of a
+  number cut in half.
+- **Connection** — On the computer page, Connection opens the Connection sheet with its speed
+  page. The computer menu's line reads "How it is reached, and how fast".
+- **Show the command** — The example under this setting starts with "Shows as", so it no longer
+  reads like a real failure.
+
+### Fixed
+
+- **New tabs** — A tab opened from the phone, such as Claude Code, now follows its output to the
+  bottom instead of stopping halfway.
+
 ## 0.9.0 · update 5 — 2026-11-12
 
 See how fast your phone reaches your computer, and what you type shows up sooner.
