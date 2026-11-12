@@ -322,14 +322,21 @@ describe("Connection sheet: one line per path, the one in use ticked, Test again
   const lan = { kind: "lan" as const, address: "192.168.1.15:7878" };
   const relay = { kind: "relay" as const, url: "wss://relay.example.com" };
   const c = conn({ path: lan, paths: [status(lan, { state: "ok", latencyMs: 2 }), status(relay, {})] });
+  const push = vi.fn();
   const deps = uiDeps("ios", {
-    "expo-router": { useRouter: () => ({ back: vi.fn(), replace: vi.fn(), canGoBack: () => true }) },
+    "expo-router": { useRouter: () => ({ back: vi.fn(), replace: vi.fn(), canGoBack: () => true, push }) },
     "@/runtime": { fleet: { retry: vi.fn() }, useApp: () => ({ hosts: [host("A", "studio-mac", c)] }), useLock: () => ({ locked: false, covered: false }) },
     "./connStatus": connStatus,
     "./useNow": { useNow: () => NOW },
   });
   const { ConnectionSheet } = load("ui/ConnectionSheet.tsx", deps) as { ConnectionSheet: (p: object) => unknown };
   const tree = render({ type: ConnectionSheet, props: { hostKey: "A", children: [] } });
+
+  it("opens Connection speed for this computer from its row", () => {
+    const row = findAll(tree, (n) => n.props.accessibilityLabel === "Connection speed, Last round trip 2 ms")[0]!;
+    (row.props.onPress as () => void)();
+    expect(push).toHaveBeenCalledWith({ pathname: "/speed", params: { key: "A" } });
+  });
 
   it("says it is connected under the title", () => {
     expect(textOf(tree)).toContain("studio-mac · connected");
@@ -339,12 +346,13 @@ describe("Connection sheet: one line per path, the one in use ticked, Test again
     expect(rows.map((r) => textOf(r))).toEqual([
       "This network192.168.1.15 · in use · 2 ms",
       "Relayrelay.example.com · not needed on the same network",
+      "Connection speedLast round trip 2 ms",
       "End-to-end encryptedThe relay passes bytes it cannot read.",
     ]);
-    expect(rows.map((r) => findAll(r, (n) => n.type === "Icon" && n.props.name === "check").length)).toEqual([1, 0, 0]);
+    expect(rows.map((r) => findAll(r, (n) => n.type === "Icon" && n.props.name === "check").length)).toEqual([1, 0, 0, 0]);
     expect(style(byText(rows[0], "This network"))).toMatchObject({ fontSize: 16, lineHeight: 21, color: stubColors.text });
     expect(style(byText(rows[0], "192.168.1.15 · in use · 2 ms"))).toMatchObject({ fontFamily: "ui", fontSize: 13, lineHeight: 17 });
-    const lock = findAll(rows[2], (n) => style(n).width === 28)[0]!;
+    const lock = findAll(rows[3], (n) => style(n).width === 28)[0]!;
     expect(style(lock)).toMatchObject({ height: 28, borderRadius: 8, backgroundColor: stubColors.faint });
   });
   it("Test again pinned to the foot of a sheet the board's 541 pt tall", () => {

@@ -1995,7 +1995,9 @@ on the desktop (also for shells a phone started while no window is open).
   start reopens the pane shown last. The pane's header names the computer: a
   tap opens the computer menu (every paired computer with where it is, the one on screen
   ticked, *Connection*, *All portals*); *Connection* lists each path in one line (*192.168.1.15 ·
-  in use · 2 ms*, the one in use ticked) and offers *Test again*
+  in use · 2 ms*, the one in use ticked), *Connection speed* (a page with the live round trip,
+  traffic each way, screen updates per second, and the measured delay from typing or scrolling,
+  after a second without input, to the next screen update) and *Test again*
   while connected (it connects again, this network first) or *Try again now*. *Search output*
   (⌕) and ⋯ are two round glass buttons beside it, over a full-screen program too. Under it, in
   the same header block, a tab row: ‹ and › (plain grey chevrons at the row's two ends, or a fling across the row) go to the

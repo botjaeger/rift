@@ -25,6 +25,7 @@ import { BatchedStore, FRAME_MS } from "./protocol/batch";
 import { MAX_OUTPUT_LINES, MAX_TEXT_BYTES, MAX_UPLOAD_BYTES, textProblem } from "./protocol/types";
 import { UPLOAD_TIMEOUT_MS, uploadChunks, uploadRefusal } from "./upload";
 import { RiftClient, type ConnState, type Failure, type SocketFactory } from "./protocol/client";
+import type { SpeedSnapshot } from "./protocol/speed";
 import { canLoadOlder, reducePane, reduceScreen, screenShapeSame, staleScreen, type PaneState, type ScreenState } from "./protocol/store";
 import { findPane, tabTitle } from "./topology";
 import {
@@ -585,20 +586,25 @@ export class Fleet {
           this.dropUnreachableAsks(key, msg.windows, since);
           this.finishMissedAsks(key, msg.windows, since);
         },
+        // within a frame while the program answers this device's typing or scrolling (the
+        // gateway then reads the pane every 16 ms); else at the store's pace
         onPane: (msg) =>
-          this.store.update((s) => {
-            if (s.pane?.host !== key || s.pane.paneId !== msg.pane) return s;
-            const state = reducePane(s.pane.state, msg);
-            return {
-              ...s,
-              pane: {
-                ...s.pane,
-                state,
-                loadingOlder: msg.t === "older" ? false : s.pane.loadingOlder,
-                earlier: keepEarlier(s.pane.earlier, state),
-              },
-            };
-          }),
+          this.store.update(
+            (s) => {
+              if (s.pane?.host !== key || s.pane.paneId !== msg.pane) return s;
+              const state = reducePane(s.pane.state, msg);
+              return {
+                ...s,
+                pane: {
+                  ...s.pane,
+                  state,
+                  loadingOlder: msg.t === "older" ? false : s.pane.loadingOlder,
+                  earlier: keepEarlier(s.pane.earlier, state),
+                },
+              };
+            },
+            client.meter.answering(Date.now()) ? FRAME_MS : undefined,
+          ),
         // a screen shows within a frame: the gateway already paces it (a scrolled program's
         // redraws every 16 ms, else every 100 ms)
         onScreen: (msg, synthetic) => {
@@ -879,6 +885,17 @@ export class Fleet {
     } else {
       this.connect(view.record);
     }
+  }
+
+  /** What the connection to `key` measured so far (the Connection speed page); null without one. */
+  speed(key: string, now: number = Date.now()): SpeedSnapshot | null {
+    const c = this.clients.get(key);
+    return c && c.connState.status === "open" ? c.meter.snapshot(now) : null;
+  }
+
+  /** Pings `key` every second while the Connection speed page is open (`on`). */
+  probe(key: string, on: boolean): void {
+    this.clients.get(key)?.setProbing(on);
   }
 
   // --- pairing ---------------------------------------------------------------------------------

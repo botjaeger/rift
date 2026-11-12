@@ -13,6 +13,7 @@ import {
 } from "../noise/noise";
 import { FramingError, Reassembler, frameMessage } from "./framing";
 import { endpointsFor, relayConnectUrl, type Endpoint } from "./relay";
+import { PROBE_INTERVAL_MS, SpeedMeter } from "./speed";
 import {
   MAX_CLIENT_MESSAGE_BYTES,
   MAX_UPLOAD_MESSAGE_BYTES,
@@ -302,9 +303,16 @@ export class RiftClient {
   /** When the current attempt began (epoch ms), and its error so far (a socket error, the relay's close reason). */
   private attemptAt = 0;
   private attemptError: string | null = null;
-  /** The last ping sent: its number and when (epoch ms), for the round trip. */
-  private pingSent: { n: number; at: number } | null = null;
+  /**
+   * Pings waiting for their pong: number to when it went out (epoch ms), for the round trip.
+   * Several while probing on a link slower than the probe interval; the oldest are let go.
+   */
+  private pingsSent = new Map<number, number>();
   private pingTimer: ReturnType<typeof setInterval> | null = null;
+  /** The Connection speed page is open: ping every PROBE_INTERVAL_MS instead of the keep-alive's. */
+  private speedProbe = false;
+  /** What this connection measures (the Connection speed page). */
+  readonly meter = new SpeedMeter();
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private handshakeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -575,7 +583,9 @@ export class RiftClient {
   scroll(pane: number, lines: number): string | null {
     if (!this.authed) return null;
     const id = `s${++this.idN}`;
-    return this.send({ t: "scroll", id, pane, lines }) ? id : null;
+    if (!this.send({ t: "scroll", id, pane, lines })) return null;
+    this.meter.scrolled(Date.now());
+    return id;
   }
 
   /**
@@ -652,6 +662,7 @@ export class RiftClient {
   /** Queues a `keys` / `text` message and sends what the rate allows; false when it cannot be sent. */
   private sendInput(msg: ClientMsg): boolean {
     if (!this.sendCipher || utf8Encode(JSON.stringify(msg)).length > inputLimit(msg)) return false;
+    this.meter.input(Date.now());
     this.inputQueue.push(msg);
     this.drainInput();
     return true;
@@ -802,7 +813,9 @@ export class RiftClient {
   run(pane: number, command: string): string | null {
     if (!this.authed) return null;
     const id = `r${++this.idN}`;
-    return this.send({ t: "run", id, pane, command }) ? id : null;
+    if (!this.send({ t: "run", id, pane, command })) return null;
+    this.meter.input(Date.now());
+    return id;
   }
 
   /**
@@ -951,6 +964,7 @@ export class RiftClient {
     ws.onmessage = (ev) => {
       if (this.ws !== ws) return;
       const bytes = toBytes(ev.data);
+      if (bytes) this.meter.received(bytes.length);
       if (!bytes) {
         // Text frames are a protocol violation (binary only).
         this.dropAttempt("unexpected text frame");
@@ -1017,14 +1031,36 @@ export class RiftClient {
     this.hs = null;
     if (this.handshakeTimer) clearTimeout(this.handshakeTimer);
     this.handshakeTimer = null;
-    this.pingTimer = setInterval(() => this.ping(), PING_INTERVAL_MS);
+    this.startPings();
     this.touch();
+  }
+
+  private startPings(): void {
+    if (this.pingTimer) clearInterval(this.pingTimer);
+    this.pingTimer = setInterval(() => this.ping(), this.speedProbe ? PROBE_INTERVAL_MS : PING_INTERVAL_MS);
+  }
+
+  /**
+   * Pings every PROBE_INTERVAL_MS while `on` (the Connection speed page is open), the first at
+   * once; back to the keep-alive's interval when off.
+   */
+  setProbing(on: boolean): void {
+    if (this.speedProbe === on) return;
+    this.speedProbe = on;
+    if (!this.sendCipher) return;
+    this.startPings();
+    if (on) this.ping();
   }
 
   /** A keep-alive ping, timed: its pong gives the path's round trip. */
   private ping(): void {
     const n = ++this.pingN;
-    this.pingSent = { n, at: Date.now() };
+    this.pingsSent.set(n, Date.now());
+    // pongs that never came (a dropped link reconnects anyway): keep the last few
+    for (const old of this.pingsSent.keys()) {
+      if (this.pingsSent.size <= 8) break;
+      this.pingsSent.delete(old);
+    }
     this.send({ t: "ping", n });
   }
 
@@ -1062,6 +1098,8 @@ export class RiftClient {
               : { ...p, state: "idle", error: null, waitedMs: null, latencyMs: null, reached: false },
           ),
         });
+        // a new connection's numbers start over
+        this.meter.reset(Date.now());
         // the pane first: what is on screen comes back before anything else is sent
         if (this.pane !== null) this.sendSubscribe();
         this.events.onWelcome?.(msg);
@@ -1075,6 +1113,7 @@ export class RiftClient {
         if (msg.pane !== this.pane) return;
         this.lastSeq = msg.seq;
         this.resyncing = false;
+        this.meter.frame(Date.now());
         this.events.onPane?.(msg);
         return;
       case "update":
@@ -1117,6 +1156,7 @@ export class RiftClient {
         if (msg.pane !== this.pane) return;
         this.screenLive = true;
         this.stopScreenResume();
+        this.meter.frame(Date.now());
         this.events.onScreen?.(msg);
         return;
       case "screen_end":
@@ -1138,10 +1178,11 @@ export class RiftClient {
         this.setState({ closing: { reason: msg.reason, backInS: msg.back_in_s ?? null, at: Date.now() } });
         return;
       case "pong": {
-        const sent = this.pingSent;
-        if (sent?.n !== msg.n) return;
-        this.pingSent = null;
-        const ms = Math.max(1, Math.round(Date.now() - sent.at));
+        const at = this.pingsSent.get(msg.n);
+        if (at === undefined) return;
+        this.pingsSent.delete(msg.n);
+        const ms = Math.max(1, Math.round(Date.now() - at));
+        this.meter.pong(ms);
         if (this.state.paths[this.current]?.latencyMs !== ms) this.setState({ paths: this.patchPath({ latencyMs: ms }) });
         return;
       }
@@ -1168,6 +1209,7 @@ export class RiftClient {
     }
     this.lastSeq = msg.seq;
     this.resyncing = false;
+    this.meter.frame(Date.now());
     this.events.onPane?.(msg);
   }
 
@@ -1217,6 +1259,7 @@ export class RiftClient {
   }
 
   private sendRaw(bytes: Uint8Array): void {
+    this.meter.sent(bytes.length);
     this.ws?.send(exactBuffer(bytes));
   }
 

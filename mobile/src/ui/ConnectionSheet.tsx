@@ -1,6 +1,7 @@
 import { useRouter } from "expo-router";
 import { useEffect } from "react";
-import { Text, View } from "react-native";
+import { Pressable, Text, View } from "react-native";
+import type { ConnState } from "@/protocol/client";
 import { fleet, useApp } from "@/runtime";
 import { Button } from "./Button";
 import { hostLine, lastSeenAt, pathLine, pathRows, type LineTone, type PathTone } from "./connStatus";
@@ -26,6 +27,12 @@ const noteColor = fromPalette((colors): Record<PathTone, string> => ({
 }));
 
 const TONE_WORD: Record<PathTone, string> = { ok: "in use", busy: "connecting", bad: "failed", off: "not used" };
+
+/** The speed row's line: the last ping's round trip once one came back. */
+const speedLine = (conn: Pick<ConnState, "paths">) => {
+  const ms = conn.paths.find((p) => p.state === "ok")?.latencyMs;
+  return ms ? `Last round trip ${ms} ms` : "Round trip, traffic and typing delay";
+};
 
 /**
  * "Connection" (the New Portals board): how a computer is being reached, one row per path (this
@@ -80,6 +87,24 @@ export function ConnectionSheet({ hostKey }: { hostKey: string }) {
             {r.tone === "ok" ? <Icon name="check" size={glyph(16, 11)} color={colors.accent} /> : null}
           </View>
         ))}
+        {open ? (
+          <Pressable
+            style={({ pressed }) => [styles.row, styles.rule, pressed && { backgroundColor: colors.faint }]}
+            accessibilityRole="button"
+            accessibilityLabel={`Connection speed, ${speedLine(host.conn)}`}
+            accessibilityHint="Round trip, traffic, and how long typing and scrolling take to show"
+            onPress={() => router.push({ pathname: "/speed", params: { key: hostKey } })}
+          >
+            <View style={styles.lockTile}>
+              <Icon name="wifi" size={glyph(12, 11)} color={colors.textMuted} />
+            </View>
+            <View style={styles.rowText}>
+              <Text style={styles.rowTitle}>Connection speed</Text>
+              <Text style={styles.line}>{speedLine(host.conn)}</Text>
+            </View>
+            <Icon name="chevronRight" size={glyph(14, 11)} color={colors.textMuted} />
+          </Pressable>
+        ) : null}
         <View style={styles.row} accessible>
           <View style={styles.lockTile}>
             <Icon name="lock" size={glyph(12, 11)} color={colors.textMuted} />

@@ -18,6 +18,7 @@ import {
   UPLOAD_LIVE_MS,
   UPLOAD_POLL_MS,
 } from "../src/protocol/client";
+import { PROBE_INTERVAL_MS, QUIET_MS } from "../src/protocol/speed";
 import type { Block } from "../src/protocol/types";
 import { FakeGatewaySocket, gatewayKey, rng } from "./helpers/gateway";
 
@@ -235,6 +236,48 @@ describe("RiftClient session", () => {
       { t: "ping", n: 3 },
       { t: "ping", n: 4 },
     ]);
+  });
+
+  it("probes every second while asked, matching pongs that come back out of order", () => {
+    const t = connected();
+    const pings = () => t.last().sent.filter((m) => (m as { t: string }).t === "ping");
+    expect(pings()).toHaveLength(1);
+    t.client.setProbing(true);
+    expect(pings()).toHaveLength(2); // at once
+    vi.advanceTimersByTime(3 * PROBE_INTERVAL_MS);
+    expect(pings()).toHaveLength(5);
+    // a slow link: pongs of earlier pings arrive after later ones were sent
+    t.last().recv({ t: "pong", n: 4 });
+    t.last().recv({ t: "pong", n: 2 });
+    expect(t.client.meter.snapshot(Date.now()).rtt).toEqual([1000, 3000]);
+    t.client.setProbing(false);
+    const before = pings().length;
+    vi.advanceTimersByTime(PING_INTERVAL_MS - 1);
+    expect(pings()).toHaveLength(before);
+    vi.advanceTimersByTime(1);
+    expect(pings()).toHaveLength(before + 1);
+  });
+
+  it("meters bytes, screen updates and the delay from input to the next update", () => {
+    const t = connected(41);
+    const m = () => t.client.meter.snapshot(Date.now());
+    expect(m().frames).toBe(1); // the snapshot
+    expect(m().bytesIn).toBeGreaterThan(0);
+    expect(m().bytesOut).toBeGreaterThan(0);
+    t.client.text(12, "hi");
+    vi.advanceTimersByTime(70);
+    t.last().recv(update(42));
+    vi.advanceTimersByTime(QUIET_MS);
+    t.client.scroll(12, 3);
+    vi.advanceTimersByTime(25);
+    t.last().recv(update(43));
+    expect(m()).toMatchObject({ frames: 3, echo: [70], scroll: [25] });
+    // a reconnect starts the numbers over
+    t.last().drop();
+    vi.advanceTimersByTime(BACKOFF_CAP_MS);
+    t.last().connect();
+    t.last().recv(welcome);
+    expect(m()).toMatchObject({ frames: 0, echo: [], scroll: [] });
   });
 
   it("measures the path's round trip from the pong of its ping", () => {

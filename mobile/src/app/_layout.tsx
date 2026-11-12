@@ -261,6 +261,8 @@ export default function RootLayout() {
             {/* a question card's Full diff (AskCard.tsx): its own page, not a sheet */}
             <Stack.Screen name="change" options={{ headerShown: false, title: "A change in full" }} />
             <Stack.Screen name="diagnostics" options={{ headerShown: false, title: "Diagnostics" }} />
+            {/* above the Connection sheet it is opened from */}
+            <Stack.Screen name="speed" options={{ headerShown: false, title: "Connection speed", presentation: "fullScreenModal" }} />
             <Stack.Screen name="changelog" options={{ headerShown: false, title: "What's New" }} />
             <Stack.Screen
               name="whats-new"

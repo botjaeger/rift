@@ -5,7 +5,8 @@ import { ACK_TIMEOUT_MS, ASKED_TTL_MS, Fleet, describeCode, MAX_ACTIVITY, canClo
 import { routingId } from "../src/protocol/relay";
 import { LONG_COMMAND_MS } from "../src/notify";
 import { parsePairLink, type PairLink } from "../src/pairing";
-import { PUBLISH_INTERVAL_MS } from "../src/protocol/batch";
+import { FRAME_MS, PUBLISH_INTERVAL_MS } from "../src/protocol/batch";
+import { ANSWER_WINDOW_MS } from "../src/protocol/speed";
 import { MAX_TEXT_BYTES, type Block, type Waiting } from "../src/protocol/types";
 import { HostsStore, MemoryStore, loadLastView, loadPaneTitles, restoreTarget, type HostRecord } from "../src/stores";
 import { terminalInput, textToActions } from "../src/keyboard";
@@ -443,6 +444,36 @@ describe("Fleet operate", () => {
     expect(publishes).toBeGreaterThan(0);
     expect(publishes).toBeLessThanOrEqual(11);
     expect(t.fleet.state.pane?.state?.seq).toBe(1041);
+  });
+
+  it("publishes within a frame while the program answers this device's typing", async () => {
+    const t = await withHost();
+    let publishes = 0;
+    t.fleet.store.subscribe(() => publishes++);
+    const upd = (seq: number) => ({ t: "update" as const, pane: 12, seq, blocks: [block(2, { output: `line ${seq}\n` })], removed: [] });
+    // nothing typed: an update waits for the store's interval
+    t.last().recv(upd(42));
+    vi.advanceTimersByTime(FRAME_MS);
+    const idle = publishes;
+    vi.advanceTimersByTime(PUBLISH_INTERVAL_MS);
+    expect(publishes).toBeGreaterThan(idle);
+    // typed: the answer shows within a frame
+    void t.fleet.sendText(GW_KEY, 12, "y");
+    const before = publishes;
+    t.last().recv(upd(43));
+    vi.advanceTimersByTime(FRAME_MS);
+    expect(publishes).toBeGreaterThan(before);
+    expect(t.fleet.state.pane?.state?.seq).toBe(43);
+    // the window over: the store's pace again (a second update within it waits)
+    vi.advanceTimersByTime(ANSWER_WINDOW_MS);
+    t.last().recv(upd(44));
+    vi.advanceTimersByTime(FRAME_MS);
+    const later = publishes;
+    t.last().recv(upd(45));
+    vi.advanceTimersByTime(FRAME_MS);
+    expect(publishes).toBe(later);
+    vi.advanceTimersByTime(PUBLISH_INTERVAL_MS);
+    expect(publishes).toBeGreaterThan(later);
   });
 
   it("unpair sends forget, closes, and deletes the host", async () => {

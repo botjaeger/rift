@@ -140,11 +140,22 @@ card cannot answer (a password, other input, a view-only device), and from an al
   port left out) and a ✓ on the one in use; the note: "In use · 6 ms" (the round trip of the latest ping; no number until one is answered),
   "No answer on this network (2 s)", "Relay up · your computer has not joined", "The relay
   answered, but your computer is not registered there", or the error the socket reported;
+  while connected, **Connection speed** (the last round trip; opens the page below);
   then **End-to-end encrypted** ("The relay passes bytes it cannot read.") and, at the sheet's
   foot, **Test again** while
   connected (it connects again at once, this network's addresses first, so a phone back on the
   home Wi-Fi leaves the relay), or **Try again now** when the computer cannot be reached. The client records each path's state in `ConnState.paths`
   (`src/protocol/client.ts`); the wording is `src/ui/connStatus.ts` (tested in node).
+- **Connection speed** (a full page over the Connection sheet; `src/app/speed.tsx`): the median
+  round trip in large type with a verdict (*Fast* under 80 ms, *Fair* under 200 ms, else *Slow*);
+  **Round trip** (last, median, slowest 5 %, range, jitter, samples: a ping every second while
+  the page is open, back to the 15 s keep-alive when it closes); **Traffic** (down, up and screen
+  updates per second; bytes received and sent since the connection began, encrypted as on the
+  wire); **Typing to screen** (from what is typed, sent or tapped in the pane to its next screen
+  update) and **Scrolling to screen** (from a scroll to the next update), each timed as the pane
+  is used, only from an input after a second without any (inside a burst the next update may
+  answer an earlier input), a wait no update answers within 5 s dropped. The client's `SpeedMeter`
+  (`src/protocol/speed.ts`, tested in node) counts; a reconnect starts the numbers over.
 - **Tabs** (a full page, from the middle of the pane's tab row; `src/app/tabs.tsx`): every tab of
   that computer, pinned ones first under **Pinned** as on its tab bar, then the rest in the
   computer's tab order. The header (the page header): ‹ Back, "Tabs", the computer and its tab
