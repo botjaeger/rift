@@ -110,6 +110,7 @@ describe("Tabs page: the New Lists board", () => {
       "@/ui/Field": { Field: "Field" },
       "@/ui/FilterChip": { FilterChip: "FilterChip" },
       "@/ui/Icon": { Icon: "Icon" },
+      "@/ui/Avatar": { Tile: "Tile" },
       "@/ui/ListRow": { LIST_ROW_H: 63, ListRow: "ListRow" },
       "@/ui/newTab": { canNewTab: () => true },
       "@/ui/Button": { Button: "Button" },
@@ -159,6 +160,15 @@ describe("Tabs page: the New Lists board", () => {
     const marks = render(row.props.marks) as unknown;
     const badge = findAll(marks, (n) => n.props.accessibilityLabel === "2 panes in project2")[0]!;
     expect(style(badge)).toMatchObject({ borderRadius: 8, borderWidth: 1, borderColor: stubColors.hairline, paddingHorizontal: 6 });
+  });
+  it("each row leads with its program's tile, as on Portals (tabs in one folder share a title)", () => {
+    const l = list(page("all"));
+    const item = l.data.find((i) => i.kind === "row" && i.key.endsWith(":12"))!;
+    const row = render(l.renderItem({ item })) as Node;
+    const lead = row.props.lead as Node;
+    expect(lead.type).toBe("Tile");
+    expect(lead.props).toHaveProperty("agent");
+    expect(lead.props).toHaveProperty("program");
   });
   it("an empty filter: the message centred, title 17, Show all tabs a 48 pt accent text button", () => {
     const l = list(page("needs"));

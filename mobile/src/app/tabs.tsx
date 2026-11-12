@@ -13,6 +13,7 @@ import { Icon } from "@/ui/Icon";
 import { LIST_ROW_H, ListRow } from "@/ui/ListRow";
 import { canNewTab } from "@/ui/newTab";
 import { Button } from "@/ui/Button";
+import { Tile } from "@/ui/Avatar";
 import { ErrorText } from "@/ui/Notice";
 import { IconButton, PageHeader } from "@/ui/Screen";
 import { ui, makeStyles, useColors } from "@/ui/theme";
@@ -320,6 +321,8 @@ const TabsRow = memo(
           <ListRow
             handle={handle}
             movable={grip}
+            // the program's tile, as on Portals: tabs in one folder share a title
+            lead={<Tile agent={r.agent} program={r.program} />}
             title={r.title}
             marks={
               <>

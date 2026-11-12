@@ -242,6 +242,7 @@ describe("Tabs page: sections, and an empty filter that says so and offers the w
       "@/ui/Field": { Field: "Field" },
       "@/ui/FilterChip": { FilterChip: "FilterChip" },
       "@/ui/Icon": { Icon: "Icon" },
+      "@/ui/Avatar": { Tile: "Tile" },
       "@/ui/ListRow": { LIST_ROW_H: 60, ListRow: "ListRow" },
       "@/ui/newTab": { canNewTab: () => true },
       "@/ui/Button": { Button: "Button" },

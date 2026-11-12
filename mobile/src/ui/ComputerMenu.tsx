@@ -87,8 +87,9 @@ export function ComputerMenu({
           </View>
           <View style={styles.text}>
             <Text style={styles.title}>Connection</Text>
+            {/* the computer is named in the row above: the line says what the sheet holds */}
             <Text style={styles.hint} numberOfLines={1}>
-              How this phone reaches {here.record.name}
+              How it is reached, and how fast
             </Text>
           </View>
         </Pressable>

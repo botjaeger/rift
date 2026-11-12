@@ -23,6 +23,7 @@ export function SheetFrame({
   board,
   footer,
   bodyStyle,
+  fill = false,
   children,
 }: {
   title: string;
@@ -35,6 +36,9 @@ export function SheetFrame({
   footer?: ReactNode;
   /** The content's gutter and gaps, when the board's differ (What's new: 18 pt in). */
   bodyStyle?: StyleProp<ViewStyle>;
+  /** The content fills the sheet and does not scroll: a child scrolls itself (Block's long
+   * output), so the room above the footer is its bound instead of running on under it. */
+  fill?: boolean;
   children: ReactNode;
 }) {
   const styles = useStyles();
@@ -57,9 +61,13 @@ export function SheetFrame({
       importantForAccessibility={hidden ? "no-hide-descendants" : "auto"}
     >
       <SheetHeader title={title} subtitle={subtitle} subtitleColor={subtitleColor} titleMono={titleMono} subtitleMono={subtitleMono} onClose={onClose} />
-      <ScrollView style={styles.grow} contentContainerStyle={[styles.body, bodyStyle, { paddingBottom: footer ? 12 : foot }]} keyboardShouldPersistTaps="handled">
-        {children}
-      </ScrollView>
+      {fill ? (
+        <View style={[styles.grow, styles.body, bodyStyle, { paddingBottom: footer ? 12 : foot }]}>{children}</View>
+      ) : (
+        <ScrollView style={styles.grow} contentContainerStyle={[styles.body, bodyStyle, { paddingBottom: footer ? 12 : foot }]} keyboardShouldPersistTaps="handled">
+          {children}
+        </ScrollView>
+      )}
       {footer ? <View style={[styles.pinned, { paddingBottom: foot }]}>{footer}</View> : null}
     </View>
   );

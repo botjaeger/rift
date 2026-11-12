@@ -162,7 +162,8 @@ card cannot answer (a password, other input, a view-only device), and from an al
   count, and **+** New tab (operating devices only; Split pane is in the pane's ⋯). A search field
   ("Search tabs") matches a tab's name, what its lead pane does and any pane's folder; filter
   chips: All, Needs you, Working, Failed, each with its count. A 62 pt row (`src/ui/ListRow.tsx`):
-  the grip (on the whole list, a lone pinned tab's too), the tab's name (a pin on a pinned tab,
+  the grip (on the whole list, a lone pinned tab's too), the program's tile as on Portals (tabs in
+  one folder share a name), the tab's name (a pin on a pinned tab,
   "N panes" on a split one, which opens its Panes page), what its lead pane does (Inter), and on
   the right its dot and short time as on Portals, then ✕; the open tab is tinted. A tap goes to that tab's pane in place of this one
   (Back still leads where it led; opened from Portals' **Show all**, the pane opens over Portals);
@@ -323,7 +324,9 @@ card cannot answer (a password, other input, a view-only device), and from an al
   that needs attention; **+N** opens the *This pane* sheet, `pane-chips`, listing every chip with
   its full value; a tap opens the chip's menu, Change folder or Switch branch). The folder chip
   shows the whole path ("~/code/project1"). A timer (Time on tab, the date or clock) is plain
-  text after the chips (Time on tab as "· last 2m"), still opening its card. A
+  text after the chips (Time on tab as "· 2m on tab"), still opening its card. The last chip
+  that fits only in part ends in …; the changes chip is cut to its file count ("± 2") instead of
+  a count cut mid-number. A
   desktop without the feature gets the folder, branch and changed-files chips from `cwd` and `git`.
   Then the suggestions while typing (the desktop's completions for what is typed and
   this pane's history, feature `complete`; else its recent commands), the first marked in the
@@ -344,7 +347,8 @@ card cannot answer (a password, other input, a view-only device), and from an al
 - **Block cards** (the New Blocks board): 12 pt corners, a thin border in the state's colour, the
   command on one line and its status as plain JetBrains Mono in the state's colour, output in
   JetBrains Mono 12/17.
-  Succeeded: the command, "✓ 1.2s" and the first output line; output that is a table
+  Succeeded: the command, "✓ 1.2s" and the first output line (under Search output, the first line
+  that matched), then "299 more lines" when there are more; output that is a table
   (`docker ps`, `kubectl get pods`) is a list of rows, with **Raw** / **As list** under it.
   Failed: the command, "✕ 127", the message (the last output line) and the path it names,
   **Run again** (not on a view-only device) and **Copy error** (not for a command that printed
@@ -352,9 +356,9 @@ card cannot answer (a password, other input, a view-only device), and from an al
   line (a log line with a level, as "api-1 | [info] GET /health 200 3ms", shows as source, level,
   message and time), **Stop** (control C; not for a view-only device) and **Notify when done**
   (**Notifies when done** once on).
-- **Block sheet** (a tap on a card's header): the command as the title, then the status, how long
-  and where ("Failed with 1 · 2.4 s · ~/code/project1"; "started 2 min ago" while it runs), the folder and branch, the command with a copy button, the output
-  ("OUTPUT · 12 LINES", in a 150 pt box; selecting any of it copies the selection) with **Copy** for all of it and **Load earlier output** where the computer offers it
+- **Block sheet** (a tap on a card's header): the command as the title, then the status and how long
+  ("Failed with 1 · 2.4 s"; "started 2 min ago" while it runs), the folder (cut at its start) and branch, the command with a copy button, the output
+  ("OUTPUT · 12 LINES", in a 150 pt box; a longer output takes the room down to the sheet's foot and scrolls inside it, the rest of the sheet staying put; "(no output)" is one line; selecting any of it copies the selection) with **Copy** for all of it and **Load earlier output** where the computer offers it
   (500 lines a press), then, pinned to the sheet's foot, **Run again** (**Stop** while it runs) and **Edit**, which puts the
   command in the pane's command line (asking first when that holds other text). Run again is off
   while the pane runs a program or the computer is not connected; view-only devices get no buttons.
@@ -403,7 +407,8 @@ card cannot answer (a password, other input, a view-only device), and from an al
   - **Computers**: each paired computer (Portals' dot, and where it is: "This network · can run
     commands", "Over the relay · view only", "Can’t reach it") opens its page; **Pair a computer**.
     A computer's page: its system and pairing day under the name ("macOS · paired 3 Nov"), then
-    **This computer**: **Connection** (This network, Over the relay, Can’t reach it), **Access**
+    **This computer**: **Connection** (This network, Over the relay, Can’t reach it; opens the
+    Connection sheet, as the computer menu does), **Access**
     (Can run commands / View only), **Theme** (the theme it sends, "Dracula"; opens Appearance),
     **Notifications** (finished, failed and questions), and **Unpair this computer**, an outlined
     red button with what it means under it (a second tap, "Tap again to unpair", does it).

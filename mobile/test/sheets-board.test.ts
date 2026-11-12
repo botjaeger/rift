@@ -127,13 +127,16 @@ describe("the sheets' contents", () => {
     expect(c).toContain("❯ ");
     expect(c).toContain("padding: 12,");
   });
-  it("Block: Inter title, grey subtitle with the duration and the folder, uppercase caption, 150 pt of output", () => {
+  it("Block: Inter title, grey subtitle with the duration (the folder on its own line), uppercase caption, 150 pt of output growing into the sheet when longer", () => {
     const b = src("app/block.tsx");
     expect(b).not.toContain("titleMono");
     expect(b).not.toContain("subtitleColor");
     expect(b).toContain("spacedDuration(block!.duration_ms)");
+    // the subtitle no longer repeats the folder, cut at its end
+    expect(b).not.toMatch(/spacedDuration\(block!\.duration_ms\),\s+place\[0\]/);
     expect(b).toContain('textTransform: "uppercase"');
     expect(b).toContain("outBox: { height: 172,");
+    expect(b).toContain("outGrow: { height: undefined, flexGrow: 1, flexBasis: 0, minHeight: 172 }");
     expect(b).toContain("size={12} lineHeight={18}");
     expect(b).toContain("SelectableText text={`$ ${command");
   });

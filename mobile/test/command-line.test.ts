@@ -146,8 +146,8 @@ describe("context you can tap", () => {
   it("the timer is plain text after the chips, still opening its card", () => {
     const { tree, onOpen } = draw([chip("cwd", "project1", "dirs"), chip("elapsed", "2m", "elapsed"), chip("git_branch", "main", "branches")]);
     const timer = findAll(tree, (n) => n.type === "Pressable" && n.props.accessibilityLabel === "elapsed: 2m")[0]!;
-    // Time on tab reads "last 2m" (the New Blocks board); the clock and the date as they are
-    expect(textOf(timer)).toBe("· last 2m");
+    // Time on tab reads "2m on tab" (not "last 2m": no command ran 2 minutes ago); the clock and the date as they are
+    expect(textOf(timer)).toBe("· 2m on tab");
     expect(promptChips.timerText(chip("time24", "09:41", null))).toBe("09:41");
     // no chip's border or fill
     expect(flat(timer.props.style).borderWidth).toBeUndefined();

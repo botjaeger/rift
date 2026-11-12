@@ -12,15 +12,16 @@ const SLOP = (44 - CHIP_HEIGHT) / 2;
 const widthKey = (c: ChipItem) => `${c.id}|${c.icon}|${c.short.map((p) => p.text).join("\u0000")}`;
 
 /** One chip's contents: its glyph and its parts, each in its own colour (the desktop's prompt chip). */
-function ChipBody({ item }: { item: ChipItem }) {
+function ChipBody({ item, cut = false }: { item: ChipItem; cut?: boolean }) {
   const colors = useColors();
   const styles = useStyles();
+  const parts = (cut && item.tight) || item.short;
   return (
     <>
       <Icon name={item.icon as IconName} size={13} color={colors[item.iconColor]} />
       {/* one Text, so a chip that is cut short ends in … as a whole instead of each part shrinking */}
       <Text style={styles.part} numberOfLines={1} ellipsizeMode="tail">
-        {item.short.map((p, i) => (
+        {parts.map((p, i) => (
           <Text key={i} style={{ color: colors[p.color] }}>
             {i > 0 ? " " : ""}
             {p.text}
@@ -36,7 +37,7 @@ function ChipBody({ item }: { item: ChipItem }) {
  * The chips that fit (their real widths, measured from an invisible copy of the row) are drawn in
  * the pane's order; the rest fold into "+N" at the end, with a dot for each folded chip that needs
  * attention, which opens the "This pane" sheet listing all of them. A timer (time on tab, the clock)
- * is plain text after them ("· last 2m"), still opening its card when it has one.
+ * is plain text after them ("· 2m on tab"), still opening its card when it has one.
  */
 export function ChipRow({
   items: all,
@@ -59,9 +60,14 @@ export function ChipRow({
   const timer = all.find((c) => isTimer(c.id)) ?? null;
   const items = timer ? all.filter((c) => c !== timer) : all;
   const keys = items.map(widthKey);
+  // a chip's tight form (whole parts only) is measured too: the least room it may be cut to
+  const tightKeys = items.map((c, i) => (c.tight ? `${keys[i]}|tight` : null));
   const room = avail - (timer ? timerW + CHIP_GAP : 0);
-  const measured = avail > 0 && moreBase > 0 && (!timer || timerW > 0) && keys.every((k) => widths[k] !== undefined);
-  const fit = measured ? fitChips(keys.map((k) => widths[k]!), items.map((c) => c.attention), room, moreBase) : null;
+  const measured =
+    avail > 0 && moreBase > 0 && (!timer || timerW > 0) && [...keys, ...tightKeys].every((k) => k === null || widths[k] !== undefined);
+  const fit = measured
+    ? fitChips(keys.map((k) => widths[k]!), items.map((c) => c.attention), room, moreBase, tightKeys.map((k) => (k === null ? undefined : widths[k])))
+    : null;
   const shown = fit ? items.slice(0, fit.count) : [];
   const hidden = fit ? items.slice(fit.count) : [];
   const dots = hidden.filter((c) => c.attention).length;
@@ -73,10 +79,11 @@ export function ChipRow({
 
   const chip = (c: ChipItem, maxWidth?: number) => {
     const style = [styles.chip, maxWidth !== undefined && { maxWidth }];
+    const cut = maxWidth !== undefined && (widths[widthKey(c)] ?? 0) > maxWidth;
     if (!c.opens)
       return (
         <View key={c.id} accessible accessibilityRole="text" accessibilityLabel={c.spoken} style={style}>
-          <ChipBody item={c} />
+          <ChipBody item={c} cut={cut} />
         </View>
       );
     return (
@@ -88,7 +95,7 @@ export function ChipRow({
         hitSlop={{ top: SLOP, bottom: SLOP }}
         style={({ pressed }) => [style, pressed && styles.pressed]}
       >
-        <ChipBody item={c} />
+        <ChipBody item={c} cut={cut} />
       </Pressable>
     );
   };
@@ -138,6 +145,13 @@ export function ChipRow({
             <ChipBody item={c} />
           </View>
         ))}
+        {items.map((c, i) =>
+          tightKeys[i] ? (
+            <View key={tightKeys[i]} onLayout={learn(tightKeys[i]!)} style={styles.chip}>
+              <ChipBody item={c} cut />
+            </View>
+          ) : null,
+        )}
         <View
           style={[styles.chip, styles.more]}
           onLayout={(e) => setMoreBase(Math.ceil(e.nativeEvent.layout.width))}

@@ -9,6 +9,8 @@ import {
   clampZoom,
   failureMessage,
   firstLine,
+  cardLine,
+  moreLines,
   hasMoreRows,
   isDoubleTap,
   lastLines,
@@ -119,6 +121,20 @@ describe("block cards", () => {
     expect(cardKind(block({ exit: 127 }))).toBe("fail");
     expect(cardKind(block({ state: "running", exit: null }))).toBe("run");
     expect(cardKind(block({ exit: null }))).toBe("ok");
+  });
+  it("shows the line a search matched, and says how many more lines there are", () => {
+    const out = "On branch main\n\nChanges not staged:\n\tmodified:   a.txt\n";
+    expect(cardLine(out)).toBe("On branch main");
+    expect(cardLine(out, "MODIFIED")).toBe("modified:   a.txt");
+    // a match only in the command (not the output): the first line
+    expect(cardLine(out, "git")).toBe("On branch main");
+    expect(cardLine("", "x")).toBe("");
+    // empty lines are not counted; lines the computer dropped are
+    expect(moreLines(out, 0)).toBe("2 more lines");
+    expect(moreLines("one\ntwo", 0)).toBe("1 more line");
+    expect(moreLines("one", 0)).toBeNull();
+    expect(moreLines("", 0)).toBeNull();
+    expect(moreLines("one", 1500)).toBe("1,500 more lines");
   });
   it("takes the first and the last lines without the empty ones", () => {
     expect(firstLine("\n  Already up to date.  \nmore\n")).toBe("Already up to date.");

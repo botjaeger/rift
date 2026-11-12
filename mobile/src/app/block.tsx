@@ -130,12 +130,12 @@ export default function BlockActionsScreen() {
 
   const chip = live ? sheetChip(live) : null;
   const place = block ? [block.cwd ? tildePath(block.cwd) : null, block.branch] : [];
-  // the board's subtitle: "Failed with 1 · 2.4 s · ~/code/project1" ("started 2 min ago" while it runs)
+  // the board's subtitle: "Failed with 1 · 2.4 s" ("started 2 min ago" while it runs); the folder
+  // has its own line under it, cut at its start (the subtitle cut it at its end, the part that names it)
   const subtitle = chip
     ? [
         chip.text.replace(/^[✕✓●] ?/, ""),
         live!.state === "running" ? `started ${agoText(live!.duration_ms)}` : spacedDuration(block!.duration_ms),
-        place[0],
         block!.restored ? "restored" : null,
       ]
         .filter(Boolean)
@@ -190,6 +190,8 @@ export default function BlockActionsScreen() {
       }}
       footer={footer}
       bodyStyle={styles.body}
+      // a long output scrolls in its own box down to the footer; the rest stays put above it
+      fill={longOutput(output)}
     >
       {block ? (
         <>
@@ -259,7 +261,7 @@ export default function BlockActionsScreen() {
             </Text>
           ) : null}
           {earlier?.error ? <ErrorText>{earlier.error}</ErrorText> : null}
-          <ScrollView style={styles.outBox} contentContainerStyle={styles.outPad} nestedScrollEnabled accessibilityLabel="Output">
+          <ScrollView style={[styles.outBox, longOutput(output) && styles.outGrow, output === "" && styles.outEmpty]} contentContainerStyle={styles.outPad} nestedScrollEnabled accessibilityLabel="Output">
             {output === "" ? (
               <Text style={styles.empty}>(no output)</Text>
             ) : (
@@ -278,6 +280,9 @@ const spacedDuration = (ms: number) => formatDuration(ms).replace(/^([\d.]+)(m?s
 
 // The Block board: a 10 pt gap down the body, the command and the output in #050505 boxes with a
 // neutral hairline, mono 13/18 and 12/18, the output box 150 pt of lines (172 with its padding).
+/** More output than the board's box holds (about 8 lines of 18 pt, wrapped or not): it takes the sheet's free room. */
+const longOutput = (text: string) => text.split("\n").length > 8 || text.length > 400;
+
 const useStyles = makeStyles((colors) => ({
   body: { gap: 10 },
   pressed: { opacity: 0.7 },
@@ -306,6 +311,10 @@ const useStyles = makeStyles((colors) => ({
   noteLink: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12 },
   noteText: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12 },
   outBox: { height: 172, flexGrow: 0, borderRadius: radius.field, borderWidth: 1, borderColor: colors.hairline, backgroundColor: colors.bg },
+  // the room down to the sheet's foot (never less than the board's 172), scrolling inside it
+  outGrow: { height: undefined, flexGrow: 1, flexBasis: 0, minHeight: 172 },
+  // "(no output)": one line, not 172 pt of empty box
+  outEmpty: { height: undefined },
   outPad: { paddingVertical: 10, paddingHorizontal: 12 },
   // "(no output)" is words, not output
   empty: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13, lineHeight: 18 },

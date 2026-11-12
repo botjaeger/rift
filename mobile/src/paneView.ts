@@ -339,6 +339,16 @@ const nonEmpty = (output: string) =>
 /** The first output line (a success card's one line), or "". */
 export const firstLine = (output: string) => nonEmpty(output)[0]?.trim() ?? "";
 
+/**
+ * A success card's one line: under a Search output `query`, the first line that holds it (any
+ * case), so the match shows; else the first line. "" for no output.
+ */
+export function cardLine(output: string, query?: string): string {
+  const q = query?.trim().toLowerCase();
+  const hit = q ? nonEmpty(output).find((l) => l.toLowerCase().includes(q)) : undefined;
+  return hit?.trim() ?? firstLine(output);
+}
+
 /** The last `n` non-empty output lines (a running card's latest lines). */
 export const lastLines = (output: string, n: number) => nonEmpty(output).slice(-n);
 
@@ -444,6 +454,16 @@ export function sheetChip(b: Block): { text: string; tone: ChipTone } {
 export function agoText(ms: number): string {
   const t = agoShort(ms);
   return t === "now" ? "just now" : t === "yesterday" ? t : `${t} ago`;
+}
+
+/**
+ * Under a card's first output line: how many more there are ("299 more lines"), the lines the
+ * computer no longer sends (`dropped`) included; null when the first is all. Empty lines are not counted.
+ */
+export function moreLines(output: string, dropped: number): string | null {
+  const n = nonEmpty(output).length + dropped - 1;
+  if (n < 1) return null;
+  return n === 1 ? "1 more line" : `${n.toLocaleString("en-US")} more lines`;
 }
 
 /** The count under "Output ·": "1 line", "12 lines" (empty lines are not counted). */

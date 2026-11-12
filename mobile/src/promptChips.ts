@@ -49,6 +49,9 @@ export interface ChipItem {
   full: ChipText[];
   /** What the narrow row shows. */
   short: ChipText[];
+  /** What the row shows when the chip is cut short: whole parts, never a count cut mid-number
+   * ("± 2" rather than "± 2 +2…"); absent: `short`, ending in …. */
+  tight?: ChipText[];
   /** Needs a look: the "+N" chip shows a dot for it while it is folded away. */
   attention: boolean;
   /** The menu a tap opens; null: the chip only shows. */
@@ -130,10 +133,13 @@ const TONES: Record<string, ColorName> = {
 const TIMERS = new Set(["elapsed", "time12", "time24", "date"]);
 export const isTimer = (kind: string): boolean => TIMERS.has(kind);
 
-/** A timer's words after the chips: Time on tab as "last 2m" (the New Blocks board), the clock and the date as they are. */
+/**
+ * A timer's words after the chips: Time on tab as "2m on tab" (the New Blocks board's "last 2m"
+ * read as "the last command, 2 minutes ago", which it is not), the clock and the date as they are.
+ */
 export function timerText(c: Pick<ChipItem, "id" | "short">): string {
   const value = c.short.map((p) => p.text).join(" ");
-  return c.id === "elapsed" ? `last ${value}` : value;
+  return c.id === "elapsed" ? `${value} on tab` : value;
 }
 
 /** A tone's colour; a tone this app does not know (a newer desktop) is drawn as ordinary text. */
@@ -191,6 +197,8 @@ function item(kind: string, w: { icon: string; full: ChipText[]; short: ChipText
     full: w.full,
     // the folder reads as its whole path, "~/code/project1" (the New Blocks board); the row folds what does not fit
     short: kind === "cwd" ? w.full : w.short,
+    // the changes cut short: the file count alone (the sheet it opens has the lines)
+    ...(kind === "git_diff" && w.short.length > 1 ? { tight: w.short.slice(0, 1) } : {}),
     attention: w.attention,
     opens,
     spoken: `${name}: ${value}${w.attention ? ", needs attention" : ""}${opens ? `. ${OPENS_SPOKEN[opens]}` : ""}`,
@@ -291,9 +299,16 @@ export const MIN_CUT = 60;
  * How many of the chips (`widths` as measured, `attention` per chip) fit one row of `avail` points:
  * all of them when they fit, else as many as leave room for the "+N" chip (`moreBase` wide, plus a
  * dot per folded chip that needs attention). The row never wraps and never scrolls, so a first
- * chip wider than all the room is cut to it rather than dropped.
+ * chip wider than all the room is cut to it rather than dropped. `mins`: per chip, the least room
+ * it may be cut to (a chip with a tight form: that form's width); MIN_CUT for the others.
  */
-export function fitChips(widths: readonly number[], attention: readonly boolean[], avail: number, moreBase: number): Fit {
+export function fitChips(
+  widths: readonly number[],
+  attention: readonly boolean[],
+  avail: number,
+  moreBase: number,
+  mins: readonly (number | undefined)[] = [],
+): Fit {
   const n = widths.length;
   if (n === 0) return { count: 0, clamp: null };
   const gaps = (k: number) => CHIP_GAP * Math.max(k - 1, 0);
@@ -314,7 +329,7 @@ export function fitChips(widths: readonly number[], attention: readonly boolean[
   const room = Math.floor(
     avail - lead - (rest > 0 ? CHIP_GAP + moreWidth(moreBase, attention.slice(k + 1).filter(Boolean).length) : 0),
   );
-  if (room >= MIN_CUT) return { count: k + 1, clamp: room };
+  if (room >= (mins[k] ?? MIN_CUT)) return { count: k + 1, clamp: room };
   if (k === 0) return { count: 1, clamp: Math.max(room, 48) };
   return { count: k, clamp: null };
 }

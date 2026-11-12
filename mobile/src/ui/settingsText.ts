@@ -33,7 +33,8 @@ export function hostMeta(host: { conn: Pick<ConnState, "status" | "path">; viewO
 /** "Show the command"'s detail: the example alert for the current value, as the app posts it. */
 export function notifyExample(hostName: string, showCommand: boolean): string {
   const t = doneText({ host: hostName, tab: null, command: "npm test", exit: 1, durationMs: 8400, showCommand });
-  return `“${t.title}” · ${t.subtitle}`;
+  // said to be an example: without it the line read as a real failure
+  return `Shows as “${t.title}” · ${t.subtitle}`;
 }
 
 /** The "Updates" line: its text and whether it is the green "just checked" line. */

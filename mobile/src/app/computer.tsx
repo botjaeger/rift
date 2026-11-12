@@ -69,7 +69,14 @@ export default function ComputerScreen() {
     >
       <Group title="This computer">
         <CardBox>
-          <ValueRow first label="Connection" value={placeWord(host.conn)} />
+          {/* opens the Connection sheet, as the computer menu does: its paths and its speed */}
+          <NavRow
+            first
+            label="Connection"
+            value={placeWord(host.conn)}
+            hint="Opens Connection"
+            onPress={() => router.push({ pathname: "/connection", params: { key: host.record.key } })}
+          />
           <ValueRow label="Access" value={operate ? "Can run commands" : "View only"} />
           {/* the theme it sends (Settings › Appearance chooses whether the app follows it) */}
           <NavRow

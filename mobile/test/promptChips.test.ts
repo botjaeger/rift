@@ -106,6 +106,9 @@ describe("the desktop's chips on the phone", () => {
       ON,
     )[0]!;
     expect(diff.spoken).toBe("Changes: 102 files changed, 2086 lines added, 970 removed. Opens the changes");
+    // cut short, the changes show their file count whole, never "102 +2.1k…"
+    expect(diff.tight?.map((p) => p.text)).toEqual([diff.short[0]!.text]);
+    expect(items.every((c) => c.tight === undefined)).toBe(true);
     expect(spokenValue("git_diff", [{ text: "1", color: "text" }, { text: "•", color: "text" }, { text: "+3", color: "text" }, { text: "−0", color: "text" }])).toBe(
       "1 file changed, 3 lines added, 0 removed",
     );
@@ -213,6 +216,17 @@ describe("fitting the row", () => {
     expect(fitChips(w, [false, false, false, false], wide - 1, moreBase)).toEqual({ count: 2, clamp: null });
     // a dot on a chip behind the cut one takes room from the cut chip
     expect(fitChips(w, [false, false, false, true], wide, moreBase)).toEqual({ count: 2, clamp: null });
+  });
+
+  it("cuts a chip with a tight form down to that form's width, below MIN_CUT", () => {
+    const w = [80, 90, 200, 60];
+    const room = 40; // what is left for the third chip: under MIN_CUT
+    const avail = 228 + room;
+    expect(fitChips(w, [false, false, false, false], avail, moreBase)).toEqual({ count: 2, clamp: null });
+    // its tight form ("± 2") is 40 wide: it shows, cut to the room
+    expect(fitChips(w, [false, false, false, false], avail, moreBase, [undefined, undefined, 40])).toEqual({ count: 3, clamp: 40 });
+    // a tight form wider than the room still folds
+    expect(fitChips(w, [false, false, false, false], avail, moreBase, [undefined, undefined, 41])).toEqual({ count: 2, clamp: null });
   });
 
   it("has nothing to fit when there are no chips", () => {
