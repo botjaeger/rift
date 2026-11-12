@@ -363,7 +363,8 @@ const useStyles = makeStyles((colors) => ({
   row: { flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 16, paddingVertical: 8 },
   regular: { minHeight: ROW_HEIGHT.regular },
   compact: { minHeight: ROW_HEIGHT.compact, paddingVertical: 6 },
-  wrap: { flexWrap: "wrap" },
+  // the wrapped lines centred in the row's height (they pack to its top by default)
+  wrap: { flexWrap: "wrap", alignContent: "center" },
   divider: { borderTopWidth: 1, borderTopColor: colors.hairline },
   // a hairline over a row adds its point, as the boards draw it under the 68 pt row
   ruled: { minHeight: ROW_HEIGHT.regular + 1 },

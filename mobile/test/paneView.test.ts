@@ -20,6 +20,7 @@ import {
   parseTable,
   pinchZoom,
   sheetChip,
+  liveBlock,
   visibleRows,
   waitingOthers,
   zoomStep,
@@ -190,6 +191,16 @@ describe("the block sheet", () => {
     expect(sheetChip(block({ exit: 127 }))).toEqual({ text: "✕ Failed with 127", tone: "failed" });
     expect(sheetChip(block())).toEqual({ text: "✓ Succeeded", tone: "ok" });
     expect(sheetChip(block({ exit: null }))).toEqual({ text: "Finished", tone: "done" });
+  });
+  it("keeps a running block's clock going between the gateway's updates", () => {
+    const running = block({ state: "running", exit: null, duration_ms: 36000 });
+    expect(sheetChip(liveBlock(running, 1000, 29000)).text).toBe("● Running 1:04");
+    // a clock read before the update arrived never counts backwards
+    expect(liveBlock(running, 5000, 4000).duration_ms).toBe(36000);
+    // the pane's start wins over a duration that was already old when the sheet opened
+    expect(liveBlock(running, 59000, 60000, 0).duration_ms).toBe(60000);
+    const done = block({ duration_ms: 2400 });
+    expect(liveBlock(done, 1000, 29000)).toBe(done);
   });
   it("counts the non-empty output lines", () => {
     expect(outputLines("a\n\nb\n")).toBe("2 lines");

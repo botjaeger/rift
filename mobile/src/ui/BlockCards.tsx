@@ -1,7 +1,7 @@
 import * as Clipboard from "expo-clipboard";
-import { memo, useEffect, useState, type ReactNode } from "react";
+import { memo, useState, type ReactNode } from "react";
 import { AccessibilityInfo, Pressable, Text, View, type StyleProp, type ViewStyle } from "react-native";
-import { failureMessage, lastLines, parseLogLines } from "@/paneView";
+import { failureMessage, lastLines, liveDuration, parseLogLines } from "@/paneView";
 import type { Block } from "@/protocol/types";
 import { Button } from "./Button";
 import { formatClock } from "./format";
@@ -11,6 +11,7 @@ import { glyph } from "./Screen";
 import { SelectableText } from "./SelectableText";
 import { Spinner } from "./StatusMark";
 import { mono, monoMedium, ui, makeStyles, useColors } from "./theme";
+import { useNow } from "./useNow";
 
 /** "✓ 3 earlier commands succeeded … Show": the folded successes (now.ts `foldBlocks`), the board's 36 pt pill. */
 export function FoldRow({ count, onShow }: { count: number; onShow: () => void }) {
@@ -45,22 +46,15 @@ export function searchedLine(output: string, query: string | undefined): { text:
   return line ? { text: line.trim(), path: null } : null;
 }
 
-/** A running block's clock "4:12", ticking locally between gateway updates. */
-export function Elapsed({ ms }: { ms: number }) {
+/** A running block's clock "4:12", ticking locally between gateway updates (liveDuration). */
+export function Elapsed({ ms, started = null }: { ms: number; started?: number | null }) {
   const colors = useColors();
   const styles = useStyles();
-  const [base, setBase] = useState(ms);
-  const [extra, setExtra] = useState(0);
-  if (base !== ms) {
-    // A fresh duration from the gateway restarts the local count.
-    setBase(ms);
-    setExtra(0);
-  }
-  useEffect(() => {
-    const t = setInterval(() => setExtra((n) => n + 1000), 1000);
-    return () => clearInterval(t);
-  }, []);
-  return <Text style={[styles.status, { color: colors.accent }]}>{formatClock(ms + extra)}</Text>;
+  const now = useNow(1000);
+  const [seen, setSeen] = useState({ ms, at: now });
+  // a fresh duration from the gateway restarts the local count
+  if (seen.ms !== ms) setSeen({ ms, at: now });
+  return <Text style={[styles.status, { color: colors.accent }]}>{formatClock(liveDuration(ms, seen.at, now, started))}</Text>;
 }
 
 /**
@@ -183,7 +177,14 @@ export const RunningCard = memo(function RunningCard({
   onBell,
   onStop,
   mark,
-}: CardProps & { notify: boolean; onBell: (b: Block, on: boolean) => void; onStop?: () => void }) {
+  started = null,
+}: CardProps & {
+  notify: boolean;
+  onBell: (b: Block, on: boolean) => void;
+  onStop?: () => void;
+  /** When the pane's command started (the desktop's Unix seconds), for the clock. */
+  started?: number | null;
+}) {
   const colors = useColors();
   const styles = useStyles();
   const latest = lastLines(block.output, 1);
@@ -202,7 +203,7 @@ export const RunningCard = memo(function RunningCard({
               <Marked text={block.command || " "} query={mark} />
             </Text>
           </View>
-          <Elapsed ms={block.duration_ms} />
+          <Elapsed ms={block.duration_ms} started={started} />
         </>
       }
       pills={

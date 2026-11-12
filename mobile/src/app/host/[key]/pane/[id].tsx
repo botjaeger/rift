@@ -742,6 +742,7 @@ export default function PaneScreen() {
                           onBell={onBell}
                           onStop={operate ? onStop : undefined}
                           mark={found}
+                          started={loc?.pane.running?.started ?? null}
                         />
                       </View>
                     </SelectionItem>

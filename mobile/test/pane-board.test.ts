@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
-import { failureMessage, lastLines, parseLogLines } from "../src/paneView";
+import { failureMessage, lastLines, liveDuration, parseLogLines } from "../src/paneView";
 import type { Block } from "../src/protocol/types";
 import { stubColors } from "./helpers/themeStub";
 import { findAll, flat, load, react, render, textOf, uiDeps, type Node } from "./helpers/render";
@@ -131,7 +131,7 @@ describe("the block cards", () => {
   const deps = uiDeps("ios", {
     react: { ...react, memo: (c: unknown) => c },
     "expo-clipboard": { setStringAsync: async () => {} },
-    "@/paneView": { failureMessage, lastLines, parseLogLines },
+    "@/paneView": { failureMessage, lastLines, liveDuration, parseLogLines },
     "./Button": { Button: "Button" },
     "./format": { formatClock: (ms: number) => `0:${String(Math.round(ms / 1000)).padStart(2, "0")}` },
     "./Marked": { Marked: "Marked" },

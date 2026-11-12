@@ -6,7 +6,7 @@ import { AccessibilityInfo, Pressable, ScrollView, Text, View } from "react-nati
 import { tildePath } from "@/chips";
 import { gapLines, heldLines, MAX_EARLIER_LINES, nextRequest, unloadedLines } from "@/earlier";
 import { canOperate, draftKey, hasFeature, wrapsLines } from "@/fleet";
-import { agoText, outputLines, sheetChip } from "@/paneView";
+import { agoText, liveBlock, outputLines, sheetChip } from "@/paneView";
 import { commandProblem } from "@/protocol/types";
 import { fleet, useApp, useLock } from "@/runtime";
 import { findPane, runningCommand } from "@/topology";
@@ -18,6 +18,7 @@ import { SheetButtons, SheetFrame } from "@/ui/SheetFrame";
 import { confirmDestructive } from "@/ui/confirm";
 import { formatDuration } from "@/ui/format";
 import { ErrorText } from "@/ui/Notice";
+import { useNow } from "@/ui/useNow";
 import { useSingleFlight } from "@/ui/useSingleFlight";
 import { mono, radius, ui, makeStyles, useColors } from "@/ui/theme";
 
@@ -57,6 +58,12 @@ export default function BlockActionsScreen() {
   const connected = host?.conn.status === "open";
   const atPrompt = runningCommand(loc?.pane ?? null, pane?.state ?? null) === null;
   const running = block?.state === "running";
+  // a running block's clock ticks here between the gateway's updates, like its card's
+  const now = useNow(1000, running);
+  const [seen, setSeen] = useState({ ms: block?.duration_ms ?? -1, at: now });
+  // a fresh duration from the gateway restarts the local count
+  if (block && seen.ms !== block.duration_ms) setSeen({ ms: block.duration_ms, at: now });
+  const live = block ? liveBlock(block, seen.at, now, loc?.pane.running?.started ?? null) : null;
   const command = block?.command ?? "";
   const runnable = command !== "" && commandProblem(command) === null;
   const earlier = pane?.earlier[blockId];
@@ -121,13 +128,13 @@ export default function BlockActionsScreen() {
     else setError(r.message);
   };
 
-  const chip = block ? sheetChip(block) : null;
+  const chip = live ? sheetChip(live) : null;
   const place = block ? [block.cwd ? tildePath(block.cwd) : null, block.branch] : [];
   // the board's subtitle: "Failed with 1 · 2.4 s · ~/code/project1" ("started 2 min ago" while it runs)
   const subtitle = chip
     ? [
         chip.text.replace(/^[✕✓●] ?/, ""),
-        block!.state === "running" ? `started ${agoText(block!.duration_ms)}` : spacedDuration(block!.duration_ms),
+        live!.state === "running" ? `started ${agoText(live!.duration_ms)}` : spacedDuration(block!.duration_ms),
         place[0],
         block!.restored ? "restored" : null,
       ]

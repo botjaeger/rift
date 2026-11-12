@@ -417,6 +417,21 @@ export function parseTable(output: string): ListRow[] | null {
 
 export type ChipTone = "running" | "failed" | "ok" | "done";
 
+/**
+ * A running command's duration at `now`: from its pane's start (`startedSec`, the desktop's Unix
+ * seconds, as Portals counts it), else counted on from the gateway's last duration `ms`, received
+ * at `seenAt` (the gateway sends one only when the block changes, so a card or sheet opened later
+ * holds an old one). Never less than the gateway's own.
+ */
+export function liveDuration(ms: number, seenAt: number, now: number, startedSec: number | null = null): number {
+  return Math.max(ms, startedSec !== null ? now - startedSec * 1000 : ms + now - seenAt);
+}
+
+/** `b` as it stands at `now` (liveDuration while it runs). */
+export function liveBlock(b: Block, seenAt: number, now: number, startedSec: number | null = null): Block {
+  return b.state === "running" ? { ...b, duration_ms: liveDuration(b.duration_ms, seenAt, now, startedSec) } : b;
+}
+
 /** The block sheet's status pill. */
 export function sheetChip(b: Block): { text: string; tone: ChipTone } {
   if (b.state === "running") return { text: `● Running ${formatClock(b.duration_ms)}`, tone: "running" };
