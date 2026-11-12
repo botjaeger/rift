@@ -1142,18 +1142,31 @@ fn wait_polling_kicks<S: Source>(shared: &Shared<S>, next: Instant) {
             k.keys().copied().collect()
         };
         if !hot.is_empty() {
-            let screens = {
+            let (followed, screens) = {
                 let hub = shared.hub.lock().unwrap();
+                let mut followed: HashSet<u64> = HashSet::new();
                 let mut screens: HashMap<u64, bool> = HashMap::new();
-                for c in hub.clients.values().filter(|c| c.screen != ScreenMode::Off) {
-                    if let Some(p) = c.pane.filter(|p| hot.contains(p)) {
+                for c in hub.clients.values() {
+                    let Some(p) = c.pane.filter(|p| hot.contains(p)) else {
+                        continue;
+                    };
+                    followed.insert(p);
+                    if c.screen != ScreenMode::Off {
                         *screens.entry(p).or_default() |= c.screen == ScreenMode::On;
                     }
                 }
-                screens
+                (followed, screens)
             };
-            for (pane, force) in screens {
-                refresh_screen(shared, pane, force);
+            // the blocks too: a program on the primary screen (a shell's
+            // echo, an agent redrawing in place) answers within a frame or
+            // two as well, not at the next PANE_POLL
+            // (as the poll does: a pane whose blocks fail to read is gone)
+            for pane in followed {
+                if refresh(shared, pane).is_ok()
+                    && let Some(&force) = screens.get(&pane)
+                {
+                    refresh_screen(shared, pane, force);
+                }
             }
         }
         let now = Instant::now();

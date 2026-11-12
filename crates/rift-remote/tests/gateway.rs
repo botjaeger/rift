@@ -4902,6 +4902,48 @@ fn a_scroll_brings_the_redrawn_screen_before_the_next_poll() {
 }
 
 #[test]
+fn output_after_typing_arrives_before_the_next_poll() {
+    // a program on the primary screen (a shell's echo, an agent redrawing
+    // in place): the kick reads the pane's blocks too, not only a screen
+    let env = start(|c| {
+        c.pane_poll = Duration::from_secs(2);
+        c.devices_poll = Duration::from_secs(2);
+    });
+    let (_k, mut ch, _) = env.pair(Permission::Operate);
+    put(&mut ch, json!({"t":"subscribe","pane":12,"after":null}));
+    recv_t(&mut ch, "snapshot");
+    // output nobody typed for waits for the poll
+    env.fake.edit(12, |b| b[1].output = "two, more\n".into());
+    assert!(
+        drain(&mut ch, 300).iter().all(|m| m["t"] != "update"),
+        "an update before the poll"
+    );
+    let at = Instant::now();
+    put(&mut ch, json!({"t":"text","id":"x","pane":12,"text":"y"}));
+    let update = |ch: &mut Ch| loop {
+        let v = recv(ch);
+        if v["t"] == "update" {
+            return v;
+        }
+        assert!(
+            ["ack", "topology", "done"].contains(&v["t"].as_str().unwrap_or("")),
+            "{v}"
+        );
+    };
+    let first = update(&mut ch);
+    assert_eq!(first["blocks"][0]["output"], "two, more\n", "{first}");
+    // and again while the program answers
+    env.fake.edit(12, |b| b[1].output = "two, more, y\n".into());
+    let second = update(&mut ch);
+    assert!(
+        at.elapsed() < Duration::from_millis(400),
+        "{:?}",
+        at.elapsed()
+    );
+    assert_eq!(second["blocks"][0]["output"], "two, more, y\n", "{second}");
+}
+
+#[test]
 fn a_redraw_after_a_scroll_goes_out_within_a_screen_poll() {
     // a frame ready while the client loop waits on its socket goes out at once (HOT_READ_SLICE),
     // not after the rest of its read. The read is widened to 500 ms so a loaded machine (the
