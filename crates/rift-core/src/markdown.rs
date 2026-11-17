@@ -1,6 +1,10 @@
 //! Small Markdown reader for the file viewer's *Rendered* mode: block
 //! structure (headings, paragraphs, lists, quotes, fenced code, rules,
 //! tables) and inline styles (bold, italic, code, strikethrough, links).
+//! HTML a README uses for layout (`<p align="center">`, `<h1>`, `<img>`,
+//! `<b>`, `<br>`, comments) is read the way GitHub shows it: its tags are
+//! not shown, headings and paragraphs keep their centring, and an image
+//! shows its alt text as a Markdown image does.
 //! Not a full CommonMark implementation — anything it does not recognise
 //! stays as plain paragraph text, so nothing is ever hidden.
 
@@ -30,11 +34,17 @@ pub enum Align {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Block {
+    /// `center`: inside an HTML element centred by `align="center"` (or
+    /// `<center>`).
     Heading {
         level: u8,
         spans: Vec<Span>,
+        center: bool,
     },
-    Paragraph(Vec<Span>),
+    Paragraph {
+        spans: Vec<Span>,
+        center: bool,
+    },
     /// A list item; `marker` is `•` or the item's number (`3.`).
     Item {
         depth: usize,
@@ -288,7 +298,11 @@ pub fn parse(lines: &[String]) -> Vec<Block> {
             || is_rule(l)
             || list_item(l).is_some()
             || l.trim_start().starts_with('>')
+            || html_start(l) == Some(true)
     };
+    // HTML elements still open (`<div align="center">` alone, then
+    // Markdown): what they centre
+    let mut html = HtmlState::default();
     while i < lines.len() {
         let line = lines[i].as_str();
         if line.trim().is_empty() {
@@ -313,10 +327,29 @@ pub fn parse(lines: &[String]) -> Vec<Block> {
             blocks.push(Block::Code { lang, lines: code });
             continue;
         }
+        if html_start(line).is_some() {
+            // an HTML block runs to a blank line; a comment to its `-->`
+            let comment = line.trim_start().starts_with("<!--");
+            let mut src = Vec::new();
+            while i < lines.len() {
+                let l = lines[i].as_str();
+                if !comment && l.trim().is_empty() {
+                    break;
+                }
+                src.push(l);
+                i += 1;
+                if comment && l.contains("-->") {
+                    break;
+                }
+            }
+            html.read(&src.join("\n"), &mut blocks);
+            continue;
+        }
         if let Some((level, text)) = heading(line) {
             blocks.push(Block::Heading {
                 level,
                 spans: inline(text),
+                center: html.center(),
             });
             i += 1;
             continue;
@@ -403,9 +436,363 @@ pub fn parse(lines: &[String]) -> Vec<Block> {
             parts.push(lines[i].as_str());
             i += 1;
         }
-        blocks.push(Block::Paragraph(inline(&join(&parts))));
+        blocks.push(Block::Paragraph {
+            spans: inline(&join(&parts)),
+            center: html.center(),
+        });
     }
     blocks
+}
+
+/// HTML elements that end the text before them and start a block.
+const HTML_BLOCK_TAGS: &[&str] = &[
+    "blockquote",
+    "center",
+    "dd",
+    "details",
+    "div",
+    "dl",
+    "dt",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "li",
+    "ol",
+    "p",
+    "pre",
+    "section",
+    "summary",
+    "table",
+    "tbody",
+    "td",
+    "th",
+    "thead",
+    "tr",
+    "ul",
+];
+
+/// Inline HTML elements a README line may start with.
+const HTML_INLINE_TAGS: &[&str] = &[
+    "a", "b", "br", "code", "del", "em", "hr", "i", "img", "kbd", "picture", "s", "source", "span",
+    "strike", "strong", "sub", "sup", "tt",
+];
+
+/// A line that starts an HTML block (`Some(true)` when its element is a
+/// block one, which also ends a paragraph above it): up to 3 spaces, then
+/// a comment or a known element's tag.
+fn html_start(line: &str) -> Option<bool> {
+    let t = line.trim_start();
+    if line.len() - t.len() > 3 {
+        return None;
+    }
+    if t.starts_with("<!--") {
+        return Some(true);
+    }
+    let rest = t.strip_prefix('<')?;
+    let rest = rest.strip_prefix('/').unwrap_or(rest);
+    let n = rest.bytes().take_while(u8::is_ascii_alphanumeric).count();
+    let after = &rest[n..];
+    if !(after.is_empty() || after.starts_with([' ', '\t', '>', '/'])) {
+        return None;
+    }
+    let name = rest[..n].to_ascii_lowercase();
+    if HTML_BLOCK_TAGS.contains(&name.as_str()) {
+        Some(true)
+    } else {
+        HTML_INLINE_TAGS.contains(&name.as_str()).then_some(false)
+    }
+}
+
+/// One HTML tag at the start of a text.
+struct Tag<'a> {
+    /// Lowercased.
+    name: String,
+    closing: bool,
+    /// What stands between the name and `>`.
+    attrs: &'a str,
+    /// Bytes the tag takes.
+    len: usize,
+}
+
+/// The tag `s` starts with: `<name …>`, `</name>`, `<name/>`.
+fn tag_at(s: &str) -> Option<Tag<'_>> {
+    let body = s.strip_prefix('<')?;
+    let (closing, body) = match body.strip_prefix('/') {
+        Some(b) => (true, b),
+        None => (false, body),
+    };
+    if !body.starts_with(|c: char| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    let n = body.bytes().take_while(u8::is_ascii_alphanumeric).count();
+    let after = &body[n..];
+    if !after.starts_with([' ', '\t', '\n', '>', '/']) {
+        return None;
+    }
+    // the closing `>`, outside quoted attribute values
+    let mut quote = None;
+    for (k, c) in after.char_indices() {
+        match (quote, c) {
+            (Some(q), _) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'') => quote = Some(c),
+            (None, '>') => {
+                return Some(Tag {
+                    name: body[..n].to_ascii_lowercase(),
+                    closing,
+                    attrs: after[..k].trim_end_matches('/'),
+                    len: s.len() - after.len() + k + 1,
+                });
+            }
+            (None, '<') => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The value of attribute `key` (lowercase) in a tag's `attrs`.
+fn attr(attrs: &str, key: &str) -> Option<String> {
+    let lower = attrs.to_ascii_lowercase();
+    let mut from = 0;
+    while let Some(p) = lower[from..].find(key) {
+        let at = from + p;
+        from = at + key.len();
+        if at == 0 || !lower.as_bytes()[at - 1].is_ascii_whitespace() {
+            continue;
+        }
+        let Some(rest) = attrs[from..].trim_start().strip_prefix('=') else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let value = match rest.chars().next() {
+            Some(q @ ('"' | '\'')) => rest[1..].split(q).next().unwrap_or(""),
+            _ => rest.split(char::is_whitespace).next().unwrap_or(""),
+        };
+        return Some(entities(value));
+    }
+    None
+}
+
+/// Text with its HTML character references (`&amp;`, `&#169;`, `&#x2014;`)
+/// decoded; an unknown one stays as written.
+fn entities(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(p) = rest.find('&') {
+        out.push_str(&rest[..p]);
+        rest = &rest[p..];
+        let decoded = rest.find(';').filter(|&e| e <= 10).and_then(|e| {
+            let c = match &rest[1..e] {
+                "amp" => '&',
+                "lt" => '<',
+                "gt" => '>',
+                "quot" => '"',
+                "apos" => '\'',
+                "nbsp" => '\u{a0}',
+                "copy" => '©',
+                "mdash" => '—',
+                "ndash" => '–',
+                "hellip" => '…',
+                name => {
+                    let n = name.strip_prefix('#')?;
+                    let v = match n.strip_prefix(['x', 'X']) {
+                        Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+                        None => n.parse().ok()?,
+                    };
+                    char::from_u32(v)?
+                }
+            };
+            Some((c, e))
+        });
+        match decoded {
+            Some((c, e)) => {
+                out.push(c);
+                rest = &rest[e + 1..];
+            }
+            None => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// What an inline HTML element does to the text.
+enum InlineHtml {
+    /// Turned a style on or off, or nothing to show (`<span>`).
+    Styled,
+    Break,
+    /// An image's alt text.
+    Alt(String),
+}
+
+/// An inline element's effect (`None`: not an inline element).
+fn inline_html(tag: &Tag, style: &mut Style) -> Option<InlineHtml> {
+    let on = !tag.closing;
+    match tag.name.as_str() {
+        "b" | "strong" => style.bold = on,
+        "i" | "em" => style.italic = on,
+        "code" | "kbd" | "tt" => style.code = on,
+        "s" | "del" | "strike" => style.strike = on,
+        "a" => style.link = on,
+        "br" => return Some(InlineHtml::Break),
+        "img" if on => {
+            return Some(InlineHtml::Alt(attr(tag.attrs, "alt").unwrap_or_default()));
+        }
+        "img" | "span" | "sub" | "sup" | "picture" | "source" => {}
+        _ => return None,
+    }
+    Some(InlineHtml::Styled)
+}
+
+/// HTML block elements open across the document.
+#[derive(Default)]
+struct HtmlState {
+    /// `(name, centred)`, outermost first.
+    open: Vec<(String, bool)>,
+}
+
+/// An HTML block's text as it gathers, its whitespace collapsed as a
+/// browser does it.
+#[derive(Default)]
+struct HtmlText {
+    spans: Vec<Span>,
+    style: Style,
+    /// Whitespace waits to be written until text follows it: the style of
+    /// the text it stood in.
+    gap: Option<Style>,
+    started: bool,
+}
+
+impl HtmlText {
+    fn text(&mut self, s: &str, style: Style) {
+        for c in s.chars() {
+            if c.is_whitespace() && c != '\u{a0}' {
+                // the space keeps the style of the text it stood in
+                // (`a <code>b`, `</b> c`)
+                self.gap.get_or_insert(style);
+                continue;
+            }
+            if let Some(gap) = self.gap
+                && self.started
+            {
+                push(&mut self.spans, " ", gap);
+            }
+            self.gap = None;
+            self.started = true;
+            push(&mut self.spans, c.encode_utf8(&mut [0; 4]), style);
+        }
+    }
+
+    fn line_break(&mut self) {
+        push(&mut self.spans, "\n", self.style);
+        self.gap = None;
+        self.started = false;
+    }
+
+    /// The text so far as a block (nothing when it is blank).
+    fn flush(&mut self, level: Option<u8>, center: bool, out: &mut Vec<Block>) {
+        let mut spans = std::mem::take(&mut self.spans);
+        self.gap = None;
+        self.started = false;
+        if let Some(first) = spans.first_mut() {
+            first.text = first.text.trim_start_matches('\n').to_string();
+        }
+        if let Some(last) = spans.last_mut() {
+            last.text = last.text.trim_end_matches('\n').to_string();
+        }
+        spans.retain(|s| !s.text.is_empty());
+        if spans.iter().all(|s| s.text.trim().is_empty()) {
+            return;
+        }
+        out.push(match level {
+            Some(level) => Block::Heading {
+                level,
+                spans,
+                center,
+            },
+            None => Block::Paragraph { spans, center },
+        });
+    }
+}
+
+impl HtmlState {
+    fn center(&self) -> bool {
+        self.open.last().is_some_and(|o| o.1)
+    }
+
+    /// Read one HTML block into `out`. Its text shows as written (Markdown
+    /// inside an HTML block is not read, as on GitHub); the tags of other
+    /// elements are hidden.
+    fn read(&mut self, src: &str, out: &mut Vec<Block>) {
+        let mut text = HtmlText::default();
+        let mut level = None;
+        let mut rest = src;
+        while !rest.is_empty() {
+            if let Some(r) = rest.strip_prefix("<!--") {
+                rest = r.find("-->").map_or("", |e| &r[e + 3..]);
+                continue;
+            }
+            if let Some(tag) = tag_at(rest) {
+                rest = &rest[tag.len..];
+                let name = tag.name.as_str();
+                if HTML_BLOCK_TAGS.contains(&name) {
+                    text.flush(level, self.center(), out);
+                    let heading = name.strip_prefix('h').and_then(|n| n.parse::<u8>().ok());
+                    if tag.closing {
+                        if let Some(p) = self.open.iter().rposition(|o| o.0 == name) {
+                            self.open.truncate(p);
+                        }
+                        if heading.is_some() {
+                            level = None;
+                        }
+                    } else {
+                        let centred = self.center()
+                            || name == "center"
+                            || attr(tag.attrs, "align")
+                                .is_some_and(|a| a.eq_ignore_ascii_case("center"));
+                        self.open.push((tag.name.clone(), centred));
+                        if heading.is_some() {
+                            level = heading;
+                        }
+                    }
+                } else if name == "hr" {
+                    text.flush(level, self.center(), out);
+                    out.push(Block::Rule);
+                } else {
+                    let mut style = text.style;
+                    match inline_html(&tag, &mut style) {
+                        Some(InlineHtml::Break) => text.line_break(),
+                        Some(InlineHtml::Alt(alt)) => text.text(
+                            &alt,
+                            Style {
+                                link: true,
+                                ..style
+                            },
+                        ),
+                        _ => {}
+                    }
+                    text.style = style;
+                }
+                continue;
+            }
+            let n = rest
+                .char_indices()
+                .skip(1)
+                .find(|c| c.1 == '<')
+                .map_or(rest.len(), |c| c.0);
+            let style = text.style;
+            text.text(&entities(&rest[..n]), style);
+            rest = &rest[n..];
+        }
+        text.flush(level, self.center(), out);
+    }
 }
 
 fn push(spans: &mut Vec<Span>, text: &str, style: Style) {
@@ -523,6 +910,33 @@ pub fn inline(s: &str) -> Vec<Span> {
                 continue;
             }
         }
+        // inline HTML: `<b>`, `<br>`, `<img alt>`, `<kbd>`, comments
+        if c == '<' {
+            let here = &s[byte(i)..];
+            let mut next = style;
+            let skip = if let Some(r) = here.strip_prefix("<!--") {
+                r.find("-->").map(|e| 4 + e + 3)
+            } else {
+                tag_at(here).and_then(|tag| {
+                    let fx = inline_html(&tag, &mut next)?;
+                    push(&mut spans, &std::mem::take(&mut text), style);
+                    match fx {
+                        InlineHtml::Break => text.push('\n'),
+                        InlineHtml::Alt(alt) => {
+                            push(&mut spans, &alt, Style { link: true, ..next })
+                        }
+                        InlineHtml::Styled => {}
+                    }
+                    Some(tag.len)
+                })
+            };
+            if let Some(len) = skip {
+                style = next;
+                let end_byte = byte(i) + len;
+                i = chars.partition_point(|c| c.0 < end_byte);
+                continue;
+            }
+        }
         // emphasis delimiters
         let double = at(i + 1) == Some(c);
         if (c == '*' || c == '_' || c == '~') && (double || c != '~') {
@@ -580,9 +994,11 @@ mod tests {
              - one\n  - nested `code`\n1. first\n> quoted\n> more\n\n---\n\
              ```sh\ncargo run\n```\n");
         assert!(
-            matches!(&b[0], Block::Heading { level: 1, spans } if plain(spans) == "Agent guide — Rift")
+            matches!(&b[0], Block::Heading { level: 1, spans, center: false } if plain(spans) == "Agent guide — Rift")
         );
-        assert!(matches!(&b[1], Block::Paragraph(s) if plain(s) == "Some text continues here."));
+        assert!(
+            matches!(&b[1], Block::Paragraph { spans: s, .. } if plain(s) == "Some text continues here.")
+        );
         assert!(matches!(&b[2], Block::Item { depth: 0, marker, .. } if marker == "•"));
         assert!(matches!(&b[3], Block::Item { depth: 1, spans, .. } if spans[1].style.code));
         assert!(matches!(&b[4], Block::Item { marker, .. } if marker == "1."));
@@ -615,7 +1031,7 @@ mod tests {
         assert_eq!(plain(&rows[0][1]), "What | why");
         assert_eq!(rows[1].len(), 2, "short rows pad to the column count");
         // a lone pipe is paragraph text
-        assert!(matches!(&doc("a | b\nc")[0], Block::Paragraph(_)));
+        assert!(matches!(&doc("a | b\nc")[0], Block::Paragraph { .. }));
     }
 
     #[test]
@@ -639,6 +1055,72 @@ mod tests {
         );
         assert_eq!(plain(&inline(r"\*not\*")), "*not*");
         assert_eq!(plain(&inline("<https://x.y>")), "https://x.y");
+    }
+
+    #[test]
+    fn html_reads_as_github_shows_it() {
+        let b = doc(concat!(
+            "<p align=\"center\">\n",
+            "  <img src=\"icons/icon.svg\" alt=\"Logo: two eyes\" width=\"128\">\n",
+            "</p>\n\n",
+            "<h1 align=\"center\">Lurk</h1>\n\n",
+            "<p align=\"center\"><strong>Read it.</strong> Nobody&nbsp;knows &amp; <code>x</code></p>\n\n",
+            "<!-- a note\n\nover lines -->\n",
+            "Plain text, not centred.\n",
+            "<p>A block tag ends it.</p>\n\n",
+            "<div align=\"center\">\n\n# Centred title\n\n</div>\n\n",
+            "# Left\n",
+        ));
+        let rows: Vec<(String, bool, Option<u8>)> = b
+            .iter()
+            .map(|b| match b {
+                Block::Heading {
+                    level,
+                    spans,
+                    center,
+                } => (plain(spans), *center, Some(*level)),
+                Block::Paragraph { spans, center } => (plain(spans), *center, None),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        let row = |t: &str, c: bool, l: Option<u8>| (t.to_string(), c, l);
+        assert_eq!(
+            rows,
+            [
+                row("Logo: two eyes", true, None),
+                row("Lurk", true, Some(1)),
+                row("Read it. Nobody\u{a0}knows & x", true, None),
+                row("Plain text, not centred.", false, None),
+                row("A block tag ends it.", false, None),
+                row("Centred title", true, Some(1)),
+                row("Left", false, Some(1)),
+            ]
+        );
+        let Block::Paragraph { spans: s, .. } = &b[2] else {
+            panic!("{b:?}")
+        };
+        assert!(s[0].style.bold && s[0].text == "Read it.");
+        assert!(!s[1].style.bold);
+        assert!(s.iter().any(|x| x.text == "x" && x.style.code), "{s:?}");
+        // an unknown tag or a comparison stays text
+        for text in ["<T> is generic", "a <b and c"] {
+            assert!(
+                matches!(&doc(text)[0], Block::Paragraph { spans, .. } if plain(spans) == text),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn inline_html_in_markdown_text() {
+        let s = inline(
+            "Press <kbd>⌘K</kbd> <!-- hidden -->to<br>clear <b>now</b> <img src=x alt=\"pic\">",
+        );
+        assert_eq!(plain(&s), "Press ⌘K to\nclear now pic");
+        assert!(s.iter().any(|x| x.text == "⌘K" && x.style.code));
+        assert!(s.iter().any(|x| x.text == "now" && x.style.bold));
+        assert!(s.iter().any(|x| x.text == "pic" && x.style.link));
+        assert_eq!(plain(&inline("Vec<T> and a < b")), "Vec<T> and a < b");
     }
 
     #[test]

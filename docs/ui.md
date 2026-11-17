@@ -346,7 +346,12 @@ Markdown files (`.md`, `.markdown`, `.mdx`…) open **Rendered**: headings
 (H1/H2 with a rule), paragraphs wrapped to the pane, bullet, numbered and
 task lists, quotes, fenced and indented code blocks (a wide one scrolls sideways on its own),
 rules and tables (columns sized to their content and wrapped to fit), with
-bold, italic, strikethrough, inline code and links styled. **Raw** shows the
+bold, italic, strikethrough, inline code and links styled. HTML a README
+uses for layout reads as GitHub shows it: tags and `<!-- comments -->` are
+hidden, `<h1>`–`<h6>` are headings, `<p align="center">` (and `<div>`,
+`<center>`) centre their lines, `<b>`, `<em>`, `<code>`, `<kbd>`, `<a>` and
+`<br>` style or break the text, and an `<img>` shows its alt text, as a
+Markdown image does (the viewer draws no images). **Raw** shows the
 source with line numbers; switching views returns to the top, and ⌘F
 switches to Raw because find works on the source. In Raw and for every
 other file: line numbers and

@@ -91,6 +91,8 @@ fn key(width: f32, theme: &Theme) -> (u32, [u32; 2]) {
 
 /// Wrapped rich text: the buffer, its height, and the rects of its inline
 /// code (background) and strikethrough (line) runs, relative to the buffer.
+/// `center`: each line centred in `width`.
+#[allow(clippy::too_many_arguments)]
 fn rich(
     engine: &mut TextEngine,
     theme: &Theme,
@@ -99,6 +101,7 @@ fn rich(
     width: f32,
     base: Color,
     weight: Weight,
+    center: bool,
 ) -> (Buffer, f32, Vec<Draw>) {
     let fs = &mut engine.font_system;
     let sans = Attrs::new()
@@ -133,7 +136,13 @@ fn rich(
     let mut buf = Buffer::new(fs, Metrics::new(size, line));
     buf.set_wrap(fs, Wrap::WordOrGlyph);
     buf.set_size(fs, Some(width.max(1.0)), None);
-    buf.set_rich_text(fs, parts, &sans, Shaping::Advanced, None);
+    buf.set_rich_text(
+        fs,
+        parts,
+        &sans,
+        Shaping::Advanced,
+        center.then_some(rift_renderer::glyphon::cosmic_text::Align::Center),
+    );
     buf.shape_until_scroll(fs, false);
     let mut marks = Vec::new();
     let mut lines = 0;
@@ -219,7 +228,11 @@ pub fn layout(
         };
         y += gap;
         let h = match block {
-            Block::Heading { level, spans } => {
+            Block::Heading {
+                level,
+                spans,
+                center,
+            } => {
                 let size = match level {
                     1 => (24.0, 32.0),
                     2 => (19.0, 26.0),
@@ -234,6 +247,7 @@ pub fn layout(
                     w,
                     theme.text_bright,
                     Weight::SEMIBOLD,
+                    *center,
                 );
                 draws.extend(marks.into_iter().map(|d| offset(d, PAD_X, 0.0)));
                 draws.push(Draw::Text {
@@ -253,9 +267,9 @@ pub fn layout(
                     h
                 }
             }
-            Block::Paragraph(spans) => {
-                text_block(engine, theme, spans, PAD_X, w, theme.fg, &mut draws)
-            }
+            Block::Paragraph { spans, center } => text_block(
+                engine, theme, spans, PAD_X, w, theme.fg, *center, &mut draws,
+            ),
             Block::Item {
                 depth,
                 marker,
@@ -293,6 +307,7 @@ pub fn layout(
                     tx,
                     (w - (tx - PAD_X)).max(40.0),
                     theme.fg,
+                    false,
                     &mut draws,
                 )
             }
@@ -304,6 +319,7 @@ pub fn layout(
                     PAD_X + 16.0,
                     w - 16.0,
                     theme.text_dim,
+                    false,
                     &mut draws,
                 );
                 draws.push(Draw::Rect {
@@ -450,7 +466,9 @@ fn offset(d: Draw, dx: f32, dy: f32) -> Draw {
     }
 }
 
-/// Body text at `x`, `w` wide; returns its height.
+/// Body text at `x`, `w` wide (each line centred when `center`); returns
+/// its height.
+#[allow(clippy::too_many_arguments)]
 fn text_block(
     engine: &mut TextEngine,
     theme: &Theme,
@@ -458,9 +476,10 @@ fn text_block(
     x: f32,
     w: f32,
     color: Color,
+    center: bool,
     draws: &mut Vec<Draw>,
 ) -> f32 {
-    let (buf, h, marks) = rich(engine, theme, spans, BODY, w, color, Weight::NORMAL);
+    let (buf, h, marks) = rich(engine, theme, spans, BODY, w, color, Weight::NORMAL, center);
     draws.extend(marks.into_iter().map(|d| offset(d, x, 0.0)));
     draws.push(Draw::Text {
         buf: Arc::new(buf),
@@ -539,7 +558,7 @@ fn table(
             } else {
                 (theme.fg, Weight::NORMAL)
             };
-            let (buf, h, marks) = rich(engine, theme, cell, size, inner, color, weight);
+            let (buf, h, marks) = rich(engine, theme, cell, size, inner, color, weight, false);
             // alignment of a single-line cell
             let tw = buf
                 .layout_runs()
