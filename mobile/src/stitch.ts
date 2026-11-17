@@ -98,6 +98,36 @@ export function liveMatches(page: StitchPage, live: ScreenState): boolean {
   return true;
 }
 
+/**
+ * After a `stopped` answer (a screen the computer could not join, or a page the program no longer
+ * shows as it was: it laid a message out anew), how long before another `page_ahead` may go out.
+ * The computer then goes on from the page, or starts a new one where the program is.
+ */
+export const PAGE_RETRY_MS = 1500;
+
+/** A `page_ahead` may go out for `page` at `now` (`stoppedAt`: when its last `stopped` came). */
+export function mayAskPage(page: StitchPage | null, now: number, stoppedAt: number): boolean {
+  if (!page || page.state === "ok") return true;
+  return page.state === "stopped" && now - stoppedAt >= PAGE_RETRY_MS;
+}
+
+/**
+ * `stopped` answers in a row that are asked again without the finger (the next scroll still asks):
+ * a page that keeps stopping does not keep moving the program on the computer.
+ */
+export const PAGE_AUTO_RETRIES = 2;
+
+/**
+ * Which way a `page_ahead` goes for a scroller at `y` (`viewH` tall, `contentH` of content): a
+ * screen's worth from an edge whose end the program has not reached, the next rows are asked for
+ * before the finger gets there.
+ */
+export function edgeToAsk(page: StitchPage, y: number, viewH: number, contentH: number): "up" | "down" | null {
+  if (y < viewH && !page.ends[0]) return "up";
+  if (contentH - y - viewH < viewH && !page.ends[1]) return "down";
+  return null;
+}
+
 /** How many rows a `page_ahead` asks for: a few screens of the area, within the bound. */
 export function aheadRows(page: StitchPage | null, liveRows: number): number {
   const h = page ? page.area[1] - page.area[0] : liveRows;

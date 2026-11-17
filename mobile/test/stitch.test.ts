@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { aheadRows, liveMatches, mergePage, pageComplete, pageScreens, pageUsable, type StitchPage } from "../src/stitch";
+import { aheadRows, edgeToAsk, liveMatches, mayAskPage, mergePage, PAGE_RETRY_MS, pageComplete, pageScreens, pageUsable, type StitchPage } from "../src/stitch";
 import type { ScreenState } from "../src/protocol/store";
 import type { PageMsg, ScreenRun } from "../src/protocol/types";
 
@@ -75,5 +75,35 @@ describe("aheadRows", () => {
     expect(aheadRows(null, 40)).toBe(120);
     expect(aheadRows(null, 3)).toBe(20);
     expect(aheadRows(mergePage(null, msg({ area: [0, 300, 0, 10] })) as StitchPage, 40)).toBe(500);
+  });
+});
+
+describe("mayAskPage", () => {
+  it("asks again after a stopped page once a pause has passed; a flat program never", () => {
+    const ok = mergePage(null, msg({ lines: [row("a"), row("b"), row("c")] }));
+    expect(mayAskPage(null, 0, 0)).toBe(true);
+    expect(mayAskPage(ok, 0, 0)).toBe(true);
+    const stopped = { ...ok, state: "stopped" as const };
+    expect(mayAskPage(stopped, 1000, 1000)).toBe(false);
+    expect(mayAskPage(stopped, 1000 + PAGE_RETRY_MS - 1, 1000)).toBe(false);
+    expect(mayAskPage(stopped, 1000 + PAGE_RETRY_MS, 1000)).toBe(true);
+    expect(mayAskPage({ ...ok, state: "flat" }, 1e9, 0)).toBe(false);
+  });
+});
+
+describe("edgeToAsk", () => {
+  it("asks a screen's worth from an edge whose end is not reached, up first", () => {
+    const p = mergePage(null, msg({ lines: [row("a"), row("b"), row("c")] })) as StitchPage;
+    const open = { ...p, ends: [false, false] as [boolean, boolean] };
+    // 100 tall view over 1000 of content
+    expect(edgeToAsk(open, 0, 100, 1000)).toBe("up");
+    expect(edgeToAsk(open, 99, 100, 1000)).toBe("up");
+    expect(edgeToAsk(open, 100, 100, 1000)).toBe(null);
+    expect(edgeToAsk(open, 801, 100, 1000)).toBe("down");
+    expect(edgeToAsk(open, 800, 100, 1000)).toBe(null);
+    expect(edgeToAsk({ ...open, ends: [true, false] }, 0, 100, 150)).toBe("down");
+    expect(edgeToAsk({ ...open, ends: [true, true] }, 0, 100, 150)).toBe(null);
+    // not laid out yet: nothing
+    expect(edgeToAsk(open, 0, 0, 0)).toBe(null);
   });
 });

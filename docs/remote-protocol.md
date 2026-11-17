@@ -1005,16 +1005,25 @@ scrolls natively.
   scrolls 3 wheel lines a step (more inside rows the page already holds), and
   reads the screen once it has not changed for 30 ms (Claude Code redraws a
   scroll in pieces; a step it does not answer within 150 ms moved nothing).
-  From the first 6 screens it learns the area: the rows whose text moves
+  From the first 8 screens it learns the area: the rows whose text moves
   from one screen to the next (a sticky header, a "jump to bottom" hint, a
   status line change in place and stay out) and the columns that change,
   widened to the screen's edges or a pane border (`│`). A screen joins the
   page only past an overlap of at least 4 rows with the page's end, or is
-  found inside the page: a screen caught mid-redraw, or a jump, stops the
-  page (`stopped`), it never adds wrong rows.
-- `ends`: the program's start and end were reached (two steps moved
-  nothing). `state` `flat`: nothing on the screen scrolls like a document
-  (htop, a menu), so there is no page; the phone keeps the wheel (`scroll`).
+  found inside the page; it never adds wrong rows. A screen too far to join
+  (Claude Code jumps tens or hundreds of rows now and then, laying a long
+  message out anew) sends the program back in steps that double (at most a
+  quarter of the page) until a screen joins or is found, then on one line a
+  step; after 4 such jumps in a job, or a screen caught mid-redraw that never
+  joins, the page stops growing (`stopped`).
+- `stopped` is not the end: the phone asks again after 1.5 s (on its own
+  twice in a row while the view is near that edge, again from each drag). A seek that
+  finds rows the page does not hold (the program laid them out anew since)
+  answers `stopped` too; the next `page_ahead` then starts a new page there.
+- `ends`: the program's start and end were reached (two steps moved nothing
+  in the area: a status line or a clock changing beside it does not count).
+  `state` `flat`: nothing on the screen scrolls like a document (htop, a
+  menu), so there is no page; the phone keeps the wheel (`scroll`).
 - While a job runs the pane's screens wait (none go out); afterwards the
   screen shows where the program is now. A job stops after 3 s, and a page
   at 5000 rows.

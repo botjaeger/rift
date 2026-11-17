@@ -2981,9 +2981,10 @@ fn run_stitch<S: Source>(shared: &Shared<S>, job: StitchJob) -> Vec<ServerMsg> {
             let mut added = 0usize;
             let mut still = 0;
             let mut page = taken;
-            // after a screen that could not be joined: one line a step (a program that speeds
-            // up under a repeated wheel, as Claude Code does, then moves one row at a time)
+            // after a screen too far to join: one line a step (a program that speeds up under
+            // a repeated wheel, as Claude Code does, moves one row for one line)
             let mut fine = false;
+            let mut recoveries = 0;
             while added < want && started.elapsed() < shared.config.page_job_time {
                 if page
                     .as_ref()
@@ -3006,7 +3007,12 @@ fn run_stitch<S: Source>(shared: &Shared<S>, job: StitchJob) -> Vec<ServerMsg> {
                     state = PageState::Stopped;
                     break;
                 };
-                let moved = now != prev;
+                // once the area is known only it counts: a status line that ticks (Claude Code's
+                // clock) is no move, and the program's end is still found
+                let moved = match page.as_ref() {
+                    Some(p) => !p.same_area(&frame_of(&prev), &frame_of(&now)),
+                    None => now != prev,
+                };
                 prev = now.clone();
                 if !moved {
                     still += 1;
@@ -3041,47 +3047,72 @@ fn run_stitch<S: Source>(shared: &Shared<S>, job: StitchJob) -> Vec<ServerMsg> {
                             break;
                         }
                     }
-                    Some(p) => match p.extend(&f, dir) {
-                        Joined::Added { from, count } => {
-                            added += count;
-                            let r = new_rows.get_or_insert((from, from + count as i64));
-                            r.0 = r.0.min(from);
-                            r.1 = r.1.max(from + count as i64);
-                        }
-                        Joined::Same => {}
-                        // a step too far for an overlap: back one line at a time until the
-                        // screen is one the page holds, then on in single lines
-                        Joined::Unstitched if !fine => {
+                    Some(p) => {
+                        let mut joined = p.extend(&f, dir);
+                        // a step that went too far for an overlap (Claude Code jumps tens or
+                        // hundreds of rows now and then: a long message above is laid out anew
+                        // at its real height): back in steps that double until the screen is
+                        // one the page holds or overlaps its end. A step is at most a quarter
+                        // of the page (a program may move a few lines further than asked) and
+                        // within the wheel's bound, so none passes over it: one past the end
+                        // lands inside, found there. Then on in single lines (the message has
+                        // its height now)
+                        if joined == Joined::Unstitched && recoveries < crate::STITCH_RECOVERIES {
+                            recoveries += 1;
                             fine = true;
                             let back = match dir {
                                 Dir::Up => Dir::Down,
                                 Dir::Down => Dir::Up,
                             };
-                            let mut found = false;
-                            for _ in 0..crate::STITCH_BACK_STEPS {
-                                if !step(back, 1) {
+                            let quarter = (p.len() / 4).clamp(1, MAX_SCROLL_LINES as usize) as i32;
+                            let mut lines = crate::STITCH_STEP_LINES.min(quarter);
+                            for back_steps in 1..=crate::STITCH_BACK_STEPS {
+                                if started.elapsed() >= 2 * shared.config.page_job_time
+                                    || !step(back, lines)
+                                {
                                     break;
                                 }
+                                lines = (lines * 2).min(quarter);
                                 let Some(now) = rested_screen(shared, pane, Some(&prev)) else {
                                     break;
                                 };
                                 prev = now.clone();
-                                if let Some(i) = p.locate(&frame_of(&now)) {
+                                let g = frame_of(&now);
+                                if let Some(i) = p.locate(&g) {
                                     p.set_at(i);
-                                    found = true;
+                                    joined = Joined::Same;
                                     break;
                                 }
+                                let j = p.extend(&g, dir);
+                                if j != Joined::Unstitched {
+                                    joined = j;
+                                    break;
+                                }
+                                if back_steps == crate::STITCH_BACK_STEPS {
+                                    log::debug!(
+                                        "remote: pane {pane}: stitching: the page not found again"
+                                    );
+                                }
                             }
-                            if !found {
+                            log::debug!(
+                                "remote: pane {pane}: stitching: a screen too far to join at {}, back: {joined:?}",
+                                p.at()
+                            );
+                        }
+                        match joined {
+                            Joined::Added { from, count } => {
+                                added += count;
+                                let r = new_rows.get_or_insert((from, from + count as i64));
+                                r.0 = r.0.min(from);
+                                r.1 = r.1.max(from + count as i64);
+                            }
+                            Joined::Same => {}
+                            Joined::Unstitched => {
                                 state = PageState::Stopped;
                                 break;
                             }
                         }
-                        Joined::Unstitched => {
-                            state = PageState::Stopped;
-                            break;
-                        }
-                    },
+                    }
                 }
             }
             // the start reached before the area could be learned: learn from what there is
@@ -3134,8 +3165,12 @@ fn run_stitch<S: Source>(shared: &Shared<S>, job: StitchJob) -> Vec<ServerMsg> {
                                 break;
                             }
                         }
-                        // the program showed something the page does not hold
+                        // the program showed something the page does not hold (it laid a
+                        // message out anew since): the next page_ahead starts a page there
                         None => {
+                            log::debug!(
+                                "remote: pane {pane}: seek: the program shows rows the page does not hold"
+                            );
                             state = PageState::Stopped;
                             break;
                         }

@@ -124,8 +124,11 @@ pub const SETTLE_NO_CHANGE: Duration = Duration::from_millis(150);
 /// Wheel lines per stitch step: small enough that a screen keeps the
 /// stitcher's overlap with the last one even when the program speeds up.
 pub const STITCH_STEP_LINES: i32 = 3;
-/// Single-line steps back toward the page after a screen too far to join.
-pub const STITCH_BACK_STEPS: usize = 30;
+/// Steps ([`STITCH_STEP_LINES`] each) back toward the page after a screen
+/// too far to join.
+pub const STITCH_BACK_STEPS: usize = 40;
+/// Screens too far to join one stitch job steps back from before it stops.
+pub const STITCH_RECOVERIES: usize = 4;
 /// Rested screens the stitcher learns the scrolling area from.
 pub const STITCH_LEARN_FRAMES: usize = 8;
 /// Largest image or file an `upload` carries, in bytes.

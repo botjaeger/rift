@@ -167,6 +167,46 @@ fn main() {
             }
         }
     }
+    // stitched pages: `up`, `down` (a page_ahead of 120 rows), `seek:AT` or `fit:COLSxROWS` (the
+    // pane at the phone's size), comma-separated, each answered before the next; the last page's
+    // epoch carries on
+    if let Ok(spec) = std::env::var("PHONE_PAGES") {
+        let mut epoch = 0u64;
+        for (i, step) in spec.split(',').enumerate() {
+            if let Some(size) = step.strip_prefix("fit:") {
+                let (c, r) = size.split_once('x').expect("fit:COLSxROWS");
+                send(
+                    &mut ch,
+                    json!({"t":"fit","id":format!("pg{i}"),"pane":pane,"cols":c.parse::<u16>().unwrap(),"rows":r.parse::<u16>().unwrap()}),
+                );
+                // the program redraws at the new size
+                let until = Instant::now() + Duration::from_secs(3);
+                while recv(&mut ch, until).is_some() {}
+                continue;
+            }
+            let msg = match step.strip_prefix("seek:") {
+                Some(at) => {
+                    let at: i64 = at.parse().expect("seek:AT");
+                    json!({"t":"page_seek","id":format!("pg{i}"),"pane":pane,"epoch":epoch,"at":at})
+                }
+                None => {
+                    json!({"t":"page_ahead","id":format!("pg{i}"),"pane":pane,"epoch":epoch,"dir":step,"rows":120})
+                }
+            };
+            send(&mut ch, msg);
+            let mut until = Instant::now() + Duration::from_secs(10);
+            while let Some(v) = recv(&mut ch, until) {
+                if v["t"] == "ack" && v["ok"] != true {
+                    break;
+                }
+                if v["t"] == "page" {
+                    epoch = v["epoch"].as_u64().unwrap_or(0);
+                    // the job's other chunks follow at once
+                    until = Instant::now() + Duration::from_millis(400);
+                }
+            }
+        }
+    }
     if refused {
         println!("run refused");
     }

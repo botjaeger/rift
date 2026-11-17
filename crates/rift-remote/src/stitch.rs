@@ -263,6 +263,17 @@ impl Page {
             .collect()
     }
 
+    /// `a` and `b` show the same rows in the area (what else changed, a
+    /// status line or a pane beside it, does not count). False when either
+    /// does not cover the area.
+    pub(crate) fn same_area(&self, a: &Frame, b: &Frame) -> bool {
+        let covers = |f: &Frame| {
+            f.text.len() >= self.area.rows.end
+                && f.text.first().map_or(0, Vec::len) >= self.area.cols.end
+        };
+        covers(a) && covers(b) && self.area_text(a) == self.area_text(b)
+    }
+
     /// Where `frame`'s area rows sit in the page (the first such index), if
     /// they do, exactly.
     pub(crate) fn locate(&self, frame: &Frame) -> Option<i64> {

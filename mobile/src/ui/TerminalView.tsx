@@ -50,7 +50,7 @@ import { RUN_BOLD, RUN_ITALIC, RUN_STRIKE, RUN_UNDERLINE, type ScreenRun } from 
 import { authenticate, fleet, useApp } from "@/runtime";
 import { useActionScope } from "./useActionScope";
 import { DRAG_SLOP, DragVelocity, dragLines, dragScrollsPane, Fling, ScrollCoalescer } from "@/scroll";
-import { aheadRows, liveMatches, mergePage, pageBody as stitchedBody, pageComplete, pageFixed, pageUsable, type StitchPage } from "@/stitch";
+import { aheadRows, edgeToAsk, liveMatches, mayAskPage, mergePage, PAGE_AUTO_RETRIES, PAGE_RETRY_MS, pageBody as stitchedBody, pageComplete, pageFixed, pageUsable, type StitchPage } from "@/stitch";
 import { composite, HISTORY_PAGE, missing, nextCache, withPage, type HistoryCache } from "@/history";
 import { draftKey } from "@/fleet";
 import { pending, PENDING_FULL, readClipboard, type AttachRules, type Attached } from "@/pending";
@@ -907,6 +907,15 @@ export function TerminalView({
   // second); a reply lost with the connection counts as none after PAGE_REPLY_MS
   const askedAt = useRef<number | null>(null);
   const asking = () => askedAt.current !== null && Date.now() - askedAt.current < PAGE_REPLY_MS;
+  // when the last `stopped` came: stitching is asked to go on after a pause (mayAskPage)
+  const stoppedAt = useRef(0);
+  // a stopped page is asked to go on once the pause passed, without another drag (Android sends
+  // no scroll at an edge, so the finger there asks nothing): PAGE_AUTO_RETRIES in a row at most,
+  // counted again from the next drag
+  const retryTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const autoRetries = useRef(0);
+  const retryLater = useRef<() => void>(() => {});
+  useEffect(() => () => clearTimeout(retryTimer.current), []);
   // a page that came in: the program sits at its far end, the view may be elsewhere
   const seekLater = useRef<() => void>(() => {});
   useEffect(() => {
@@ -922,6 +931,12 @@ export function TerminalView({
         const shape = shapeRef.current;
         const held = pageNow.current;
         const next = mergePage(held.shape === shape ? held.page : null, msg);
+        clearTimeout(retryTimer.current);
+        if (msg.state === "stopped") {
+          stoppedAt.current = Date.now();
+          // a little past the pause: a timer that fires a moment early is not refused
+          retryTimer.current = setTimeout(() => retryLater.current(), PAGE_RETRY_MS + 100);
+        } else if (msg.state === "ok") autoRetries.current = 0;
         holdPage({ shape, page: next });
         if (pageComplete(next) && askedAt.current !== null) {
           askedAt.current = null;
@@ -933,7 +948,7 @@ export function TerminalView({
   const paging = canStitch && pageUsable(page);
   const askPage = (dir: "up" | "down") => {
     const p = pageRef.current;
-    if (asking() || p?.state === "flat" || (p && p.state !== "ok")) return;
+    if (asking() || !mayAskPage(p, Date.now(), stoppedAt.current)) return;
     askedAt.current = Date.now();
     void fleet.pageAhead(hostKey, paneId, p?.epoch ?? 0, dir, aheadRows(p, liveScreen?.rows ?? 24)).then((r) => {
       if (!r.ok) askedAt.current = null;
@@ -962,12 +977,28 @@ export function TerminalView({
     clearTimeout(seekTimer.current);
     const p = pageRef.current;
     if (!p) return;
-    // a screen's worth from an edge: the next rows are asked for before the finger gets there
-    const fromTop = contentOffset.y;
-    const fromBottom = contentSize.height - contentOffset.y - layoutMeasurement.height;
-    if (fromTop < layoutMeasurement.height && !p.ends[0]) askPage("up");
-    else if (fromBottom < layoutMeasurement.height && !p.ends[1]) askPage("down");
+    const dir = edgeToAsk(p, contentOffset.y, layoutMeasurement.height, contentSize.height);
+    if (dir) askPage(dir);
   };
+  // a drag starts (at an edge too, where no scroll follows): the page is asked for there
+  const onPageDrag = () => {
+    autoRetries.current = 0;
+    const p = pageRef.current;
+    const v = pageView.current;
+    const dir = p && edgeToAsk(p, v.y, v.viewH, v.contentH);
+    if (dir) askPage(dir);
+  };
+  useEffect(() => {
+    retryLater.current = () => {
+      const p = pageRef.current;
+      const v = pageView.current;
+      if (!p || !pageUsable(p) || autoRetries.current >= PAGE_AUTO_RETRIES) return;
+      const dir = edgeToAsk(p, v.y, v.viewH, v.contentH);
+      if (!dir) return;
+      autoRetries.current += 1;
+      askPage(dir);
+    };
+  });
   // scrolling stopped: the program goes where the view is, so keys and its screen carry on there
   const onPageRest = () => {
     clearTimeout(seekTimer.current);
@@ -1575,6 +1606,7 @@ export function TerminalView({
           accessibilityLabel={`${label}, scrolled through its stitched lines`}
           onScroll={onPageScroll}
           scrollEventThrottle={16}
+          onScrollBeginDrag={onPageDrag}
           onScrollEndDrag={onPageRest}
           onMomentumScrollEnd={onPageRest}
           onContentSizeChange={onPageContent}

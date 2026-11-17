@@ -313,7 +313,10 @@ card cannot answer (a password, other input, a view-only device), and from an al
   either edge, and half a second after scrolling stops the computer moves the program there, so
   keys and its screen carry on where the view is. New output where the program is ends the page
   (the live screen comes back); a program whose screen does not scroll like a document (htop, a
-  menu) answers `flat` and keeps the wheel. While a page shows, a hold selects nothing and a tap
+  menu) answers `flat` and keeps the wheel. A page that stopped growing (`stopped`: a screen the
+  computer could not join, or the program laid its rows out anew) is asked to go on again 1.5 s
+  later (`mayAskPage`; on its own twice in a row while the view is near that edge, since Android
+  sends no scroll at an edge, again from each drag); the computer then goes on, or starts a new page where the program is. While a page shows, a hold selects nothing and a tap
   clicks nothing. **Paste** puts the clipboard in the message box and sends nothing (below); on **Send** an image
   goes to the computer (feature `upload`, operate only, at most 10 MB, `src/upload.ts`), which saves it and
   pastes its path into the running program, as dropping the file on the window does: Claude

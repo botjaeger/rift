@@ -91,6 +91,12 @@ struct State {
     /// Every this many reads of a doc viewer's screen fails with "read again" (the
     /// window's answer while another reader holds its cache); 0: none.
     flaky_reads: usize,
+    /// The doc viewer's status row ticks every 25 reads, about 0.1 s (Claude Code's
+    /// clock): between two wheel steps, even ones that moved nothing.
+    ticking: bool,
+    /// Once the view's first line goes above `.0` scrolling up, it jumps `.1`
+    /// lines further (Claude Code laying a long message out anew at its height).
+    jump: Option<(i64, i64)>,
 }
 
 /// Rows of a [`State::docs`] viewer's screen: a sticky header, the document,
@@ -348,7 +354,8 @@ impl Source for Fake {
         }
         if let Some((lines, top)) = st.docs.get(&pane) {
             // the status ticks only now and then: a screen at rest stays equal
-            return Ok(Some(doc_screen(lines, *top, reads / 1000)));
+            let tick = reads / if st.ticking { 25 } else { 1000 };
+            return Ok(Some(doc_screen(lines, *top, tick)));
         }
         Ok(st.screens.get(&pane).filter(|s| s.alt || force).cloned())
     }
@@ -373,9 +380,17 @@ impl Source for Fake {
                 moved *= st.streak.min(6);
             }
         }
+        let jump = st.jump;
         if let Some((doc, top)) = st.docs.get_mut(&pane) {
             let last = doc.len() as i64 - (DOC_ROWS as i64 - 2);
             *top = (*top - moved).clamp(0, last.max(0));
+            if let Some((at, extra)) = jump
+                && moved > 0
+                && *top < at
+            {
+                *top = (*top - extra).max(0);
+                st.jump = None;
+            }
         }
         Ok(())
     }
@@ -826,9 +841,13 @@ fn put(ch: &mut Ch, v: Value) {
 /// slowest wait measured here is 0.2 s, but a loaded CI runner took over 3 s
 /// for the ~1 MiB frames of `a_slow_client_gets_the_newest_screen_…`.
 fn recv(ch: &mut Ch) -> Value {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    recv_within(ch, Duration::from_secs(10))
+}
+
+fn recv_within(ch: &mut Ch, wait: Duration) -> Value {
+    let deadline = Instant::now() + wait;
     loop {
-        assert!(Instant::now() < deadline, "no message within 10 s");
+        assert!(Instant::now() < deadline, "no message within {wait:?}");
         match ch.recv() {
             Recv::Msg(m) => return serde_json::from_slice(&m).unwrap(),
             Recv::Idle | Recv::Alive | Recv::Partial => {}
@@ -5082,10 +5101,19 @@ fn doc_lines(n: usize) -> Vec<String> {
 }
 
 /// The `page` answers to one request, until one carries all its rows.
+/// The `page` messages that answer a job. A job here runs until it has every
+/// row it was asked for (`start` sets a 30 s job time), and under the test
+/// gate's load (background QoS, 32 threads) one took 13.8 s: the wait is the
+/// job time, not [`recv`]'s 10 s.
 fn pages(ch: &mut Ch) -> Vec<Value> {
     let mut out = Vec::new();
     loop {
-        let p = recv_t(ch, "page");
+        let p = loop {
+            let v = recv_within(ch, Duration::from_secs(30));
+            if v["t"] == "page" {
+                break v;
+            }
+        };
         let last = p["from"].as_i64().unwrap() + p["lines"].as_array().unwrap().len() as i64;
         let done =
             last >= p["bottom"].as_i64().unwrap() || p["lines"].as_array().unwrap().is_empty();
@@ -5334,4 +5362,50 @@ fn a_screen_read_that_fails_now_and_then_does_not_stop_the_page() {
     assert!(top <= -60, "{}", got[0]);
     let text: Vec<String> = got.iter().flat_map(page_text).collect();
     assert_eq!(text, doc[(300 + top) as usize..312].to_vec());
+}
+
+#[test]
+fn a_program_that_jumps_far_once_still_stitches_whole() {
+    let env = start(|_| {});
+    let doc = doc_lines(400);
+    {
+        let mut st = env.fake.0.lock().unwrap();
+        st.docs.insert(12, (doc.clone(), 300));
+        // past line 285 the view lands 60 lines further up: no overlap with the page
+        st.jump = Some((285, 60));
+    }
+    let (_, mut ch, _) = env.pair(Permission::Operate);
+    put(
+        &mut ch,
+        json!({"t":"page_ahead","id":"g1","pane":12,"epoch":0,"dir":"up","rows":40}),
+    );
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (true, ""));
+    let got = pages(&mut ch);
+    assert_eq!(got[0]["state"], "ok", "{}", got[0]);
+    let top = got[0]["top"].as_i64().unwrap();
+    // past the jump (line 285), every line on the way
+    assert!(top <= -40, "{}", got[0]);
+    let text: Vec<String> = got.iter().flat_map(page_text).collect();
+    assert_eq!(text, doc[(300 + top) as usize..312].to_vec());
+}
+
+#[test]
+fn the_documents_start_is_found_while_a_status_line_ticks() {
+    let env = start(|_| {});
+    let doc = doc_lines(60);
+    {
+        let mut st = env.fake.0.lock().unwrap();
+        st.docs.insert(12, (doc.clone(), 20));
+        st.ticking = true;
+    }
+    let (_, mut ch, _) = env.pair(Permission::Operate);
+    put(
+        &mut ch,
+        json!({"t":"page_ahead","id":"g1","pane":12,"epoch":0,"dir":"up","rows":200}),
+    );
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (true, ""));
+    let got = pages(&mut ch);
+    assert_eq!(got[0]["ends"], json!([true, false]), "{}", got[0]);
+    let text: Vec<String> = got.iter().flat_map(page_text).collect();
+    assert_eq!(text, doc[0..32].to_vec());
 }
