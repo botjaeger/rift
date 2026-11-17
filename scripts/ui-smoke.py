@@ -1577,8 +1577,13 @@ def run_chips(name, steps):
                             stdout=log, stderr=log, timeout=60).returncode
     assert rc == 0, died(f"chips {name} run failed", chips / f"{name}.log")
 
-run_chips("probe", [f"dump {chips}/probe.txt"])
-probe = (chips / "probe.txt").read_text()
+# the chips come from a background git read: a loaded runner draws them
+# late, so probe again until both are there
+for _ in range(4):
+    run_chips("probe", [f"dump {chips}/probe.txt"])
+    probe = (chips / "probe.txt").read_text()
+    if "Working directory@" in probe and "Git branch@" in probe:
+        break
 cwd_xy = re.search(r"Working directory@(\d+),(\d+),(\d+),(\d+)", probe).groups()
 run_chips("rows", [f"click {int(cwd_xy[0]) + 10} {int(cwd_xy[1]) + 9}", "wait 200",
                    f"dump {chips}/rows.txt"])
@@ -1696,8 +1701,13 @@ def run_tools(name, steps):
                             env=tool_env, stdout=log, stderr=log, timeout=60).returncode
     assert rc == 0, died(f"tools {name} run failed", tl / f"{name}.log")
 
-run_tools("probe", [f"dump {tl}/probe.txt"])
-probe = (tl / "probe.txt").read_text()
+# the tool chips come from background reads (PATH, gh, docker): a loaded
+# runner draws them late, so probe again until all four are there
+for _ in range(4):
+    run_tools("probe", [f"dump {tl}/probe.txt"])
+    probe = (tl / "probe.txt").read_text()
+    if '"Docker:repo 1/2"]' in probe:
+        break
 assert 'prompt_chips_shown=["GithubPr:PR #42", "Python:3.12.2", "Php:8.4.1", "Docker:repo 1/2"]' \
     in probe, probe
 def tool_chip(label):
