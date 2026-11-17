@@ -33,6 +33,7 @@ import {
   type MoveKind,
   type OpenKind,
   type OutputMsg,
+  type PageMsg,
   type ChipAnswerMsg,
   type ChipDetailKind,
   type ChipMsg,
@@ -209,6 +210,8 @@ export interface ClientEvents {
   onScreen?(msg: ScreenMsg | ScreenEndMsg, synthetic?: boolean): void;
   /** A re-subscribe or reconnect: the screen on display is out of date until the next one. */
   onScreenStale?(pane: number): void;
+  /** Rows of a pane's stitched page (feature `stitch`). */
+  onPage?(msg: PageMsg): void;
 }
 
 /** An `output` request that has not been answered by then fails with `timeout`. */
@@ -268,8 +271,19 @@ function exactBuffer(bytes: Uint8Array): ArrayBuffer {
   return bytes.slice().buffer as ArrayBuffer;
 }
 
+/**
+ * LAN addresses kept beyond the ones the computer's last welcome named: the networks it was on
+ * before, which it may join again. Each costs up to LAN_HANDSHAKE_TIMEOUT_MS in a round, so few.
+ */
+export const MAX_KEPT_ADDRESSES = 4;
+
+function sameEndpoint(a: Endpoint, b: Endpoint): boolean {
+  return a.kind === "lan" ? b.kind === "lan" && a.address === b.address : b.kind === "relay" && a.url === b.url;
+}
+
 export class RiftClient {
-  private readonly endpoints: Endpoint[];
+  /** The paths in trying order: the pairing link's, then the addresses a welcome names. */
+  private endpoints: Endpoint[];
   private readonly hasRelay: boolean;
   private readonly identity: KeyPair;
   private readonly gatewayKey: Uint8Array;
@@ -326,6 +340,8 @@ export class RiftClient {
   /** Index of the path being tried, and how many this round has tried. */
   private current = 0;
   private triedThisRound = 0;
+  /** This round opened a LAN address (one that failed: probing it again is pointless). */
+  private lanTriedThisRound = false;
   /** Paths this round that answered with another key than the pinned one. */
   private mismatchedThisRound = 0;
 
@@ -427,6 +443,100 @@ export class RiftClient {
   /** The path that last reached `welcome`, where the next round starts. */
   get preferredPath(): Endpoint {
     return this.endpoints[this.preferred]!;
+  }
+
+  /** Every LAN address in trying order (the pairing link's and what welcomes named since). */
+  get lanAddresses(): string[] {
+    return this.endpoints.flatMap((e) => (e.kind === "lan" ? [e.address] : []));
+  }
+
+  /**
+   * The computer's addresses now (`welcome`): it changes networks, and the pairing link's go
+   * stale, which left only the relay. They go first, the old ones after (a network it goes back
+   * to). Over the relay, the LAN addresses this round did not try are opened beside it (the new
+   * ones always; all of them when the round went straight to the relay, the path that worked
+   * last: the phone may have joined the computer's network, or been allowed onto local networks,
+   * since). One that answers takes the connection over (many times faster); none that does
+   * leaves the relay as it was.
+   */
+  private learnAddresses(addresses: string[] | undefined): void {
+    const known = this.lanAddresses;
+    const fresh = (addresses ?? []).filter((a) => !known.includes(a));
+    if (fresh.length > 0) this.mergeAddresses(addresses!, known);
+    if (this.endpoints[this.current]!.kind === "relay") this.probeLan(this.lanTriedThisRound ? fresh : this.lanAddresses);
+  }
+
+  private mergeAddresses(addresses: string[], known: string[]): void {
+    const at = this.endpoints[this.current]!;
+    const preferred = this.endpoints[this.preferred]!;
+    const lastLan = this.endpoints[this.lastLan]!;
+    const lan = [...addresses, ...known.filter((a) => !addresses.includes(a))].slice(0, Math.max(addresses.length, MAX_KEPT_ADDRESSES));
+    const relay = this.endpoints.find((e) => e.kind === "relay");
+    const old = this.state.paths;
+    this.endpoints = endpointsFor(lan, relay?.kind === "relay" ? relay.url : null);
+    const indexOf = (e: Endpoint) => Math.max(0, this.endpoints.findIndex((x) => sameEndpoint(x, e)));
+    this.current = indexOf(at);
+    this.preferred = indexOf(preferred);
+    this.lastLan = indexOf(lastLan);
+    this.setState({
+      paths: this.endpoints.map(
+        (path) => old.find((p) => sameEndpoint(p.path, path)) ?? { path, state: "idle", error: null, waitedMs: null, latencyMs: null, reached: false },
+      ),
+    });
+  }
+
+  /** Sockets opened to a LAN address beside the relay ([learnAddresses]), not yet answered. */
+  private lanProbes: SocketLike[] = [];
+
+  private probeLan(addresses: string[]): void {
+    for (const address of addresses) {
+      let ws: SocketLike;
+      try {
+        ws = this.makeSocket(wsUrl(address));
+        ws.binaryType = "arraybuffer";
+      } catch {
+        continue;
+      }
+      this.lanProbes.push(ws);
+      const drop = () => {
+        clearTimeout(timer);
+        this.lanProbes = this.lanProbes.filter((p) => p !== ws);
+        ws.onopen = ws.onmessage = ws.onerror = ws.onclose = null;
+        try {
+          ws.close();
+        } catch {
+          // already closed
+        }
+      };
+      const timer = setTimeout(drop, LAN_HANDSHAKE_TIMEOUT_MS);
+      ws.onerror = ws.onclose = drop;
+      ws.onopen = () => {
+        const i = this.endpoints.findIndex((e) => e.kind === "lan" && e.address === address);
+        // still open over the relay: the first address to answer takes the connection over
+        if (!this.authed || this.endpoints[this.current]?.kind !== "relay" || i === -1) return drop();
+        clearTimeout(timer);
+        this.lanProbes = this.lanProbes.filter((p) => p !== ws);
+        this.teardown();
+        this.triedThisRound = 0;
+        this.mismatchedThisRound = 0;
+        this.current = i;
+        this.state = { ...this.state, paths: this.freshPaths() };
+        this.open(ws);
+      };
+    }
+  }
+
+  private closeLanProbes(): void {
+    const probes = this.lanProbes;
+    this.lanProbes = [];
+    for (const ws of probes) {
+      ws.onopen = ws.onmessage = ws.onerror = ws.onclose = null;
+      try {
+        ws.close();
+      } catch {
+        // already closed
+      }
+    }
   }
 
   start(): void {
@@ -586,6 +696,20 @@ export class RiftClient {
     if (!this.send({ t: "scroll", id, pane, lines })) return null;
     this.meter.scrolled(Date.now());
     return id;
+  }
+
+  /** Asks for `rows` more stitched rows toward `dir` (feature `stitch`); the `ack` id, or null. */
+  pageAhead(pane: number, epoch: number, dir: "up" | "down", rows: number): string | null {
+    if (!this.authed) return null;
+    const id = `g${++this.idN}`;
+    return this.send({ t: "page_ahead", id, pane, epoch, dir, rows }) ? id : null;
+  }
+
+  /** Moves the program to page row `at` (feature `stitch`); the `ack` id, or null. */
+  pageSeek(pane: number, epoch: number, at: number): string | null {
+    if (!this.authed) return null;
+    const id = `g${++this.idN}`;
+    return this.send({ t: "page_seek", id, pane, epoch, at }) ? id : null;
   }
 
   /**
@@ -903,16 +1027,19 @@ export class RiftClient {
 
   private startRound(from = this.preferred): void {
     this.triedThisRound = 0;
+    this.lanTriedThisRound = false;
     this.mismatchedThisRound = 0;
     this.current = from;
     this.state = { ...this.state, paths: this.freshPaths() };
     this.open();
   }
 
-  private open(): void {
+  /** Connects over the current path; `opened`: a LAN socket that already answered ([probeLan]). */
+  private open(opened?: SocketLike): void {
     const path = this.endpoints[this.current]!;
     const address = path.kind === "lan" ? path.address : path.url;
     this.triedThisRound++;
+    if (path.kind === "lan") this.lanTriedThisRound = true;
     this.attemptAt = Date.now();
     this.attemptError = null;
     this.setState({
@@ -932,7 +1059,7 @@ export class RiftClient {
           : HANDSHAKE_TIMEOUT_MS;
     let ws: SocketLike;
     try {
-      ws = this.makeSocket(path.kind === "lan" ? wsUrl(address) : relayConnectUrl(path.url, this.gatewayKey));
+      ws = opened ?? this.makeSocket(path.kind === "lan" ? wsUrl(address) : relayConnectUrl(path.url, this.gatewayKey));
       ws.binaryType = "arraybuffer";
     } catch (e) {
       this.setState({ error: e instanceof Error ? e.message : String(e) });
@@ -988,6 +1115,8 @@ export class RiftClient {
       if (typeof reason === "string" && reason !== "" && (this.attemptError === null || this.attemptError === "connection error")) this.attemptError = reason;
       this.dropAttempt(null);
     };
+    // a probe's socket answered already: its open will not fire again
+    if (opened) ws.onopen(null);
   }
 
   /** Message 2 from the gateway: check the pinned key and its hello, answer with message 3. */
@@ -1102,6 +1231,8 @@ export class RiftClient {
         this.meter.reset(Date.now());
         // the pane first: what is on screen comes back before anything else is sent
         if (this.pane !== null) this.sendSubscribe();
+        // before onWelcome, which stores the addresses with the host
+        this.learnAddresses(msg.addresses);
         this.events.onWelcome?.(msg);
         // the first round trip, so the Connection sheet has a latency before the 15 s keep-alive
         this.ping();
@@ -1131,6 +1262,9 @@ export class RiftClient {
         // and so is a chip request
         if (!msg.ok && this.settleChip(msg.id, { ok: false, code: msg.error ?? "error", message: msg.message ?? "" })) return;
         this.events.onAck?.(msg);
+        return;
+      case "page":
+        this.events.onPage?.(msg);
         return;
       case "output": {
         // an answer for another pane or block, or starting past the range asked for, is bad data
@@ -1370,6 +1504,7 @@ export class RiftClient {
 
   /** Drops the current socket and its timers; handlers of the old socket become no-ops. */
   private teardown(): void {
+    this.closeLanProbes();
     const ws = this.ws;
     this.ws = null;
     this.hs = null;

@@ -684,6 +684,7 @@ export default function PaneScreen() {
               canFit={hasFeature(host, "fit")}
               canScroll={hasFeature(host, "scroll")}
               canHistory={hasFeature(host, "history")}
+              canStitch={hasFeature(host, "stitch") && operate}
               canUpload={hasFeature(host, "upload") && operate}
               canUploadFiles={hasFeature(host, "upload_files") && operate}
               onPasted={() => setPastedPane(paneId)}

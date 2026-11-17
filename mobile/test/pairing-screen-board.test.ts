@@ -5,6 +5,7 @@ import * as answer from "../src/answer";
 import * as terminal from "../src/terminal";
 import * as topology from "../src/topology";
 import type { Waiting } from "../src/protocol/types";
+import * as stitchModule from "../src/stitch";
 import { stubColors, themeStub } from "./helpers/themeStub";
 import { findAll, flat, load, react, render, textOf, uiDeps, type Node } from "./helpers/render";
 
@@ -346,7 +347,7 @@ describe("the program screen and its selection (the New Screen and selection boa
       react: { ...react, memo: (c: unknown) => c },
       "expo-router": {},
       "react-native": { ...(uiDeps("ios")["react-native"] as object) },
-      "@/runtime": {}, "@/scroll": {}, "@/history": {}, "@/terminal": terminal, "@/paneView": paneView, "@/selection": {}, "@/haptics": {},
+      "@/runtime": {}, "@/scroll": {}, "@/stitch": stitchModule, "@/history": {}, "@/terminal": terminal, "@/paneView": paneView, "@/selection": {}, "@/haptics": {},
       "@/keyboard": {}, "@/lock": {}, "@/pending": {}, "@/fleet": {}, "@/protocol/types": {}, "@/controlKeys": {},
       "./useActionScope": {}, "./useOpenShell": {}, "./Icon": {}, "./SelectionBar": {}, "./ControlRow": {}, "./PaneLoading": {}, "./Notice": {},
       "./theme": themeStub, "../../modules/rift-keys": {}, "expo-clipboard": {},

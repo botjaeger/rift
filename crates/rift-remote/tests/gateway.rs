@@ -80,6 +80,62 @@ struct State {
     theme: Option<Theme>,
     /// Each pane's numbered lines: (epoch, number of the first, lines).
     histories: BTreeMap<u64, (u64, u64, Vec<String>)>,
+    /// Panes running a full-screen document viewer: its lines and the first
+    /// one in view; the wheel scrolls it (`screen` draws it, see [`doc_screen`]).
+    docs: BTreeMap<u64, (Vec<String>, i64)>,
+    /// The doc viewer speeds up under a repeated wheel, as Claude Code does: each
+    /// step of more than one line moves that many lines times its place in the
+    /// run (at most 6); a single line moves one and ends the run.
+    accelerate: bool,
+    streak: i64,
+    /// Every this many reads of a doc viewer's screen fails with "read again" (the
+    /// window's answer while another reader holds its cache); 0: none.
+    flaky_reads: usize,
+}
+
+/// Rows of a [`State::docs`] viewer's screen: a sticky header, the document,
+/// a status row that ticks with every read; a side panel at column 30.
+const DOC_ROWS: usize = 14;
+
+fn doc_screen(lines: &[String], top: i64, tick: usize) -> Screen {
+    let row = |left: String, r: usize| {
+        let mut l: String = left.chars().take(29).collect();
+        while l.chars().count() < 30 {
+            l.push(' ');
+        }
+        vec![
+            Run {
+                text: l,
+                fg: None,
+                bg: None,
+                flags: 0,
+            },
+            Run {
+                text: format!("│panel {r}"),
+                fg: None,
+                bg: None,
+                flags: 0,
+            },
+        ]
+    };
+    let mut out = vec![row(format!("❯ section {}", top / 10), 0)];
+    for r in 1..DOC_ROWS - 1 {
+        let n = top + r as i64 - 1;
+        out.push(row(lines.get(n as usize).cloned().unwrap_or_default(), r));
+    }
+    out.push(row(format!("status {tick}"), DOC_ROWS - 1));
+    Screen {
+        cols: 40,
+        rows: DOC_ROWS as u16,
+        alt: true,
+        cursor: None,
+        fg: None,
+        bg: None,
+        rules: Vec::new(),
+        lines: out,
+        age_ms: None,
+        scrollback: None,
+    }
 }
 
 #[derive(Clone, Default)]
@@ -283,6 +339,17 @@ impl Source for Fake {
             return Err(SourceError::NoPane);
         }
         st.screen_reads.push((pane, force));
+        let reads = st.screen_reads.len();
+        if st.docs.contains_key(&pane) && st.flaky_reads > 0 && reads.is_multiple_of(st.flaky_reads)
+        {
+            return Err(SourceError::Unavailable(
+                "the screen moved; read again".into(),
+            ));
+        }
+        if let Some((lines, top)) = st.docs.get(&pane) {
+            // the status ticks only now and then: a screen at rest stays equal
+            return Ok(Some(doc_screen(lines, *top, reads / 1000)));
+        }
         Ok(st.screens.get(&pane).filter(|s| s.alt || force).cloned())
     }
 
@@ -297,6 +364,19 @@ impl Source for Fake {
             return Err(InputError::ViewOnly);
         }
         st.scrolls.push((pane, lines, operate));
+        let mut moved = lines as i64;
+        if st.accelerate {
+            if lines.abs() == 1 {
+                st.streak = 0;
+            } else {
+                st.streak += 1;
+                moved *= st.streak.min(6);
+            }
+        }
+        if let Some((doc, top)) = st.docs.get_mut(&pane) {
+            let last = doc.len() as i64 - (DOC_ROWS as i64 - 2);
+            *top = (*top - moved).clamp(0, last.max(0));
+        }
         Ok(())
     }
 
@@ -644,6 +724,8 @@ fn start(tweak: impl FnOnce(&mut Config)) -> Env {
     cfg.devices_poll = Duration::from_millis(100);
     // readable sequences; `a_resume_from_an_earlier_gateway_run_…` uses the real base
     cfg.seq_base = Some(0);
+    // a stitch job on a loaded machine (the gates run beside each other): what it stitches, not how fast
+    cfg.page_job_time = Duration::from_secs(30);
     tweak(&mut cfg);
     let gw = serve(TcpListener::bind("127.0.0.1:0").unwrap(), fake.clone(), cfg).unwrap();
     let addr = gw.local_addr();
@@ -816,6 +898,17 @@ fn ack(v: &Value) -> (bool, &str) {
 // --- handshake, pairing, authentication -----------------------------------
 
 #[test]
+fn the_welcome_lists_the_configured_addresses_at_most_sixteen() {
+    let many: Vec<SocketAddr> = (1..=20)
+        .map(|i| format!("10.0.0.{i}:7878").parse().unwrap())
+        .collect();
+    let env = start(|c| c.addresses = Some(many.clone()));
+    let (_, _, welcome) = env.pair(Permission::Operate);
+    let want: Vec<String> = many.iter().take(16).map(|a| a.to_string()).collect();
+    assert_eq!(welcome["addresses"], json!(want));
+}
+
+#[test]
 fn pairing_then_reconnecting_gets_welcome_and_topology() {
     let env = start(|_| {});
     let key = new_key();
@@ -839,7 +932,9 @@ fn pairing_then_reconnecting_gets_welcome_and_topology() {
     assert_eq!(
         welcome,
         json!({"t":"welcome","v":2,"host":"test-host","os":"linux","version":"9.9.9",
-               "device":d.id,"permission":"operate","features":["screen","text","output","push_failures","push_ntfy","git","notify_off","chips","waiting","complete","running","open","close","move","fit","prompt_chips","closing","scroll","upload","upload_files","paste","mouse","clipboard","history"]})
+               "device":d.id,"permission":"operate","features":["screen","text","output","push_failures","push_ntfy","git","notify_off","chips","waiting","complete","running","open","close","move","fit","prompt_chips","closing","scroll","upload","upload_files","paste","mouse","clipboard","history","stitch"],
+               // where it listens now (a specific address: that one)
+               "addresses":[env.addr.to_string()]})
     );
     assert_eq!(
         (d.name.as_str(), d.platform.as_str()),
@@ -4977,4 +5072,266 @@ fn a_redraw_after_a_scroll_goes_out_within_a_screen_poll() {
         best = best.min(at.elapsed());
     }
     assert!(best < Duration::from_millis(250), "{best:?}");
+}
+
+/// Lines of a document whose lengths vary, as real text does.
+fn doc_lines(n: usize) -> Vec<String> {
+    (0..n)
+        .map(|i| format!("line {i} {}", "x".repeat(i % 9 + 4)))
+        .collect()
+}
+
+/// The `page` answers to one request, until one carries all its rows.
+fn pages(ch: &mut Ch) -> Vec<Value> {
+    let mut out = Vec::new();
+    loop {
+        let p = recv_t(ch, "page");
+        let last = p["from"].as_i64().unwrap() + p["lines"].as_array().unwrap().len() as i64;
+        let done =
+            last >= p["bottom"].as_i64().unwrap() || p["lines"].as_array().unwrap().is_empty();
+        out.push(p);
+        if done {
+            return out;
+        }
+    }
+}
+
+fn page_text(p: &Value) -> Vec<String> {
+    p["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            row.as_array()
+                .unwrap()
+                .iter()
+                .map(|run| run[0].as_str().unwrap().to_string())
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect()
+}
+
+#[test]
+fn page_ahead_stitches_a_full_screen_document_and_page_seek_moves_the_program() {
+    let env = start(|_| {});
+    let doc = doc_lines(400);
+    env.fake
+        .0
+        .lock()
+        .unwrap()
+        .docs
+        .insert(12, (doc.clone(), 200));
+    let (_, mut ch, welcome) = env.pair(Permission::Operate);
+    assert!(
+        welcome["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f == "stitch")
+    );
+
+    // up 40 rows from line 200: a new page (epoch 0)
+    put(
+        &mut ch,
+        json!({"t":"page_ahead","id":"g1","pane":12,"epoch":0,"dir":"up","rows":40}),
+    );
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (true, ""));
+    let got = pages(&mut ch);
+    let p = &got[0];
+    assert_eq!(p["state"], "ok");
+    // the document rows only: not the header, the status row or the panel
+    assert_eq!(p["area"], json!([1, 13, 0, 30]));
+    let epoch = p["epoch"].as_u64().unwrap();
+    assert!(epoch > 0);
+    let top = p["top"].as_i64().unwrap();
+    assert!(top <= -40, "{p}");
+    let text: Vec<String> = got.iter().flat_map(page_text).collect();
+    let first = (200 + top) as usize;
+    assert_eq!(text, doc[first..212].to_vec());
+    // the program shows the page's first row
+    assert_eq!(p["at"].as_i64(), Some(top));
+    assert_eq!(env.fake.0.lock().unwrap().docs[&12].1, first as i64);
+
+    // down past the start: the same page grows at its bottom, only the new rows sent
+    put(
+        &mut ch,
+        json!({"t":"page_ahead","id":"g2","pane":12,"epoch":epoch,"dir":"down","rows":60}),
+    );
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (true, ""));
+    let more = pages(&mut ch);
+    assert_eq!(more[0]["epoch"].as_u64(), Some(epoch));
+    let from = more[0]["from"].as_i64().unwrap();
+    assert_eq!(from, 12, "{}", more[0]);
+    let added: Vec<String> = more.iter().flat_map(page_text).collect();
+    let bottom = more[0]["bottom"].as_i64().unwrap();
+    assert!(bottom >= 12 + 60);
+    assert_eq!(added, doc[212..(200 + bottom) as usize].to_vec());
+
+    // where the phone stopped: the program goes there
+    put(
+        &mut ch,
+        json!({"t":"page_seek","id":"g3","pane":12,"epoch":epoch,"at":-10}),
+    );
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (true, ""));
+    let seek = recv_t(&mut ch, "page");
+    assert_eq!(seek["at"].as_i64(), Some(-10));
+    assert!(seek["lines"].as_array().unwrap().is_empty());
+    assert_eq!(env.fake.0.lock().unwrap().docs[&12].1, 190);
+}
+
+#[test]
+fn page_ahead_reports_the_documents_start_and_a_screen_that_does_not_scroll() {
+    let env = start(|_| {});
+    let doc = doc_lines(60);
+    env.fake
+        .0
+        .lock()
+        .unwrap()
+        .docs
+        .insert(12, (doc.clone(), 20));
+    let (_, mut ch, _) = env.pair(Permission::Operate);
+    put(
+        &mut ch,
+        json!({"t":"page_ahead","id":"g1","pane":12,"epoch":0,"dir":"up","rows":200}),
+    );
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (true, ""));
+    let got = pages(&mut ch);
+    assert_eq!(got[0]["ends"], json!([true, false]));
+    let text: Vec<String> = got.iter().flat_map(page_text).collect();
+    assert_eq!(text, doc[0..32].to_vec());
+
+    // a full-screen program that does not move under the wheel (htop): no page
+    env.fake.0.lock().unwrap().docs.remove(&12);
+    let mut s = doc_screen(&doc, 0, 0);
+    s.alt = true;
+    env.fake.0.lock().unwrap().screens.insert(12, s);
+    put(
+        &mut ch,
+        json!({"t":"page_ahead","id":"g2","pane":12,"epoch":0,"dir":"up","rows":40}),
+    );
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (true, ""));
+    let flat = recv_t(&mut ch, "page");
+    assert_eq!(flat["state"], "flat");
+}
+
+#[test]
+fn page_requests_are_refused_to_a_view_device_and_one_at_a_time() {
+    let env = start(|_| {});
+    env.fake
+        .0
+        .lock()
+        .unwrap()
+        .docs
+        .insert(12, (doc_lines(400), 200));
+    let (_, mut view, _) = env.pair(Permission::View);
+    put(
+        &mut view,
+        json!({"t":"page_ahead","id":"g1","pane":12,"epoch":0,"dir":"up","rows":40}),
+    );
+    let a = recv_t(&mut view, "ack");
+    assert_eq!(ack(&a), (false, "forbidden"));
+    let (_, mut ch, _) = env.pair(Permission::Operate);
+    put(
+        &mut ch,
+        json!({"t":"page_ahead","id":"g2","pane":12,"epoch":0,"dir":"up","rows":200}),
+    );
+    put(
+        &mut ch,
+        json!({"t":"page_ahead","id":"g3","pane":12,"epoch":0,"dir":"down","rows":40}),
+    );
+    let first = recv_t(&mut ch, "ack");
+    let second = recv_t(&mut ch, "ack");
+    assert_eq!(ack(&first), (true, ""));
+    assert_eq!(ack(&second), (false, "busy"));
+}
+
+#[test]
+fn screens_wait_while_the_stitcher_scrolls_the_program() {
+    let env = start(|_| {});
+    env.fake
+        .0
+        .lock()
+        .unwrap()
+        .docs
+        .insert(12, (doc_lines(400), 200));
+    let (_, mut ch, _) = env.pair(Permission::Operate);
+    put(&mut ch, json!({"t":"subscribe","pane":12}));
+    put(&mut ch, json!({"t":"screen","pane":12,"mode":"auto"}));
+    // the screen as it is, before any page
+    loop {
+        if recv(&mut ch)["t"] == "screen" {
+            break;
+        }
+    }
+    put(
+        &mut ch,
+        json!({"t":"page_ahead","id":"g1","pane":12,"epoch":0,"dir":"up","rows":60}),
+    );
+    // from the ack to the page, nothing of the program scrolling reaches the phone
+    let mut acked = false;
+    loop {
+        let v = recv(&mut ch);
+        match v["t"].as_str().unwrap() {
+            "ack" if v["id"] == "g1" => acked = true,
+            "page" => break,
+            "screen" => assert!(!acked, "a screen while stitching: {v}"),
+            _ => {}
+        }
+    }
+    // then the screens come again, showing where the program is now
+    loop {
+        let v = recv(&mut ch);
+        if v["t"] == "screen" {
+            break;
+        }
+    }
+}
+
+#[test]
+fn a_program_that_speeds_up_under_the_wheel_still_stitches_whole() {
+    let env = start(|_| {});
+    let doc = doc_lines(400);
+    {
+        let mut st = env.fake.0.lock().unwrap();
+        st.docs.insert(12, (doc.clone(), 300));
+        st.accelerate = true;
+    }
+    let (_, mut ch, _) = env.pair(Permission::Operate);
+    put(
+        &mut ch,
+        json!({"t":"page_ahead","id":"g1","pane":12,"epoch":0,"dir":"up","rows":60}),
+    );
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (true, ""));
+    let got = pages(&mut ch);
+    assert_eq!(got[0]["state"], "ok", "{}", got[0]);
+    let top = got[0]["top"].as_i64().unwrap();
+    assert!(top <= -60, "{}", got[0]);
+    let text: Vec<String> = got.iter().flat_map(page_text).collect();
+    // every line from where it reached down to the screen it started from, none missing
+    assert_eq!(text, doc[(300 + top) as usize..312].to_vec());
+}
+
+#[test]
+fn a_screen_read_that_fails_now_and_then_does_not_stop_the_page() {
+    let env = start(|_| {});
+    let doc = doc_lines(400);
+    {
+        let mut st = env.fake.0.lock().unwrap();
+        st.docs.insert(12, (doc.clone(), 300));
+        st.flaky_reads = 3;
+    }
+    let (_, mut ch, _) = env.pair(Permission::Operate);
+    put(
+        &mut ch,
+        json!({"t":"page_ahead","id":"g1","pane":12,"epoch":0,"dir":"up","rows":60}),
+    );
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (true, ""));
+    let got = pages(&mut ch);
+    assert_eq!(got[0]["state"], "ok", "{}", got[0]);
+    let top = got[0]["top"].as_i64().unwrap();
+    assert!(top <= -60, "{}", got[0]);
+    let text: Vec<String> = got.iter().flat_map(page_text).collect();
+    assert_eq!(text, doc[(300 + top) as usize..312].to_vec());
 }

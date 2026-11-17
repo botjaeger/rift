@@ -1,6 +1,8 @@
 // Wire format of the Rift remote gateway, version 2 (docs/remote-protocol.md). Every file in
 // crates/rift-remote/fixtures/ decodes with these guards (test/protocol.test.ts).
 
+import { isAddress, MAX_ADDRESSES } from "../pairing";
+
 export const PROTOCOL_VERSION = 2;
 /** Noise prologue; both sides mix it in, so a peer speaking another version fails the handshake. */
 export const PROLOGUE = "rift-remote/2";
@@ -171,7 +173,8 @@ export type Feature =
   | "mouse"
   | "clipboard"
   | "theme"
-  | "history";
+  | "history"
+  | "stitch";
 
 /** `complete` bounds: line bytes, entries per list, bytes per entry. */
 export const MAX_COMPLETE_LINE = 1024;
@@ -438,6 +441,29 @@ export interface HistoryRequestMsg {
   from: number;
   to: number;
 }
+/**
+ * Stitch `rows` more rows of the pane's full-screen program past the page's end in `dir` (feature
+ * `stitch`): the computer scrolls the program and answers with `page` messages. `epoch` 0, or one
+ * it no longer holds, starts a new page from the screen as it is.
+ */
+export interface PageAheadMsg {
+  t: "page_ahead";
+  id: string;
+  pane: number;
+  epoch: number;
+  dir: "up" | "down";
+  rows: number;
+}
+/** Scroll the program so that page row `at` is the first of its area: where the phone's view stopped. */
+export interface PageSeekMsg {
+  t: "page_seek";
+  id: string;
+  pane: number;
+  epoch: number;
+  at: number;
+}
+/** Most rows one `page_ahead` asks for (the computer's MAX_PAGE_AHEAD). */
+export const MAX_PAGE_AHEAD = 500;
 /** A prompt chip's menu (feature `chips`): the folder's directories, the branches, the changed files. */
 export interface ChipRequestMsg {
   t: "dirs" | "branches" | "changes";
@@ -502,7 +528,9 @@ export type ClientMsg =
   | UploadMsg
   | ScreenModeMsg
   | OutputRequestMsg
-  | HistoryRequestMsg;
+  | HistoryRequestMsg
+  | PageAheadMsg
+  | PageSeekMsg;
 
 // Gateway → client.
 export interface WelcomeMsg {
@@ -517,6 +545,11 @@ export interface WelcomeMsg {
   features: string[];
   /** The desktop's theme (feature `theme`); absent from an older computer (or a malformed one, dropped). */
   theme?: Theme;
+  /**
+   * Where the phone can reach the computer now, `host:port`: it changes networks, and the pairing
+   * link's addresses go stale. Absent from an older computer (or a malformed list, dropped).
+   */
+  addresses?: string[];
 }
 /**
  * A desktop theme: its name, whether its ground is dark, and its tokens as `rrggbb` / `rrggbbaa`
@@ -663,6 +696,28 @@ export interface HistoryMsg {
   /** `[index in lines, colour]`: the lines carrying a block rule. */
   rules?: [number, string][];
 }
+/**
+ * Rows of the pane's stitched page (feature `stitch`): `lines` are page rows `from…` of the
+ * scrolling area (`area`: screen rows `[0]..[1]`, columns `[2]..[3]`); the page spans
+ * `top..bottom` and the program shows row `at` first. `ends`: its start and end were reached.
+ * `state`: `stopped` (a screen could not be joined safely; what came before holds) or `flat`
+ * (nothing on the screen scrolls like a document: no page).
+ */
+export interface PageMsg {
+  t: "page";
+  pane: number;
+  epoch: number;
+  area: [number, number, number, number];
+  top: number;
+  bottom: number;
+  at: number;
+  from: number;
+  lines: ScreenRun[][];
+  ends: [boolean, boolean];
+  state: "ok" | "stopped" | "flat";
+}
+/** Most rows one `page` message carries (the computer's PAGE_CHUNK). */
+export const PAGE_CHUNK = 200;
 /** Screens stopped (mode `auto` and the pane left the alternate screen, or mode `off`). */
 export interface ScreenEndMsg {
   t: "screen_end";
@@ -800,7 +855,8 @@ export type ServerMsg =
   | ErrorMsg
   | ScreenMsg
   | ScreenEndMsg
-  | OutputMsg;
+  | OutputMsg
+  | PageMsg;
 
 type Obj = Record<string, unknown>;
 
@@ -985,6 +1041,23 @@ function isScrollback(v: unknown): v is Scrollback {
 }
 
 /**
+ * A `page` inside its bounds: at most PAGE_CHUNK rows, each no longer than a screen row may be; an
+ * area inside the largest screen; the rows inside the page's span, and the program's row too.
+ */
+function isPage(m: Obj): boolean {
+  if (!(isUint(m.pane) && isUint(m.epoch) && isInt(m.top) && isInt(m.bottom) && isInt(m.at) && isInt(m.from))) return false;
+  if (!(m.top <= m.bottom && m.from >= m.top && m.at >= m.top && m.at <= m.bottom)) return false;
+  if (!(Array.isArray(m.area) && m.area.length === 4 && m.area.every(isUint))) return false;
+  const [r0, r1, c0, c1] = m.area as [number, number, number, number];
+  if (!(r0 <= r1 && r1 <= MAX_SCREEN_ROWS && c0 <= c1 && c1 <= MAX_SCREEN_COLS)) return false;
+  if (!(Array.isArray(m.ends) && m.ends.length === 2 && m.ends.every(isBool))) return false;
+  if (!(m.state === "ok" || m.state === "stopped" || m.state === "flat")) return false;
+  if (!(Array.isArray(m.lines) && m.lines.length <= PAGE_CHUNK && m.from + m.lines.length <= m.bottom)) return false;
+  const max = MAX_SCREEN_COLS * 2;
+  return m.lines.every((l) => arrayOf(isRun)(l) && rowChars(l as ScreenRun[], max) <= max);
+}
+
+/**
  * A `history` answer inside its bounds: at most MAX_HISTORY_LINES lines, each no longer than a
  * screen row may be (two characters per column of the widest screen), rules on its own lines.
  */
@@ -1063,9 +1136,16 @@ export function decodeServer(json: unknown): ServerMsg | null {
         )
       )
         return null;
-      // a malformed theme is left out: the welcome itself still counts
-      const { theme, ...rest } = m;
-      return { ...rest, features: m.features ?? [], ...(isTheme(theme) ? { theme } : {}) } as unknown as WelcomeMsg;
+      // a malformed theme or address list is left out: the welcome itself still counts
+      const { theme, addresses, ...rest } = m;
+      const goodAddresses =
+        Array.isArray(addresses) && addresses.length > 0 && addresses.length <= MAX_ADDRESSES && addresses.every((a) => isStr(a) && isAddress(a));
+      return {
+        ...rest,
+        features: m.features ?? [],
+        ...(isTheme(theme) ? { theme } : {}),
+        ...(goodAddresses ? { addresses } : {}),
+      } as unknown as WelcomeMsg;
     }
     case "topology":
       return arrayOf(isWindow)(m.windows) ? (m as unknown as TopologyMsg) : null;
@@ -1109,6 +1189,8 @@ export function decodeServer(json: unknown): ServerMsg | null {
         : null;
     case "history":
       return isHistory(m) ? (m as unknown as HistoryMsg) : null;
+    case "page":
+      return isPage(m) ? (m as unknown as PageMsg) : null;
     case "dirs":
       return isStr(m.id) &&
         isUint(m.pane) &&
@@ -1341,6 +1423,18 @@ export function isClientMsg(v: unknown): v is ClientMsg {
       );
     case "history":
       return isId(v.id) && isUint(v.pane) && isUint(v.epoch) && isUint(v.from) && isUint(v.to) && v.from < v.to;
+    case "page_ahead":
+      return (
+        isId(v.id) &&
+        isUint(v.pane) &&
+        isUint(v.epoch) &&
+        (v.dir === "up" || v.dir === "down") &&
+        isUint(v.rows) &&
+        v.rows >= 1 &&
+        v.rows <= MAX_PAGE_AHEAD
+      );
+    case "page_seek":
+      return isId(v.id) && isUint(v.pane) && isUint(v.epoch) && isInt(v.at);
     case "dirs":
     case "branches":
     case "changes":

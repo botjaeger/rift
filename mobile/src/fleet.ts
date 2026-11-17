@@ -38,6 +38,7 @@ import {
   type CompleteMsg,
   type DiffMsg,
   type DoneMsg,
+  type PageMsg,
   type Feature,
   type GatewayHello,
   type CloseKind,
@@ -628,6 +629,9 @@ export class Fleet {
           ),
         onAck: (msg) => this.onAck(key, msg),
         onDone: (msg) => this.onDone(key, msg),
+        onPage: (msg) => {
+          for (const fn of this.pageListeners.get(`${key}:${msg.pane}`) ?? []) fn(msg);
+        },
         onClipboard: (text) => {
           // only what reached the clipboard is said to have
           void Promise.resolve(this.deps.clipboard?.(text)).then(
@@ -678,7 +682,9 @@ export class Fleet {
     if (!view) return;
     const r = view.record;
     const address = client.preferredAddress;
-    const addresses = [address, ...r.addresses.filter((a) => a !== address)];
+    // what the client tries now: the pairing link's and the addresses a welcome named since
+    const lan = client.lanAddresses;
+    const addresses = address ? [address, ...lan.filter((a) => a !== address)] : lan;
     const via = client.preferredPath.kind;
     const os = welcome.os.slice(0, 64);
     const version = welcome.version.slice(0, 64);
@@ -688,7 +694,7 @@ export class Fleet {
     if (
       r.name === welcome.host &&
       r.permission === welcome.permission &&
-      addresses[0] === r.addresses[0] &&
+      addresses.join(",") === r.addresses.join(",") &&
       (r.via ?? "lan") === via &&
       r.os === os &&
       r.version === version &&
@@ -1470,6 +1476,33 @@ export class Fleet {
    * `scroll`). Any device: a view-only one moves the pane's view, and is refused (`forbidden`)
    * where the wheel would go to the program.
    */
+  /** Who hears a pane's `page` messages, by `host:pane`. */
+  private readonly pageListeners = new Map<string, Set<(msg: PageMsg) => void>>();
+
+  /** Calls `fn` with each `page` message for `pane` on `host`; returns the unsubscribe. */
+  onPage(host: string, pane: number, fn: (msg: PageMsg) => void): () => void {
+    const k = `${host}:${pane}`;
+    const set = this.pageListeners.get(k) ?? new Set();
+    set.add(fn);
+    this.pageListeners.set(k, set);
+    return () => {
+      set.delete(fn);
+      if (set.size === 0) this.pageListeners.delete(k);
+    };
+  }
+
+  /** Asks the computer to stitch `rows` more rows of the pane's program toward `dir` (feature `stitch`). */
+  pageAhead(host: string, pane: number, epoch: number, dir: "up" | "down", rows: number): Promise<ActionResult> {
+    if (!hasFeature(this.host(host), "stitch")) return Promise.resolve({ ok: false, code: "unsupported", message: "" });
+    return this.request(host, (c) => c.pageAhead(pane, epoch, dir, rows));
+  }
+
+  /** Moves the pane's program to page row `at`: where the phone's view stopped (feature `stitch`). */
+  pageSeek(host: string, pane: number, epoch: number, at: number): Promise<ActionResult> {
+    if (!hasFeature(this.host(host), "stitch")) return Promise.resolve({ ok: false, code: "unsupported", message: "" });
+    return this.request(host, (c) => c.pageSeek(pane, epoch, at));
+  }
+
   async sendScroll(host: string, pane: number, lines: number): Promise<ActionResult> {
     const h = this.host(host);
     const name = h?.record.name ?? "the computer";

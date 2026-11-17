@@ -50,6 +50,7 @@ import { RUN_BOLD, RUN_ITALIC, RUN_STRIKE, RUN_UNDERLINE, type ScreenRun } from 
 import { authenticate, fleet, useApp } from "@/runtime";
 import { useActionScope } from "./useActionScope";
 import { DRAG_SLOP, DragVelocity, dragLines, dragScrollsPane, Fling, ScrollCoalescer } from "@/scroll";
+import { aheadRows, liveMatches, mergePage, pageBody as stitchedBody, pageComplete, pageFixed, pageUsable, type StitchPage } from "@/stitch";
 import { composite, HISTORY_PAGE, missing, nextCache, withPage, type HistoryCache } from "@/history";
 import { draftKey } from "@/fleet";
 import { pending, PENDING_FULL, readClipboard, type AttachRules, type Attached } from "@/pending";
@@ -99,6 +100,12 @@ const HISTORY_CHUNK = 64;
 /** History rows not drawn yet are drawn this many at a time, one step every MOUNT_MS. */
 const MOUNT_STEP = 256;
 const MOUNT_MS = 60;
+/** After a stitched page's scrolling stops, how long before the program is moved there. */
+const SEEK_AFTER_MS = 500;
+/** A page_ahead unanswered this long was lost (the connection dropped): another may go out. */
+const PAGE_REPLY_MS = 8000;
+/** A stitched page's parts carry no links (a tap there neither opens one nor clicks). */
+const NO_SCREEN_LINKS: readonly ScreenLink[] = [];
 /** A `history` page that got no answer is asked for again after this long. */
 const HISTORY_RETRY_MS = 1000;
 
@@ -406,10 +413,16 @@ function Grid({
   lightAbove = 0,
   historyOrigin = 0,
   mountFrom = 0,
+  part = false,
 }: {
   screen: ScreenState;
   zoom: number;
   fitted: boolean;
+  /**
+   * One of the parts a stitched page is drawn in (the rows above its area, the page, the rows
+   * below): as tall as its rows, no padding above or below them, so the parts meet.
+   */
+  part?: boolean;
   /** Rows before this one are the history above the live screen (drawn light, in chunks). */
   lightAbove?: number;
   /** The line number of row 0 (the history's first slot): chunks go by line number. */
@@ -453,7 +466,8 @@ function Grid({
   const chunks: ReactNode[] = [];
   for (let i = from; i < histEnd; ) {
     const n = historyOrigin + i;
-    const end = Math.min(histEnd, i + HISTORY_CHUNK - (n % HISTORY_CHUNK));
+    // (a stitched page numbers its rows above its start negative: the remainder kept positive)
+    const end = Math.min(histEnd, i + HISTORY_CHUNK - (((n % HISTORY_CHUNK) + HISTORY_CHUNK) % HISTORY_CHUNK));
     const rules: (string | null)[] = [];
     for (let r = i; r < end; r++) rules.push(screen.rules.get(r) ?? null);
     chunks.push(
@@ -498,15 +512,16 @@ function Grid({
       {selection && loupe ? <Loupe row={loupe.row} edge={loupe.edge} screen={screen} rowHeight={rowHeight} cell={fontSize * CELL_RATIO} /> : null}
     </View>
   );
+  const pad = part ? styles.partPad : styles.gridPad;
   return (
-    <View style={styles.gridWrap} onLayout={onLayout}>
+    <View style={part ? null : styles.gridWrap} onLayout={onLayout}>
       {width === 0 ? null : scroll ? (
         // a selection's handles take sideways drags: the rows stand still meanwhile
-        <ScrollView horizontal scrollEnabled={!selection} contentContainerStyle={styles.gridPad}>
+        <ScrollView horizontal scrollEnabled={!selection} contentContainerStyle={pad}>
           {rows}
         </ScrollView>
       ) : (
-        <View style={styles.gridPad}>{rows}</View>
+        <View style={pad}>{rows}</View>
       )}
     </View>
   );
@@ -533,6 +548,7 @@ export function TerminalView({
   canFit,
   canScroll: canScrollPane,
   canHistory,
+  canStitch: canStitchPane,
   canUpload,
   canUploadFiles,
   canPaste,
@@ -562,6 +578,11 @@ export function TerminalView({
    * screen the view scrolls them itself, as a native list, and a drag sends the computer nothing.
    */
   canHistory?: boolean;
+  /**
+   * The computer stitches a full-screen program's rows into one page (feature `stitch`, operate
+   * only): a drag over it fetches the page, then the view scrolls it natively (stitch.ts).
+   */
+  canStitch?: boolean;
   /** Paste takes the clipboard's image (feature `upload`). */
   canUpload?: boolean;
   /** Paste takes the clipboard's file (feature `upload_files`). */
@@ -863,6 +884,144 @@ export function TerminalView({
     cellWidth.current = cell;
   }, []);
   const remote = useRef<ScrollCoalescer | null>(null);
+  // A full-screen program stitched into one page (stitch.ts, feature `stitch`): the first vertical
+  // drag asks the computer for it (the program moves only once the page is here); then the view
+  // scrolls it natively, asks for more near its edges, and moves the program to where scrolling
+  // stopped. A program whose screen does not scroll like a document (`flat`) keeps the wheel.
+  const canStitch = !!canStitchPane && !historyOn && !!liveScreen?.alt && online;
+  // the page belongs to the screen's shape it came for: another program, another size, or off the
+  // alternate screen, and there is none
+  const pageShape = `${hostKey}:${paneId}:${liveScreen?.alt}:${liveScreen?.cols}:${liveScreen?.rows}`;
+  const [kept, setKept] = useState<{ shape: string; page: StitchPage | null }>({ shape: pageShape, page: null });
+  const page = kept.shape === pageShape ? kept.page : null;
+  const pageRef = useRef(page);
+  const shapeRef = useRef(pageShape);
+  // the page as the messages built it, ahead of rendering: a message completes a page only when
+  // every row is here, which the next message may need to know before the render
+  const pageNow = useRef<{ shape: string; page: StitchPage | null }>(kept);
+  const holdPage = (next: { shape: string; page: StitchPage | null }) => {
+    pageNow.current = next;
+    setKept(next);
+  };
+  // when a page_ahead went out and is not answered yet (one at a time; the computer refuses a
+  // second); a reply lost with the connection counts as none after PAGE_REPLY_MS
+  const askedAt = useRef<number | null>(null);
+  const asking = () => askedAt.current !== null && Date.now() - askedAt.current < PAGE_REPLY_MS;
+  // a page that came in: the program sits at its far end, the view may be elsewhere
+  const seekLater = useRef<() => void>(() => {});
+  useEffect(() => {
+    pageRef.current = page;
+  });
+  useEffect(() => {
+    shapeRef.current = pageShape;
+    askedAt.current = null;
+  }, [pageShape]);
+  useEffect(
+    () =>
+      fleet.onPage(hostKey, paneId, (msg) => {
+        const shape = shapeRef.current;
+        const held = pageNow.current;
+        const next = mergePage(held.shape === shape ? held.page : null, msg);
+        holdPage({ shape, page: next });
+        if (pageComplete(next) && askedAt.current !== null) {
+          askedAt.current = null;
+          seekLater.current();
+        }
+      }),
+    [hostKey, paneId],
+  );
+  const paging = canStitch && pageUsable(page);
+  const askPage = (dir: "up" | "down") => {
+    const p = pageRef.current;
+    if (asking() || p?.state === "flat" || (p && p.state !== "ok")) return;
+    askedAt.current = Date.now();
+    void fleet.pageAhead(hostKey, paneId, p?.epoch ?? 0, dir, aheadRows(p, liveScreen?.rows ?? 24)).then((r) => {
+      if (!r.ok) askedAt.current = null;
+    });
+  };
+  const pageScroller = useRef<ScrollView>(null);
+  const pageView = useRef({ y: 0, viewH: 0, contentH: 0, top: 0, epoch: -1 });
+  const seekTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(seekTimer.current), []);
+  // the page row the view rested on last (its first row in view), for judging the live screen
+  const [viewAt, setViewAt] = useState<number | null>(null);
+  // how tall the fixed rows over the page are: the page rows start below the ones above and end
+  // above the ones below
+  const [pageEdges, setPageEdges] = useState({ above: 0, below: 0 });
+  const setPageEdge = (side: "above" | "below", h: number) =>
+    setPageEdges((e) => (Math.abs(e[side] - h) < 0.5 ? e : { ...e, [side]: h }));
+  /** The page row first in view (the area's height kept inside the page). */
+  const viewTop = (p: StitchPage) => {
+    const h = p.area[1] - p.area[0];
+    const at = p.top + Math.round(pageView.current.y / rowHeight.current);
+    return Math.max(p.top, Math.min(at, p.bottom - h));
+  };
+  const onPageScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const { contentOffset, layoutMeasurement, contentSize } = e.nativeEvent;
+    pageView.current = { ...pageView.current, y: contentOffset.y, viewH: layoutMeasurement.height, contentH: contentSize.height };
+    clearTimeout(seekTimer.current);
+    const p = pageRef.current;
+    if (!p) return;
+    // a screen's worth from an edge: the next rows are asked for before the finger gets there
+    const fromTop = contentOffset.y;
+    const fromBottom = contentSize.height - contentOffset.y - layoutMeasurement.height;
+    if (fromTop < layoutMeasurement.height && !p.ends[0]) askPage("up");
+    else if (fromBottom < layoutMeasurement.height && !p.ends[1]) askPage("down");
+  };
+  // scrolling stopped: the program goes where the view is, so keys and its screen carry on there
+  const onPageRest = () => {
+    clearTimeout(seekTimer.current);
+    seekTimer.current = setTimeout(() => {
+      const p = pageRef.current;
+      // a page_ahead on its way: it seeks when it comes in (seekLater)
+      if (!p || asking()) return;
+      // at the very end (or start) of the scroller: the page's last (first) screen exactly, so a
+      // conversation scrolled back to its end is followed again
+      const v = pageView.current;
+      const h = p.area[1] - p.area[0];
+      const atEnd = v.y >= v.contentH - v.viewH - rowHeight.current / 2;
+      const at = atEnd ? p.bottom - h : v.y <= rowHeight.current / 2 ? p.top : viewTop(p);
+      setViewAt(at);
+      if (at === p.at) return;
+      // the computer still finishing another job on the pane: again in a moment
+      void fleet.pageSeek(hostKey, paneId, p.epoch, at).then((r) => {
+        if (!r.ok && r.code === "busy") seekLater.current();
+      });
+    }, SEEK_AFTER_MS);
+  };
+  useEffect(() => {
+    seekLater.current = onPageRest;
+  });
+  // a new page opens where the user was looking (row 0: the screen the page started from); rows
+  // that came in above keep what is in view where it is
+  const onPageContent = () => {
+    const p = pageRef.current;
+    if (!p) return;
+    const v = pageView.current;
+    const h = rowHeight.current;
+    if (v.epoch !== p.epoch) {
+      const start = Math.max(p.top, Math.min(0, p.bottom - (p.area[1] - p.area[0])));
+      pageScroller.current?.scrollTo({ y: (start - p.top) * h, animated: false });
+      pageView.current = { ...v, y: (start - p.top) * h, top: p.top, epoch: p.epoch };
+      // stitching left the program at the page's far end: back to what the view shows
+      onPageRest();
+    } else if (p.top < v.top) {
+      const y = v.y + (v.top - p.top) * h;
+      pageScroller.current?.scrollTo({ y, animated: false });
+      pageView.current = { ...v, y, top: p.top };
+    }
+  };
+  // The program drew something else where it is (new output): the page no longer says what is
+  // there. In view of that spot the live screen takes over; scrolled away from it, the page stays.
+  // Judged only on a screen that came after the page's last change (the screen before shows the
+  // program where it was before that job: a seek's answer comes just ahead of its screen).
+  const [judged, setJudged] = useState<{ live: ScreenState | null; page: StitchPage | null }>({ live: liveScreen, page });
+  if (judged.live !== liveScreen || judged.page !== page) {
+    const newerScreen = judged.page === page && judged.live !== liveScreen;
+    const stale = newerScreen && paging && !!liveScreen && viewAt === page.at && !liveMatches(page, liveScreen);
+    setJudged({ live: liveScreen, page: stale ? null : page });
+    if (stale) setKept((h) => ({ ...h, page: null }));
+  }
   const scrollGeneration = useRef(0);
   // a flick carries on after the finger lifts (scroll.ts Fling)
   const velocity = useRef(new DragVelocity());
@@ -990,7 +1149,8 @@ export function TerminalView({
   const holdAt = useRef<{ x: number; y: number } | null>(null);
   const startSelection = (pageX: number, pageY: number) => {
     const s = screen;
-    if (!s) return;
+    // a stitched page has no cells of the program's screen to pick (yet)
+    if (!s || paging) return;
     atRows(() => {
       const [a, b] = wordAt(s.lines, cellOf(pageX, pageY, s));
       focusOnTap.current = false;
@@ -1070,7 +1230,16 @@ export function TerminalView({
     }
     const dy = y - d.lastY;
     d.lastY = y;
+    // the page scrolls itself (its own scroller has the finger)
+    if (paging) return;
     if (!d.vertical || !canScroll || !online || dy === 0) return;
+    // a program the computer can stitch: the page is asked for, the wheel left alone (its steps
+    // would break the stitching); without a page to show (`flat`, or stitching stopped before a
+    // row) the wheel scrolls the program as before
+    if (canStitch && page === null) {
+      askPage(dy > 0 ? "up" : "down");
+      return;
+    }
     const { y: at, viewH, contentH } = local.current;
     const edges = { overflow: contentH - viewH > 1, atTop: at <= 1, atBottom: at + viewH >= contentH - 1 };
     if (dragScrollsPane(dy, edges)) {
@@ -1143,6 +1312,9 @@ export function TerminalView({
     }
     velocity.current.clear();
     velocity.current.add(0, Date.now());
+    // a page that never came together (stitching stopped before any row): the next drag tries
+    // again; a `flat` program keeps the wheel
+    if (page && page.state === "stopped" && !pageUsable(page)) holdPage({ shape: pageShape, page: null });
     if (t.length === 2) {
       pinch.current = { distance: touchDistance(t[0]!, t[1]!), zoom };
       tap.current = null;
@@ -1217,7 +1389,8 @@ export function TerminalView({
         // a program that tracks the mouse takes the tap as a click; any other says no, silently.
         // A touch that only caught a flick clicks nothing
         // A tap on a link opens it, before the program's click
-        if (shown && focusOnTap.current) {
+        // a stitched page's rows are not where the program has them: no click, no link (yet)
+        if (shown && focusOnTap.current && !paging) {
           const { x, y } = tap.current;
           atRows(() => {
             const c = cellOf(x, y, shown);
@@ -1375,6 +1548,58 @@ export function TerminalView({
     // the pane's steps card (PaneLoading) says what is awaited; these are the rows to come
     <ScreenSkeleton />
   );
+  // A stitched page: the program's rows above its scrolling area and below it as they are now,
+  // the page between them in a native scroller
+  // the page body is built per page (and width, colours), not per live frame
+  const bodyCols = liveScreen?.cols;
+  const bodyFg = liveScreen?.fg;
+  const bodyBg = liveScreen?.bg;
+  const body = useMemo(
+    () => (paging && liveScreen ? stitchedBody(page, liveScreen) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- of the live screen only its width and colours
+    [paging, page, bodyCols, bodyFg, bodyBg],
+  );
+  const parts = paging && liveScreen && body ? { ...pageFixed(page, liveScreen), body } : null;
+  // The scroller takes the whole screen, so a drag anywhere scrolls the page; the program's rows
+  // above and below its area draw over it (touches pass through to the scroller), and the page
+  // rows run beneath them
+  const pageBg = screenDefaults(screen, defaultColors(colors)).bg;
+  const pageBody = (focus: boolean) =>
+    parts ? (
+      <View style={styles.fill} onLayout={onArea}>
+        <ScrollView
+          key={page?.epoch}
+          ref={pageScroller}
+          style={styles.fill}
+          contentContainerStyle={{ paddingTop: pageEdges.above, paddingBottom: pageEdges.below }}
+          accessibilityLabel={`${label}, scrolled through its stitched lines`}
+          onScroll={onPageScroll}
+          scrollEventThrottle={16}
+          onScrollEndDrag={onPageRest}
+          onMomentumScrollEnd={onPageRest}
+          onContentSizeChange={onPageContent}
+        >
+          <Pressable onPress={() => { if (focus && focusOnTap.current) capture.current?.focus(); }} accessible={false}>
+            {/* drawn light in chunks by page row, as the history above a primary screen: a long page stays cheap */}
+            <Grid part screen={parts.body} zoom={zoom} fitted={fittedHere} onRowHeight={onRowHeight} links={NO_SCREEN_LINKS} onLink={openLink} lightAbove={parts.body.rows} historyOrigin={page?.top ?? 0} />
+          </Pressable>
+        </ScrollView>
+        <View
+          pointerEvents="none"
+          style={[styles.pageAbove, { backgroundColor: pageBg }]}
+          onLayout={(e) => setPageEdge("above", e.nativeEvent.layout.height)}
+        >
+          {parts.above.rows > 0 ? <Grid part screen={parts.above} zoom={zoom} fitted={fittedHere} links={NO_SCREEN_LINKS} onLink={openLink} /> : null}
+        </View>
+        <View
+          pointerEvents="none"
+          style={[styles.pageBelow, { backgroundColor: pageBg }]}
+          onLayout={(e) => setPageEdge("below", e.nativeEvent.layout.height)}
+        >
+          {parts.below.rows > 0 ? <Grid part screen={parts.below} zoom={zoom} fitted={fittedHere} links={NO_SCREEN_LINKS} onLink={openLink} /> : null}
+        </View>
+      </View>
+    ) : null;
 
   return (
     <View style={[styles.fill, { backgroundColor: screenDefaults(screen, defaultColors(colors)).bg }]}>
@@ -1399,18 +1624,22 @@ export function TerminalView({
             onPaste={() => void onPaste()}
             style={styles.fill}
           >
-            <ScrollView ref={scroller} style={styles.fill} accessibilityLabel={label} {...a11yCopy} scrollEnabled={localScroll && !selecting} bounces={!canScroll} onLayout={onArea} onScroll={trackLocal} scrollEventThrottle={16} onScrollBeginDrag={onDragStart} onScrollEndDrag={onScroll} onMomentumScrollEnd={onScroll} onContentSizeChange={onContent}>
-              {/* not one element for screen readers: they read the rows */}
-              {/* a tap on a link opens it and leaves the keyboard down */}
-              <Pressable onPress={(e) => { if (focusOnTap.current && !linkUnder(e.nativeEvent.pageX, e.nativeEvent.pageY)) capture.current?.focus(); }} accessible={false}>
-                {grid}
-              </Pressable>
-            </ScrollView>
+            {pageBody(true) ?? (
+              <ScrollView ref={scroller} style={styles.fill} accessibilityLabel={label} {...a11yCopy} scrollEnabled={localScroll && !selecting} bounces={!canScroll} onLayout={onArea} onScroll={trackLocal} scrollEventThrottle={16} onScrollBeginDrag={onDragStart} onScrollEndDrag={onScroll} onMomentumScrollEnd={onScroll} onContentSizeChange={onContent}>
+                {/* not one element for screen readers: they read the rows */}
+                {/* a tap on a link opens it and leaves the keyboard down */}
+                <Pressable onPress={(e) => { if (focusOnTap.current && !linkUnder(e.nativeEvent.pageX, e.nativeEvent.pageY)) capture.current?.focus(); }} accessible={false}>
+                  {grid}
+                </Pressable>
+              </ScrollView>
+            )}
           </KeyCaptureView>
         ) : (
-          <ScrollView ref={scroller} style={styles.fill} accessibilityLabel={label} {...a11yCopy} scrollEnabled={localScroll && !selecting} bounces={!canScroll} onLayout={onArea} onScroll={trackLocal} scrollEventThrottle={16} onScrollBeginDrag={onDragStart} onScrollEndDrag={onScroll} onMomentumScrollEnd={onScroll} onContentSizeChange={onContent}>
-            {grid}
-          </ScrollView>
+          (pageBody(false) ?? (
+            <ScrollView ref={scroller} style={styles.fill} accessibilityLabel={label} {...a11yCopy} scrollEnabled={localScroll && !selecting} bounces={!canScroll} onLayout={onArea} onScroll={trackLocal} scrollEventThrottle={16} onScrollBeginDrag={onDragStart} onScrollEndDrag={onScroll} onMomentumScrollEnd={onScroll} onContentSizeChange={onContent}>
+              {grid}
+            </ScrollView>
+          ))
         )}
       </View>
       {screen && (zoomShown || readerOn) && !selecting ? zoomRow : null}
@@ -1477,6 +1706,10 @@ const useStyles = makeStyles((colors) => ({
   fill: { flex: 1, backgroundColor: colors.bg },
   gridWrap: { flex: 1 },
   gridPad: { paddingVertical: PADDING, paddingHorizontal: PADDING_X },
+  partPad: { paddingHorizontal: PADDING_X },
+  // a stitched page's fixed rows, over its scroller, with the screen's padding at the edges
+  pageAbove: { position: "absolute", top: 0, left: 0, right: 0, paddingTop: PADDING },
+  pageBelow: { position: "absolute", bottom: 0, left: 0, right: 0, paddingBottom: PADDING },
   cell: { fontFamily: mono, color: colors.fg },
   // as the blocks view's view-only line
   viewOnly: {

@@ -18,6 +18,7 @@ pub mod push;
 pub mod registry;
 pub mod relay;
 mod server;
+mod stitch;
 mod sys;
 pub mod transport;
 mod uplink;
@@ -99,6 +100,34 @@ pub const MAX_SCROLL_LINES: i32 = 50;
 /// a finger's drag goes out in small steps (one per 30 ms) so the program
 /// moves smoothly.
 pub const SCROLL_RATE: usize = 40;
+/// `page_ahead` / `page_seek` requests per second per connection (each
+/// starts a stitch job that scrolls the program for up to
+/// [`PAGE_JOB_TIME`]).
+pub const PAGE_RATE: usize = 5;
+/// Most rows one `page_ahead` stitches.
+pub const MAX_PAGE_AHEAD: u32 = 500;
+/// Most rows a pane's page holds; past it `page_ahead` stops (`stopped`).
+pub const MAX_PAGE_ROWS: usize = 5000;
+/// Most rows one `page` message carries (a longer answer is split).
+pub const PAGE_CHUNK: usize = 200;
+/// Most bytes of rows one `page` message carries, well under
+/// [`MAX_GATEWAY_MESSAGE`] (a row of a full-width screen in a different
+/// colour per cell is about 12 KiB).
+pub const PAGE_CHUNK_BYTES: usize = 256 * 1024;
+/// How long one stitch job may scroll the program.
+pub const PAGE_JOB_TIME: Duration = Duration::from_secs(3);
+/// A screen counts as drawn once it has not changed for this long (a
+/// program like Claude Code redraws a scroll in pieces).
+pub const SETTLE: Duration = Duration::from_millis(30);
+/// A wheel step the program did not answer within this long moved nothing.
+pub const SETTLE_NO_CHANGE: Duration = Duration::from_millis(150);
+/// Wheel lines per stitch step: small enough that a screen keeps the
+/// stitcher's overlap with the last one even when the program speeds up.
+pub const STITCH_STEP_LINES: i32 = 3;
+/// Single-line steps back toward the page after a screen too far to join.
+pub const STITCH_BACK_STEPS: usize = 30;
+/// Rested screens the stitcher learns the scrolling area from.
+pub const STITCH_LEARN_FRAMES: usize = 8;
 /// Largest image or file an `upload` carries, in bytes.
 pub const MAX_UPLOAD_BYTES: u64 = 10 * 1024 * 1024;
 /// Most bytes in one `upload` chunk (60 000 characters of base64, which a

@@ -29,7 +29,8 @@
 
 use crate::protocol::{
     Block, BlockState, ClientHello, ClientMsg, CloseKind, ClosingReason, ErrorCode, GatewayHello,
-    MoveKind, OpenKind, Permission, Run, ScreenMode, ServerMsg, Theme, VERSION,
+    MAX_WELCOME_ADDRESSES, MoveKind, OpenKind, PageDir, PageState, Permission, Run, ScreenMode,
+    ServerMsg, Theme, VERSION,
 };
 use crate::registry::{self, Device, RelayState, RelayStatus, Via};
 use crate::transport::{self, Channel, KEY_LEN, Recv, Socket};
@@ -84,7 +85,7 @@ const DONE_RUNNING: usize = 64;
 /// after the 45 s idle timeout.
 pub const FOLLOW_FRESH: Duration = Duration::from_secs(20);
 /// What this gateway serves beyond Phase 2 (`welcome.features`).
-const FEATURES: [&str; 24] = [
+const FEATURES: [&str; 25] = [
     "screen",
     "text",
     "output",
@@ -109,6 +110,7 @@ const FEATURES: [&str; 24] = [
     "mouse",
     "clipboard",
     "history",
+    "stitch",
 ];
 
 /// Gateway settings. [`Config::new`] takes the limits from the protocol;
@@ -133,6 +135,8 @@ pub struct Config {
     /// pending (25 ms; a test widens it to tell the shortened wait of
     /// a kicked pane from it under load).
     pub read_slice: Duration,
+    /// How long one stitch job may scroll the program ([`crate::PAGE_JOB_TIME`]).
+    pub page_job_time: Duration,
     pub topology_poll: Duration,
     pub devices_poll: Duration,
     pub failure_window: Duration,
@@ -177,6 +181,7 @@ impl Config {
             idle_timeout: IDLE_TIMEOUT,
             pane_poll: PANE_POLL,
             read_slice: READ_SLICE,
+            page_job_time: crate::PAGE_JOB_TIME,
             topology_poll: TOPOLOGY_POLL,
             devices_poll: crate::DEVICES_POLL,
             failure_window: FAILURE_WINDOW,
@@ -355,10 +360,8 @@ pub fn serve<S: Source>(
         log::warn!("remote: {e}; refusing every device until it is fixed");
         Vec::new()
     });
-    let addresses = config
-        .addresses
-        .take()
-        .unwrap_or_else(|| registry::addresses(addr));
+    let addresses = config.addresses.take();
+    let (stitch_tx, stitch_rx) = std::sync::mpsc::channel();
     listener.set_nonblocking(true)?;
     let relay = config.relay.take();
     let pusher = crate::push::Pusher::start(
@@ -377,12 +380,18 @@ pub fn serve<S: Source>(
         config,
         key,
         addresses,
+        listen: addr,
+        listed: Mutex::new(Vec::new()),
         relay: Mutex::new(RelayLink::default()),
         stop: AtomicBool::new(false),
         hub: Mutex::new(Hub::default()),
         fit_lock: Mutex::new(()),
         poll_lock: Mutex::new(()),
         kicks: (Mutex::new(HashMap::new()), Condvar::new()),
+        pages: Mutex::new(HashMap::new()),
+        stitch_jobs: Mutex::new(stitch_tx),
+        // a gateway run's epochs never repeat an earlier run's (a phone may still hold one)
+        page_epoch: AtomicU64::new(seq_base),
         status_lock: Mutex::new(()),
         devices: Mutex::new(devices),
         permissions: Mutex::new(None),
@@ -418,10 +427,16 @@ pub fn serve<S: Source>(
             .name("remote-accept".into())
             .spawn(move || accept_loop(listener, shared))?
     };
+    let stitcher = {
+        let shared = shared.clone();
+        std::thread::Builder::new()
+            .name("remote-stitch".into())
+            .spawn(move || stitch_loop(&shared, stitch_rx))?
+    };
     Ok(Gateway {
         addr,
         shared,
-        threads: vec![acceptor, poller, uplink],
+        threads: vec![acceptor, poller, uplink, stitcher],
         _lock: lock,
     })
 }
@@ -431,7 +446,14 @@ pub(crate) struct Shared<S> {
     pub(crate) config: Config,
     /// The gateway's static private key.
     pub(crate) key: [u8; KEY_LEN],
-    addresses: Vec<SocketAddr>,
+    /// [`Config::addresses`]: `None` reads the interfaces each time
+    /// ([`Shared::addresses`]), since the computer changes networks while the
+    /// gateway runs.
+    addresses: Option<Vec<SocketAddr>>,
+    /// The bound address, for [`registry::addresses`].
+    listen: SocketAddr,
+    /// What `status.json` last listed, to write it again when they change.
+    listed: Mutex<Vec<SocketAddr>>,
     pub(crate) relay: Mutex<RelayLink>,
     pub(crate) stop: AtomicBool,
     hub: Mutex<Hub>,
@@ -442,6 +464,12 @@ pub(crate) struct Shared<S> {
     /// Panes a device just scrolled or typed into, until when their screen
     /// is read every [`crate::KICK_POLL`]; the condvar wakes the poll loop.
     kicks: (Mutex<HashMap<u64, Instant>>, Condvar),
+    /// Stitched pages by pane (feature `stitch`).
+    pages: Mutex<HashMap<u64, PaneStitch>>,
+    /// Jobs for the stitch worker ([`stitch_loop`]).
+    stitch_jobs: Mutex<std::sync::mpsc::Sender<StitchJob>>,
+    /// The last page epoch handed out (each new page takes the next).
+    page_epoch: AtomicU64,
     /// Orders `status.json` writes (and the final removal).
     status_lock: Mutex<()>,
     /// The paired devices as last read.
@@ -802,7 +830,11 @@ pub(crate) fn write_status<S: Source>(shared: &Shared<S>) {
     clients.sort_by_key(|c| c.since);
     let status = registry::Status {
         pid: std::process::id(),
-        addresses: shared.addresses.clone(),
+        addresses: {
+            let now = shared.addresses();
+            *shared.listed.lock().unwrap() = now.clone();
+            now
+        },
         clients,
         relay: shared.relay.lock().unwrap().status.clone(),
     };
@@ -1017,6 +1049,20 @@ pub(crate) fn admit(connections: &AtomicUsize) -> Option<(bool, ConnGuard<'_>)> 
 }
 
 impl<S> Shared<S> {
+    /// A page epoch never handed out before (never 0: `page_ahead` asks for
+    /// a new page with 0).
+    fn next_page_epoch(&self) -> u64 {
+        self.page_epoch.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    /// Where a phone can reach this gateway now (`status.json`, `welcome`):
+    /// the configured addresses, else this computer's current interfaces.
+    fn addresses(&self) -> Vec<SocketAddr> {
+        self.addresses
+            .clone()
+            .unwrap_or_else(|| registry::addresses(self.listen))
+    }
+
     /// With every slot taken, a device connecting again ends those of its
     /// connections gone silent for half the idle timeout (the app pings every
     /// 15 s): what a dropped network left behind, each otherwise taking a slot
@@ -1208,6 +1254,10 @@ fn poll_loop<S: Source>(shared: &Shared<S>) {
         if last_devices.elapsed() >= cfg.devices_poll {
             last_devices = Instant::now();
             reload_devices(shared);
+            // the computer joined another network: `remote pair` reads the new addresses
+            if *shared.listed.lock().unwrap() != shared.addresses() {
+                write_status(shared);
+            }
         }
         let (panes, screens, connected) = {
             let hub = shared.hub.lock().unwrap();
@@ -1450,6 +1500,13 @@ fn refresh<S: Source>(shared: &Shared<S>, pane: u64) -> Result<(), SourceError> 
         }
         Err(SourceError::NoPane) => {
             hub.feeds.remove(&pane);
+            // its stitched page goes with it (not while a job holds it: that job ends on the
+            // closed pane and the next refresh finds it gone again)
+            shared
+                .pages
+                .lock()
+                .unwrap()
+                .retain(|&p, s| p != pane || s.busy);
             let f = frame(&ServerMsg::error(ErrorCode::NoPane, "pane closed"));
             for c in hub.clients.values_mut().filter(|c| c.pane == Some(pane)) {
                 c.follow(None);
@@ -1470,6 +1527,16 @@ fn refresh<S: Source>(shared: &Shared<S>, pane: u64) -> Result<(), SourceError> 
 /// mode change or a resize, else the changed rows; nothing when nothing
 /// changed. `screen_end` when screens stop for it.
 fn refresh_screen<S: Source>(shared: &Shared<S>, pane: u64, force: bool) {
+    // the stitcher is scrolling the program: its screens wait for the page
+    if shared
+        .pages
+        .lock()
+        .unwrap()
+        .get(&pane)
+        .is_some_and(|p| p.busy)
+    {
+        return;
+    }
     let screen = match shared.source.screen(pane, force) {
         Ok(s) => s.map(clamp_screen),
         Err(e) => {
@@ -1985,6 +2052,12 @@ fn serve_device<S: Source, T: Socket>(
                 .map(String::from)
                 .collect(),
             theme,
+            addresses: shared
+                .addresses()
+                .iter()
+                .take(MAX_WELCOME_ADDRESSES)
+                .map(SocketAddr::to_string)
+                .collect(),
         },
     ) {
         shared.record(Some((&device.id, &device.name)), &peer, now, "error");
@@ -2090,6 +2163,7 @@ fn session<S: Source, T: Socket>(
     let mut outputs = Rate::new(OUTPUT_RATE);
     let mut histories = Rate::new(crate::HISTORY_RATE);
     let mut scrolls = Rate::new(crate::SCROLL_RATE);
+    let mut page_rate = Rate::new(crate::PAGE_RATE);
     let mut uploads = Rate::new(UPLOAD_RATE);
     let mut upload = Uploads::default();
     // the read's wait, shortened while this client's pane is kicked (see `HOT_READ_SLICE`)
@@ -2406,6 +2480,43 @@ fn session<S: Source, T: Socket>(
                 pane,
                 lines,
             }) => Some(scroll(shared, device, &mut scrolls, rid, pane, lines)),
+            Ok(ClientMsg::PageAhead {
+                id: rid,
+                pane,
+                epoch,
+                dir,
+                rows,
+            }) => Some(page_request(
+                shared,
+                device,
+                &mut page_rate,
+                StitchJob {
+                    client: id,
+                    pane,
+                    epoch,
+                    kind: StitchKind::Ahead { dir, rows },
+                    operate: false,
+                },
+                rid,
+            )),
+            Ok(ClientMsg::PageSeek {
+                id: rid,
+                pane,
+                epoch,
+                at,
+            }) => Some(page_request(
+                shared,
+                device,
+                &mut page_rate,
+                StitchJob {
+                    client: id,
+                    pane,
+                    epoch,
+                    kind: StitchKind::Seek { at },
+                    operate: false,
+                },
+                rid,
+            )),
             Ok(ClientMsg::Upload {
                 id: rid,
                 pane,
@@ -2619,6 +2730,524 @@ fn scroll<S: Source>(
             ServerMsg::ack_ok(rid)
         }
         Err(e) => refused_ack(rid, e, "pane is busy".into(), format!("no pane {pane}")),
+    }
+}
+
+/// A pane's stitched page (feature `stitch`).
+pub(crate) struct PaneStitch {
+    epoch: u64,
+    /// None until the scrolling area is learned.
+    page: Option<crate::stitch::Page>,
+    /// The program's start and end were reached.
+    ends: [bool; 2],
+    /// A job is scrolling the program: its screens are held back
+    /// ([`refresh_screen`]) until the page goes out.
+    busy: bool,
+}
+
+/// One `page_ahead` or `page_seek`, for the stitch worker.
+pub(crate) struct StitchJob {
+    client: u64,
+    pane: u64,
+    epoch: u64,
+    kind: StitchKind,
+    operate: bool,
+}
+
+pub(crate) enum StitchKind {
+    Ahead { dir: PageDir, rows: u32 },
+    Seek { at: i64 },
+}
+
+/// Queue a stitch job for the worker; the ack says it was taken. One job per
+/// pane at a time; a view device may not scroll the program.
+fn page_request<S: Source>(
+    shared: &Shared<S>,
+    device: &Device,
+    rate: &mut Rate,
+    mut job: StitchJob,
+    rid: String,
+) -> ServerMsg {
+    if rid.chars().count() > MAX_REQUEST_ID {
+        return ServerMsg::error(
+            ErrorCode::BadRequest,
+            format!("id is longer than {MAX_REQUEST_ID} characters"),
+        );
+    }
+    if !rate.allow(Instant::now()) {
+        return ServerMsg::ack_err(rid, ErrorCode::Rate, "too many requests; slow down");
+    }
+    job.operate = operates(shared, device);
+    if !job.operate {
+        return ServerMsg::ack_err(
+            rid,
+            ErrorCode::Forbidden,
+            "view only: this device may not scroll the program",
+        );
+    }
+    {
+        let mut pages = shared.pages.lock().unwrap();
+        let p = pages.entry(job.pane).or_insert(PaneStitch {
+            epoch: 0,
+            page: None,
+            ends: [false; 2],
+            busy: false,
+        });
+        if p.busy {
+            return ServerMsg::ack_err(rid, ErrorCode::Busy, "already stitching this pane");
+        }
+        p.busy = true;
+    }
+    let pane = job.pane;
+    if shared.stitch_jobs.lock().unwrap().send(job).is_err() {
+        if let Some(p) = shared.pages.lock().unwrap().get_mut(&pane) {
+            p.busy = false;
+        }
+        return ServerMsg::ack_err(rid, ErrorCode::Busy, "the gateway is stopping");
+    }
+    ServerMsg::ack_ok(rid)
+}
+
+/// The stitch worker: one job at a time until the gateway stops.
+fn stitch_loop<S: Source>(shared: &Shared<S>, jobs: std::sync::mpsc::Receiver<StitchJob>) {
+    while !shared.stop.load(Ordering::Acquire) {
+        let Ok(job) = jobs.recv_timeout(Duration::from_millis(200)) else {
+            continue;
+        };
+        let (pane, client) = (job.pane, job.client);
+        let started = Instant::now();
+        let msgs = run_stitch(shared, job);
+        if let Some(ServerMsg::Page {
+            epoch,
+            top,
+            bottom,
+            at,
+            state,
+            ends,
+            area,
+            ..
+        }) = msgs.first()
+        {
+            log::debug!(
+                "remote: pane {pane}: page {epoch} {top}..{bottom} at {at} area {area:?} ends {ends:?} {state:?} in {:?}",
+                started.elapsed()
+            );
+        }
+        if let Some(p) = shared.pages.lock().unwrap().get_mut(&pane) {
+            p.busy = false;
+        }
+        {
+            let hub = shared.hub.lock().unwrap();
+            if let Some(c) = hub.clients.get(&client) {
+                for m in &msgs {
+                    c.push(frame(m));
+                }
+            }
+        }
+        // the screens held back meanwhile go out now
+        kick(shared, pane);
+    }
+}
+
+/// `pane`'s screen once it rests: [`crate::SETTLE`] without a change after
+/// one was seen, or [`crate::SETTLE_NO_CHANGE`] without any (the program
+/// did not move). None when the pane has no screen.
+fn rested_screen<S: Source>(
+    shared: &Shared<S>,
+    pane: u64,
+    before: Option<&Screen>,
+) -> Option<Screen> {
+    let start = Instant::now();
+    let mut last = before.cloned();
+    let mut changed: Option<Instant> = None;
+    loop {
+        // an error is no news (the poller reads the same pane, and the window may answer
+        // "read again"): only an answer counts, a pane without a screen included
+        let Ok(now) = shared
+            .source
+            .screen(pane, false)
+            .map(|s| s.map(clamp_screen))
+        else {
+            if start.elapsed() >= Duration::from_millis(600) {
+                return last;
+            }
+            std::thread::sleep(Duration::from_millis(4));
+            continue;
+        };
+        let t = Instant::now();
+        if now != last {
+            last = now;
+            changed = Some(t);
+        }
+        let done = match changed {
+            Some(c) => t - c >= crate::SETTLE,
+            None => t - start >= crate::SETTLE_NO_CHANGE,
+        };
+        if done || t - start >= Duration::from_millis(600) {
+            return last;
+        }
+        std::thread::sleep(Duration::from_millis(4));
+    }
+}
+
+fn frame_of(s: &Screen) -> crate::stitch::Frame {
+    crate::stitch::Frame::new(&s.lines, s.rows, s.cols)
+}
+
+/// Run one job: scroll the program, join its screens, and the `page`
+/// messages that answer it.
+fn run_stitch<S: Source>(shared: &Shared<S>, job: StitchJob) -> Vec<ServerMsg> {
+    use crate::stitch::{Dir, Joined, Page};
+    let pane = job.pane;
+    let started = Instant::now();
+    let Some(first) = rested_screen(shared, pane, None).filter(|s| s.alt) else {
+        return vec![page_msg(shared, pane, PageState::Flat)];
+    };
+    let first_frame = frame_of(&first);
+    // the page holds while the program shows a part of it; else a new one
+    let mut taken = shared.pages.lock().unwrap().get_mut(&pane).and_then(|p| {
+        let keep = p.epoch == job.epoch && job.epoch != 0;
+        let page = p.page.take();
+        page.filter(|_| keep)
+    });
+    let mut new_rows: Option<(i64, i64)> = None;
+    if let Some(page) = taken.as_mut() {
+        match page.locate(&first_frame) {
+            Some(i) => page.set_at(i),
+            None => taken = None,
+        }
+    }
+    let fresh = taken.is_none();
+    let epoch = if fresh {
+        let mut pages = shared.pages.lock().unwrap();
+        let p = pages.get_mut(&pane).expect("page_request made it");
+        p.epoch = shared.next_page_epoch();
+        p.ends = [false; 2];
+        p.epoch
+    } else {
+        job.epoch
+    };
+    let mut state = PageState::Ok;
+    let mut ends = shared
+        .pages
+        .lock()
+        .unwrap()
+        .get(&pane)
+        .map_or([false; 2], |p| p.ends);
+    // `lines` toward `dir` (positive), as the wheel turns: up is positive
+    let step = |dir: Dir, lines: i32| -> bool {
+        let lines = match dir {
+            Dir::Up => lines,
+            Dir::Down => -lines,
+        };
+        match shared.source.scroll(pane, lines, job.operate) {
+            Ok(()) => true,
+            Err(e) => {
+                log::debug!("remote: pane {pane}: stitching stopped, the wheel was refused: {e:?}");
+                false
+            }
+        }
+    };
+    // inside the rows a page holds, on the way to its end, larger steps (each
+    // screen is found in the page, no overlap needed); past it the usual ones
+    let stride = |page: Option<&Page>, dir: Dir| -> i32 {
+        let Some(p) = page else {
+            return crate::STITCH_STEP_LINES;
+        };
+        let h = p.height() as i64;
+        let left = match dir {
+            Dir::Down => p.bottom() - h - p.at(),
+            Dir::Up => p.at() - p.top(),
+        };
+        if left > crate::STITCH_STEP_LINES as i64 {
+            left.min(h / 2).max(crate::STITCH_STEP_LINES as i64) as i32
+        } else {
+            crate::STITCH_STEP_LINES
+        }
+    };
+    match job.kind {
+        StitchKind::Ahead { dir, rows } => {
+            let dir = match dir {
+                PageDir::Up => Dir::Up,
+                PageDir::Down => Dir::Down,
+            };
+            let end = match dir {
+                Dir::Up => 0,
+                Dir::Down => 1,
+            };
+            let want = rows.clamp(1, crate::MAX_PAGE_AHEAD) as usize;
+            let mut prev = first.clone();
+            let mut learning = vec![first_frame];
+            let mut added = 0usize;
+            let mut still = 0;
+            let mut page = taken;
+            // after a screen that could not be joined: one line a step (a program that speeds
+            // up under a repeated wheel, as Claude Code does, then moves one row at a time)
+            let mut fine = false;
+            while added < want && started.elapsed() < shared.config.page_job_time {
+                if page
+                    .as_ref()
+                    .is_some_and(|p| p.len() >= crate::MAX_PAGE_ROWS)
+                {
+                    state = PageState::Stopped;
+                    break;
+                }
+                // learning the area: single lines too, so its screens always overlap
+                let lines = if fine || page.is_none() {
+                    1
+                } else {
+                    stride(page.as_ref(), dir)
+                };
+                if !step(dir, lines) {
+                    state = PageState::Stopped;
+                    break;
+                }
+                let Some(now) = rested_screen(shared, pane, Some(&prev)) else {
+                    state = PageState::Stopped;
+                    break;
+                };
+                let moved = now != prev;
+                prev = now.clone();
+                if !moved {
+                    still += 1;
+                    if still >= 2 {
+                        ends[end] = true;
+                        break;
+                    }
+                    continue;
+                }
+                still = 0;
+                let f = frame_of(&now);
+                match page.as_mut() {
+                    None => {
+                        learning.push(f);
+                        if learning.len() < crate::STITCH_LEARN_FRAMES {
+                            continue;
+                        }
+                        let Some(area) = crate::stitch::learn(&learning) else {
+                            state = PageState::Flat;
+                            break;
+                        };
+                        let mut p = Page::new(area, &learning[0]);
+                        for f in &learning[1..] {
+                            if p.extend(f, dir) == Joined::Unstitched {
+                                state = PageState::Stopped;
+                                break;
+                            }
+                        }
+                        added = p.len() - p.height();
+                        page = Some(p);
+                        if state != PageState::Ok {
+                            break;
+                        }
+                    }
+                    Some(p) => match p.extend(&f, dir) {
+                        Joined::Added { from, count } => {
+                            added += count;
+                            let r = new_rows.get_or_insert((from, from + count as i64));
+                            r.0 = r.0.min(from);
+                            r.1 = r.1.max(from + count as i64);
+                        }
+                        Joined::Same => {}
+                        // a step too far for an overlap: back one line at a time until the
+                        // screen is one the page holds, then on in single lines
+                        Joined::Unstitched if !fine => {
+                            fine = true;
+                            let back = match dir {
+                                Dir::Up => Dir::Down,
+                                Dir::Down => Dir::Up,
+                            };
+                            let mut found = false;
+                            for _ in 0..crate::STITCH_BACK_STEPS {
+                                if !step(back, 1) {
+                                    break;
+                                }
+                                let Some(now) = rested_screen(shared, pane, Some(&prev)) else {
+                                    break;
+                                };
+                                prev = now.clone();
+                                if let Some(i) = p.locate(&frame_of(&now)) {
+                                    p.set_at(i);
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if !found {
+                                state = PageState::Stopped;
+                                break;
+                            }
+                        }
+                        Joined::Unstitched => {
+                            state = PageState::Stopped;
+                            break;
+                        }
+                    },
+                }
+            }
+            // the start reached before the area could be learned: learn from what there is
+            if page.is_none() && learning.len() >= 3 && state == PageState::Ok {
+                match crate::stitch::learn(&learning) {
+                    Some(area) => {
+                        let mut p = Page::new(area, &learning[0]);
+                        for f in &learning[1..] {
+                            if p.extend(f, dir) == Joined::Unstitched {
+                                state = PageState::Stopped;
+                                break;
+                            }
+                        }
+                        page = Some(p);
+                    }
+                    None => state = PageState::Flat,
+                }
+            } else if page.is_none() && state == PageState::Ok {
+                state = PageState::Flat;
+            }
+            taken = page;
+        }
+        StitchKind::Seek { at } => {
+            if let Some(page) = taken.as_mut() {
+                let mut prev = first;
+                let mut stuck = 0;
+                while page.at() != at && started.elapsed() < shared.config.page_job_time {
+                    let dir = if at < page.at() { Dir::Up } else { Dir::Down };
+                    // at most half the area at a time, so each screen is found in
+                    // the page; a step past the target is fine: the next comes back
+                    let far = (at - page.at())
+                        .unsigned_abs()
+                        .min(page.height() as u64 / 2)
+                        .max(1);
+                    if !step(dir, far as i32) {
+                        break;
+                    }
+                    let Some(now) = rested_screen(shared, pane, Some(&prev)) else {
+                        break;
+                    };
+                    prev = now.clone();
+                    match page.locate(&frame_of(&now)) {
+                        Some(i) if i != page.at() => {
+                            page.set_at(i);
+                            stuck = 0;
+                        }
+                        Some(_) => {
+                            stuck += 1;
+                            if stuck >= 2 {
+                                break;
+                            }
+                        }
+                        // the program showed something the page does not hold
+                        None => {
+                            state = PageState::Stopped;
+                            break;
+                        }
+                    }
+                }
+            } else {
+                state = PageState::Stopped;
+            }
+        }
+    }
+    let msgs = page_messages(pane, epoch, taken.as_ref(), fresh, new_rows, ends, state);
+    let mut pages = shared.pages.lock().unwrap();
+    if let Some(p) = pages.get_mut(&pane) {
+        p.page = taken;
+        p.ends = ends;
+    }
+    msgs
+}
+
+/// The `page` messages for a job's result: the whole page when it is new,
+/// else the rows it added (none for a seek), in chunks of
+/// [`crate::PAGE_CHUNK`].
+fn page_messages(
+    pane: u64,
+    epoch: u64,
+    page: Option<&crate::stitch::Page>,
+    fresh: bool,
+    new_rows: Option<(i64, i64)>,
+    ends: [bool; 2],
+    state: PageState,
+) -> Vec<ServerMsg> {
+    let Some(p) = page else {
+        return vec![ServerMsg::Page {
+            pane,
+            epoch,
+            area: [0; 4],
+            top: 0,
+            bottom: 0,
+            at: 0,
+            from: 0,
+            lines: Vec::new(),
+            ends,
+            state,
+        }];
+    };
+    let a = p.area();
+    let area = [
+        a.rows.start as u16,
+        a.rows.end as u16,
+        a.cols.start as u16,
+        a.cols.end as u16,
+    ];
+    let (from, to) = if fresh {
+        (p.top(), p.bottom())
+    } else {
+        new_rows.unwrap_or((p.at(), p.at()))
+    };
+    let mut out = Vec::new();
+    let mut at = from;
+    loop {
+        // at most PAGE_CHUNK rows, and at most PAGE_CHUNK_BYTES of them: a row of many
+        // coloured runs (highlighted code) is ten times a plain one, and a message past
+        // MAX_GATEWAY_MESSAGE never goes out
+        let mut end = at;
+        let mut bytes = 0usize;
+        while end < to && end - at < crate::PAGE_CHUNK as i64 {
+            let row = serde_json::to_string(&p.slice(end, end + 1)[0]).map_or(0, |s| s.len());
+            if end > at && bytes + row > crate::PAGE_CHUNK_BYTES {
+                break;
+            }
+            bytes += row;
+            end += 1;
+        }
+        out.push(ServerMsg::Page {
+            pane,
+            epoch,
+            area,
+            top: p.top(),
+            bottom: p.bottom(),
+            at: p.at(),
+            from: at,
+            lines: p.slice(at, end).to_vec(),
+            ends,
+            state,
+        });
+        at = end;
+        if at >= to {
+            break;
+        }
+    }
+    out
+}
+
+/// A `page` saying there is no page (`flat`, or the pane has no screen).
+fn page_msg<S>(shared: &Shared<S>, pane: u64, state: PageState) -> ServerMsg {
+    let epoch = shared
+        .pages
+        .lock()
+        .unwrap()
+        .get(&pane)
+        .map_or(0, |p| p.epoch);
+    ServerMsg::Page {
+        pane,
+        epoch,
+        area: [0; 4],
+        top: 0,
+        bottom: 0,
+        at: 0,
+        from: 0,
+        lines: Vec::new(),
+        ends: [false; 2],
+        state,
     }
 }
 
@@ -3889,6 +4518,48 @@ mod tests {
             exit: None,
             ..block(id, "")
         }
+    }
+
+    #[test]
+    fn page_messages_split_heavily_coloured_rows_under_the_size_bound() {
+        use crate::stitch::{Area, Frame, Page};
+        // a full-width screen in a different colour per cell: about 10 KiB a row
+        let lines: Vec<Vec<Run>> = (0..120)
+            .map(|r| {
+                (0..300)
+                    .map(|c| Run {
+                        text: char::from(b'a' + ((r + c) % 26) as u8).to_string(),
+                        fg: Some(format!("{:06x}", r * 300 + c)),
+                        bg: Some("101010".into()),
+                        flags: 1,
+                    })
+                    .collect()
+            })
+            .collect();
+        let page = Page::new(
+            Area {
+                rows: 0..120,
+                cols: 0..300,
+            },
+            &Frame::new(&lines, 120, 300),
+        );
+        let msgs = page_messages(12, 1, Some(&page), true, None, [false; 2], PageState::Ok);
+        assert!(msgs.len() > 1, "one {} byte message", frame(&msgs[0]).len());
+        let mut next = 0i64;
+        for m in &msgs {
+            let f = frame(m);
+            assert!(
+                f.len() < crate::PAGE_CHUNK_BYTES + 4096,
+                "{} bytes",
+                f.len()
+            );
+            let ServerMsg::Page { from, lines, .. } = m else {
+                panic!()
+            };
+            assert_eq!(*from, next);
+            next += lines.len() as i64;
+        }
+        assert_eq!(next, 120);
     }
 
     fn done_ids(msgs: &[ServerMsg]) -> Vec<u64> {

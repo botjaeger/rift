@@ -3,6 +3,7 @@ import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as scroll from "../src/scroll";
+import * as stitchModule from "../src/stitch";
 import * as historyModule from "../src/history";
 import * as terminal from "../src/terminal";
 import * as paneView from "../src/paneView";
@@ -21,6 +22,7 @@ function harness(typing = false, props: Record<string, unknown> = {}) {
   const appListeners = new Set<(state: string) => void>();
   const send = vi.fn(() => Promise.resolve({ ok: true } as { ok: boolean; code?: string }));
   const history = vi.fn(() => new Promise(() => {}));
+  const pageAhead = vi.fn((..._a: unknown[]) => Promise.resolve({ ok: true } as { ok: boolean; code?: string; message?: string }));
   const react = {
     createElement: (type: unknown, props: object, ...children: unknown[]) => ({ type, props: { ...props, children } }),
     memo: (fn: unknown) => fn,
@@ -43,8 +45,9 @@ function harness(typing = false, props: Record<string, unknown> = {}) {
       StyleSheet: { create: (s: unknown) => s, absoluteFill: {} },
       View: "View", ScrollView: "ScrollView", Pressable: "Pressable", Text: "Text",
     },
-    "@/runtime": { useApp: () => ({ settings: { controlKeys: [] }, hosts: [] }), fleet: { sendScroll: send, history } },
+    "@/runtime": { useApp: () => ({ settings: { controlKeys: [] }, hosts: [] }), fleet: { sendScroll: send, history, pageAhead, pageSeek: vi.fn(), onPage: () => () => {} } },
     "@/scroll": scroll,
+    "@/stitch": stitchModule,
     "@/history": historyModule,
     "@/terminal": terminal,
     "@/paneView": paneView,
@@ -85,7 +88,7 @@ function harness(typing = false, props: Record<string, unknown> = {}) {
   // the event's own time, as React Native stamps every touch event
   const touch = (name: string, y?: number, x = 100) => (node.props[name] as Touch)({ nativeEvent: { touches: y === undefined ? [] : [{ pageX: x, pageY: y }], timestamp: Date.now() } });
   return {
-    send, history, touch, tree, focus, find,
+    send, history, pageAhead, touch, tree, focus, find,
     // a press event as React Native gives one: where the finger lifted (no link on this test's screen)
     press: () => (find(tree, (n) => n.type === "Pressable" && n.props.accessible === false)!.props.onPress as (e: unknown) => void)({ nativeEvent: { pageX: 0, pageY: 0 } }),
     background: () => appListeners.forEach((fn) => fn("background")),
@@ -294,6 +297,53 @@ describe("the lines above a primary screen (feature `history`)", () => {
     const h = harness(false, { screen: styled(), canHistory: true });
     expect(h.history).toHaveBeenCalledWith("fixture", 12, 7, 300, 500);
     h.unmount();
+  });
+
+  it("the alternate screen on a computer that stitches: a drag asks for the page, the wheel stays still", () => {
+    const h = harness(false, { screen: styled(true), canHistory: true, canStitch: true });
+    drag(h);
+    // finger down: the rows above, one request (the computer takes one at a time)
+    expect(h.pageAhead).toHaveBeenCalledTimes(1);
+    expect(h.pageAhead).toHaveBeenCalledWith("fixture", 12, 0, "up", 20);
+    expect(h.send).not.toHaveBeenCalled();
+    h.unmount();
+  });
+
+  it("finger up asks for the rows below; a refused request may be asked again", async () => {
+    const h = harness(false, { screen: styled(true), canStitch: true });
+    h.pageAhead.mockImplementationOnce(() => Promise.resolve({ ok: false, code: "busy", message: "" }));
+    h.touch("onTouchStart", 300);
+    for (const y of [260, 220]) { vi.advanceTimersByTime(20); h.touch("onTouchMove", y); }
+    expect(h.pageAhead).toHaveBeenLastCalledWith("fixture", 12, 0, "down", 20);
+    await Promise.resolve();
+    await Promise.resolve();
+    vi.advanceTimersByTime(20);
+    h.touch("onTouchMove", 180);
+    expect(h.pageAhead).toHaveBeenCalledTimes(2);
+    h.unmount();
+  });
+
+  it("one request at a time; one never answered (the connection dropped) counts as lost after 8 s", () => {
+    const h = harness(false, { screen: styled(true), canStitch: true });
+    h.pageAhead.mockImplementation(() => new Promise(() => {}));
+    drag(h);
+    drag(h);
+    expect(h.pageAhead).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(8000);
+    drag(h);
+    expect(h.pageAhead).toHaveBeenCalledTimes(2);
+    expect(h.send).not.toHaveBeenCalled();
+    h.unmount();
+  });
+
+  it("a primary screen, or a view-only device, never asks for a page", () => {
+    for (const props of [{ screen: styled(false), canHistory: false, canStitch: true }, { screen: styled(true), canStitch: false }]) {
+      const h = harness(false, props);
+      drag(h);
+      expect(h.pageAhead).not.toHaveBeenCalled();
+      expect(h.send).toHaveBeenCalled();
+      h.unmount();
+    }
   });
 
   it.each([

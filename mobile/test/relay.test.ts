@@ -8,6 +8,7 @@ import { parsePairLink } from "../src/pairing";
 import {
   HANDSHAKE_TIMEOUT_MS,
   LAN_HANDSHAKE_TIMEOUT_MS,
+  MAX_KEPT_ADDRESSES,
   RELAY_HANDSHAKE_TIMEOUT_MS,
   RiftClient,
   backoffDelay,
@@ -224,5 +225,126 @@ describe("RiftClient over LAN and relay", () => {
     b.last().drop();
     expect(b.client.connState).toMatchObject({ status: "failed", failure: "unreachable" });
     expect(b.sockets).toHaveLength(3);
+  });
+});
+
+describe("RiftClient learns the computer's addresses from its welcome", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  const NOW = "172.16.10.63:7878";
+  /** Paired at home (one stale address), connected over the relay. */
+  function overRelay() {
+    const t = setup({ addresses: ["192.168.0.149:7878"], preferRelay: true });
+    t.client.start();
+    const relay = t.last();
+    expect(relay.url).toBe(relayUrl());
+    relay.connect();
+    return { ...t, relay };
+  }
+
+  const OLD = "192.168.0.149:7878";
+  const to = (sockets: FakeGatewaySocket[], address: string) => sockets.filter((s) => s.url === `ws://${address}`);
+
+  it("over the relay, a new address that answers takes the connection over, the pane following", () => {
+    const { client, sockets, relay } = overRelay();
+    client.subscribe(7);
+    relay.recv({ ...welcome, addresses: [NOW] });
+    expect(client.connState).toMatchObject({ status: "open", path: { kind: "relay" } });
+    // the round went straight to the relay: every LAN address is opened beside it
+    const [probe] = to(sockets, NOW);
+    const [old] = to(sockets, OLD);
+    expect(probe && old).toBeTruthy();
+    expect(client.lanAddresses).toEqual([NOW, OLD]);
+    probe!.connect(); // reachable: the same socket carries the handshake
+    expect(relay.closed).toBe(true);
+    expect(old!.closed).toBe(true);
+    expect(sockets).toHaveLength(3);
+    probe!.recv({ ...welcome, addresses: [NOW] });
+    expect(client.connState).toMatchObject({ status: "open", path: { kind: "lan", address: NOW } });
+    expect(client.preferredPath).toEqual({ kind: "lan", address: NOW });
+    expect(client.preferredAddress).toBe(NOW);
+    expect(probe!.sent.filter((m) => m.t === "subscribe")).toHaveLength(1);
+    // on the LAN: nothing more to try
+    expect(sockets).toHaveLength(3);
+  });
+
+  it("over the relay, addresses that do not answer leave the relay as it was", () => {
+    const { client, sockets, relay } = overRelay();
+    relay.recv({ ...welcome, addresses: [NOW] });
+    const probes = [...to(sockets, NOW), ...to(sockets, OLD)];
+    expect(probes).toHaveLength(2);
+    vi.advanceTimersByTime(LAN_HANDSHAKE_TIMEOUT_MS);
+    expect(probes.every((p) => p.closed)).toBe(true);
+    expect(relay.closed).toBe(false);
+    expect(client.connState).toMatchObject({ status: "open", path: { kind: "relay" } });
+    // a later answer from one changes nothing
+    probes[0]!.open();
+    expect(relay.closed).toBe(false);
+    expect(sockets).toHaveLength(3);
+    // the next round starts at the relay (the path that worked), the new address in it
+    expect(client.preferredPath).toEqual({ kind: "relay", url: RELAY });
+    expect(client.lanAddresses).toEqual([NOW, "192.168.0.149:7878"]);
+  });
+
+  it("a round that went straight to the relay probes the known addresses with no new ones (an older computer too)", () => {
+    // Local Network allowed since, or the phone joined the computer's network: the relay was the path last time
+    const { client, sockets, relay } = overRelay();
+    relay.recv(welcome);
+    const [probe] = to(sockets, OLD);
+    probe!.connect();
+    expect(relay.closed).toBe(true);
+    probe!.recv(welcome);
+    expect(client.connState).toMatchObject({ status: "open", path: { kind: "lan", address: OLD } });
+  });
+
+  it("a round that tried the LAN addresses first opens only new ones beside the relay", () => {
+    const { client, sockets, last } = setup({ addresses: [OLD] });
+    client.start();
+    vi.advanceTimersByTime(LAN_HANDSHAKE_TIMEOUT_MS); // the old address does not answer
+    const relay = last();
+    expect(relay.url).toBe(relayUrl());
+    relay.connect();
+    relay.recv({ ...welcome, addresses: [OLD] });
+    expect(sockets).toHaveLength(2);
+    relay.recv({ ...welcome, addresses: [NOW, OLD] });
+    expect(sockets).toHaveLength(3);
+    expect(last().url).toBe(`ws://${NOW}`);
+    // it answers: the connection moves to it (its handshake decides from here)
+    last().open();
+    expect(client.connState.status).toBe("connecting");
+  });
+
+  it("a probe still waiting when the connection ends is closed with it", () => {
+    const { client, last, relay } = overRelay();
+    relay.recv({ ...welcome, addresses: [NOW] });
+    const probe = last();
+    client.stop();
+    expect(probe.closed).toBe(true);
+    probe.open();
+    expect(client.connState.status).toBe("closed");
+  });
+
+  it("over LAN, the addresses are kept for later rounds with nothing opened; known ones change nothing", () => {
+    const { client, sockets, last } = setup({ addresses: ["192.168.0.149:7878"] });
+    client.start();
+    last().connect();
+    last().recv({ ...welcome, addresses: ["192.168.0.149:7878"] });
+    expect(sockets).toHaveLength(1);
+    last().recv({ ...welcome, addresses: [NOW, "192.168.0.149:7878"] });
+    expect(sockets).toHaveLength(1);
+    expect(client.lanAddresses).toEqual([NOW, "192.168.0.149:7878"]);
+    expect(client.preferredAddress).toBe("192.168.0.149:7878");
+  });
+
+  it("keeps the welcome's addresses and a few old ones, not every network the computer was ever on", () => {
+    const old = ["10.0.0.1:7878", "10.0.0.2:7878", "10.0.0.3:7878", "10.0.0.4:7878", "10.0.0.5:7878"];
+    const { client, last } = setup({ addresses: old, relay: null });
+    client.start();
+    last().connect();
+    last().recv({ ...welcome, addresses: [NOW] });
+    expect(client.lanAddresses).toEqual([NOW, ...old.slice(0, MAX_KEPT_ADDRESSES - 1)]);
+    // the connected address is still the one it is on
+    expect(client.preferredAddress).toBe(old[0]);
   });
 });

@@ -371,7 +371,7 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 ## Gateway → client
 
 ```json
-{"t":"welcome","v":2,"host":"studio-mac","os":"macos","version":"0.1.0","device":"d3f1","permission":"operate","features":["screen","text","output","push_failures","push_ntfy","git","notify_off","chips","waiting","complete","running","open","close","move","fit","prompt_chips","closing","scroll","upload","upload_files","paste","mouse","clipboard","history"]}
+{"t":"welcome","v":2,"host":"studio-mac","os":"macos","version":"0.1.0","device":"d3f1","permission":"operate","features":["screen","text","output","push_failures","push_ntfy","git","notify_off","chips","waiting","complete","running","open","close","move","fit","prompt_chips","closing","scroll","upload","upload_files","paste","mouse","clipboard","history","stitch"],"addresses":["192.168.1.29:7878"]}
 {"t":"topology","windows":[{"pid":4242,"tabs":[{"index":0,"title":"rift","active":true,"panes":[{"id":12,"active":true,"cwd":"/Users/me/rift","job":null,"last_command":"cargo test","last_exit":0,"git":{"branch":"main","ahead":1,"behind":0,"dirty":true,"files":3,"added":42,"removed":7}}]}]}]}
 {"t":"snapshot","pane":12,"seq":41,"blocks":[Block],"has_older":true}
 {"t":"update","pane":12,"seq":42,"blocks":[Block],"removed":[80]}
@@ -391,6 +391,10 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
 {"t":"output","id":"o1","pane":12,"block":86,"from":0,"text":"   Compiling rift-pty v0.1.0\n","total":40}
 ```
 
+- `welcome` carries `addresses`: where the phone can reach the gateway
+  now, `host:port`, at most 16 (the configured ones, else the computer's
+  current interface addresses; absent from older gateways and when there is
+  no network). See Relay for how the app uses them.
 - `welcome` follows the handshake, then `topology`, which is sent again
   whenever it changes. A pane's `id` is the gateway's: the window's pid
   times 2^24 plus the window's own pane id (every window numbers its panes
@@ -632,6 +636,14 @@ address; the bound keeps a flood from spending the gateway's threads).
   address that answers with another key than the pinned one is skipped; a
   mismatch on the relay, or on every path of a round, stops the client
   (`key_mismatch`) until the user retries or the network changes.
+- **Addresses that change**: the computer moves between networks, so the
+  link's addresses go stale. The app puts a `welcome`'s `addresses` first
+  and the older ones after them, 4 addresses in all (all of the welcome's
+  when it names more). Over the relay, it opens each new
+  address beside the relay (1.5 s); the first that answers takes the
+  connection over, its handshake on that socket, and the relay closes.
+  None that answers leaves the relay as it was. `status.json` (what
+  `remote pair` lists) follows the interfaces too.
 - **What the relay learns**: which routing ids are online, when phones
   connect, from which addresses, and how many bytes flow. Never content,
   keys or device identities.
@@ -961,6 +973,51 @@ Lines above the screen come on request:
   next `screen`.
 - `from` must be below `to` (else `ack` `bad_request`); an unknown pane
   answers `no_pane`; past the rate `rate`. `view` devices may read it.
+
+### A full-screen program stitched into one page (feature `stitch`)
+
+A program on the alternate screen draws only the rows in view: what is
+above or below exists nowhere until it draws it. With `stitch`, the gateway
+scrolls the program itself (a local round trip per wheel step), reads each
+screen once it rests, and joins the screens into one page the phone
+scrolls natively.
+
+```json
+{"t":"page_ahead","id":"g1","pane":12,"epoch":0,"dir":"up","rows":72}
+{"t":"page_seek","id":"g2","pane":12,"epoch":3,"at":-40}
+{"t":"page","pane":12,"epoch":3,"area":[1,37,0,81],"top":-40,"bottom":36,"at":-40,"from":-40,"lines":[[["❯ question 40",null,null,1]]],"ends":[true,false],"state":"ok"}
+```
+
+- `page_ahead` asks for up to `rows` (1 to 500) more rows past the page's end
+  in `dir`; `page_seek` moves the program so that page row `at` is the first
+  row of its area. Each is acked at once (`busy` while a job runs on the
+  pane, `forbidden` from a `view` device, `rate` past 5 a second), then
+  answered with `page` messages: the whole page when it is new, else the rows
+  it added, at most 200 rows each (`from`, `lines`); a seek carries no rows.
+- `epoch` 0, or one the gateway no longer holds, or a screen that shows no
+  part of the page (the program moved, or drew something else) starts a new
+  page from the screen as it is, with a new `epoch`.
+- Page rows are numbered from the screen the page started from (its first
+  area row is 0, rows above it negative); `top..bottom` is the page, `at`
+  the row the program shows first. `area` is the scrolling rectangle: screen
+  rows `[0]..[1]`, columns `[2]..[3]`; `lines` are that rectangle's cells.
+- How the gateway joins screens (`crates/rift-remote/src/stitch.rs`): it
+  scrolls 3 wheel lines a step (more inside rows the page already holds), and
+  reads the screen once it has not changed for 30 ms (Claude Code redraws a
+  scroll in pieces; a step it does not answer within 150 ms moved nothing).
+  From the first 6 screens it learns the area: the rows whose text moves
+  from one screen to the next (a sticky header, a "jump to bottom" hint, a
+  status line change in place and stay out) and the columns that change,
+  widened to the screen's edges or a pane border (`│`). A screen joins the
+  page only past an overlap of at least 4 rows with the page's end, or is
+  found inside the page: a screen caught mid-redraw, or a jump, stops the
+  page (`stopped`), it never adds wrong rows.
+- `ends`: the program's start and end were reached (two steps moved
+  nothing). `state` `flat`: nothing on the screen scrolls like a document
+  (htop, a menu), so there is no page; the phone keeps the wheel (`scroll`).
+- While a job runs the pane's screens wait (none go out); afterwards the
+  screen shows where the program is now. A job stops after 3 s, and a page
+  at 5000 rows.
 
 ### Prompt chip menus (feature `chips`)
 

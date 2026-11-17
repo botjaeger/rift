@@ -46,6 +46,7 @@ describe("server fixtures", () => {
       "history",
       "older",
       "output",
+      "page",
       "pong",
       "screen",
       "screen_end",
@@ -55,7 +56,7 @@ describe("server fixtures", () => {
       "update",
       "welcome",
     ]);
-    expect(server).toHaveLength(37);
+    expect(server).toHaveLength(39);
   });
 
   it.each(server.map((f) => [f.name, f.json] as const))("decodes %s", (_name, json) => {
@@ -86,6 +87,8 @@ describe("client fixtures", () => {
       "older",
       "open",
       "output",
+      "page_ahead",
+      "page_seek",
       "paste",
       "ping",
       "push",
@@ -100,7 +103,7 @@ describe("client fixtures", () => {
       "upload",
       "visible",
     ]);
-    expect(client).toHaveLength(41);
+    expect(client).toHaveLength(43);
   });
 
   it.each(client.map((f) => [f.name, f.json] as const))("%s is a ClientMsg", (_name, json) => {
@@ -375,6 +378,45 @@ describe("decodeServer Phase 3", () => {
     }
     // an older computer: no theme at all
     expect(decodeServer(server.find((f) => f.name === "welcome.json")!.json)).not.toHaveProperty("theme");
+  });
+
+  it("a welcome carries the computer's addresses now; a malformed list is left out, the welcome kept", () => {
+    const w = server.find((f) => f.name === "welcome-addresses.json")!.json as Record<string, unknown>;
+    expect(decodeServer(w)).toMatchObject({ addresses: ["172.16.10.63:7878", "192.168.0.149:7878"] });
+    for (const bad of [[], ["172.16.10.63"], ["172.16.10.63:0"], ["a b:7878"], [7878], "172.16.10.63:7878", Array(17).fill("10.0.0.1:7878")]) {
+      const d = decodeServer({ ...w, addresses: bad });
+      expect(d, JSON.stringify(bad).slice(0, 40)).not.toBeNull();
+      expect(d).not.toHaveProperty("addresses");
+    }
+    // an older computer: none
+    expect(decodeServer(server.find((f) => f.name === "welcome.json")!.json)).not.toHaveProperty("addresses");
+  });
+
+  it("a page outside its bounds is dropped", () => {
+    const p = server.find((f) => f.name === "page.json")!.json as Record<string, unknown>;
+    expect(decodeServer(p)).not.toBeNull();
+    const row = [["x", null, null, 0]];
+    for (const bad of [
+      { at: 99 }, // past the page
+      { from: -41 }, // above its top
+      { lines: Array(201).fill(row) }, // over a chunk
+      { bottom: -39 }, // rows past the bottom
+      { area: [1, 121, 0, 81] }, // taller than any screen
+      { area: [1, 37, 0] },
+      { ends: [true] },
+      { state: "maybe" },
+      { lines: [[["x".repeat(601), null, null, 0]]] }, // a row longer than any screen's
+    ]) {
+      expect(decodeServer({ ...p, ...bad }), JSON.stringify(bad).slice(0, 40)).toBeNull();
+    }
+  });
+
+  it("page requests stay inside their bounds", () => {
+    expect(isClientMsg({ t: "page_ahead", id: "g", pane: 1, epoch: 0, dir: "up", rows: 500 })).toBe(true);
+    expect(isClientMsg({ t: "page_ahead", id: "g", pane: 1, epoch: 0, dir: "up", rows: 501 })).toBe(false);
+    expect(isClientMsg({ t: "page_ahead", id: "g", pane: 1, epoch: 0, dir: "left", rows: 5 })).toBe(false);
+    expect(isClientMsg({ t: "page_seek", id: "g", pane: 1, epoch: 3, at: -12 })).toBe(true);
+    expect(isClientMsg({ t: "page_seek", id: "g", pane: 1, epoch: 3, at: 1.5 })).toBe(false);
   });
 
   it("a theme message needs a whole theme", () => {

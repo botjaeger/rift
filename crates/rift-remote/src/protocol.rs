@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize};
 /// Protocol version carried by both handshake payloads and `welcome`.
 pub const VERSION: u32 = 2;
 
+/// At most this many `welcome` addresses (the app's `MAX_ADDRESSES`).
+pub const MAX_WELCOME_ADDRESSES: usize = 16;
+
 /// Handshake message 2 payload (gateway → client).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatewayHello {
@@ -252,6 +255,27 @@ pub enum ClientMsg {
         pane: u64,
         lines: i32,
     },
+    /// Stitch `rows` more rows of `pane`'s alternate screen past the page's
+    /// end in `dir` (feature `stitch`): the gateway scrolls the program and
+    /// answers with `page` messages. `epoch` 0, or one the gateway no longer
+    /// holds, starts a new page from the screen as it is.
+    PageAhead {
+        id: String,
+        pane: u64,
+        epoch: u64,
+        dir: PageDir,
+        rows: u32,
+    },
+    /// Scroll the program so that page row `at` is the first row of its
+    /// area (feature `stitch`): where the phone's view stopped, so keys and
+    /// the screen carry on from there. Answered with a `page` (its `at`
+    /// where the program landed).
+    PageSeek {
+        id: String,
+        pane: u64,
+        epoch: u64,
+        at: i64,
+    },
     /// One chunk of an image pasted into the program running in `pane`
     /// (feature `upload`): `size` bytes in all, this chunk's `data`
     /// (standard base64) starting at byte `offset`. Chunks come in order;
@@ -389,6 +413,26 @@ pub enum ScreenMode {
     On,
 }
 
+/// Which way `page_ahead` stitches: toward the program's start or its end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PageDir {
+    Up,
+    Down,
+}
+
+/// How a `page` answer ended: all that was asked (or an end of the
+/// program) stitched; stopped at a screen that could not be joined safely
+/// (`stopped`: what came before still holds); or nothing on the screen
+/// scrolls like a document (`flat`: htop, a menu), so there is no page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PageState {
+    Ok,
+    Stopped,
+    Flat,
+}
+
 /// A run of equally styled cells of a `screen` row; on the wire the array
 /// `[text, fg, bg, flags]`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -459,6 +503,12 @@ pub enum ServerMsg {
         /// gateways, whose phones keep their last theme.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         theme: Option<Theme>,
+        /// Where the phone can reach the gateway now, `host:port` (at most
+        /// [`MAX_WELCOME_ADDRESSES`]): the computer changes networks, the
+        /// pairing link's addresses go stale and only the relay is left.
+        /// Absent from older gateways and when there is no network.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        addresses: Vec<String>,
     },
     /// The desktop's theme changed (feature `theme`; sent to every
     /// connection).
@@ -559,6 +609,24 @@ pub enum ServerMsg {
         lines: Vec<Vec<Run>>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         rules: Vec<(u16, String)>,
+    },
+    /// Rows of `pane`'s stitched page (feature `stitch`): `lines` are page
+    /// rows `from..from + len` of the scrolling area (`area`: screen rows
+    /// `[0]..[1]`, columns `[2]..[3]`); the page spans `top..bottom` and
+    /// the program shows row `at` first. `ends`: the program's start and
+    /// end were reached (it no longer moved). `state` says why stitching
+    /// stopped short of what was asked.
+    Page {
+        pane: u64,
+        epoch: u64,
+        area: [u16; 4],
+        top: i64,
+        bottom: i64,
+        at: i64,
+        from: i64,
+        lines: Vec<Vec<Run>>,
+        ends: [bool; 2],
+        state: PageState,
     },
     /// Screens of `pane` stopped (left the alternate screen in `auto`, or
     /// `off`).
@@ -1066,7 +1134,7 @@ mod tests {
     #[test]
     fn every_client_fixture_round_trips() {
         let all = fixtures("client");
-        assert_eq!(all.len(), 41, "client fixtures");
+        assert_eq!(all.len(), 43, "client fixtures");
         for (name, value) in all {
             let msg: ClientMsg =
                 serde_json::from_value(value.clone()).unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -1077,7 +1145,7 @@ mod tests {
     #[test]
     fn every_server_fixture_round_trips() {
         let all = fixtures("server");
-        assert_eq!(all.len(), 37, "server fixtures");
+        assert_eq!(all.len(), 39, "server fixtures");
         for (name, value) in all {
             let msg: ServerMsg =
                 serde_json::from_value(value.clone()).unwrap_or_else(|e| panic!("{name}: {e}"));

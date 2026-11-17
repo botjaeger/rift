@@ -304,7 +304,17 @@ card cannot answer (a password, other input, a view-only device), and from an al
   keyboard; a plain tap still does. The computer sends the program's redraws
   every 16 ms while it scrolls, and the app shows each within a frame. Zoomed in, the view scrolls
   itself first and the computer's pane past its edges. A view-only device scrolls a pane's view
-  but not a program. **Paste** puts the clipboard in the message box and sends nothing (below); on **Send** an image
+  but not a program. With a computer whose Rift has `stitch` (and a device that may operate), a
+  full-screen program scrolls natively instead (`src/stitch.ts`): the first vertical drag asks the
+  computer for a page; it scrolls the program itself, joins its screens and sends the rows (a
+  third of a second to a second for a few screens of Claude Code). The rows above the program's
+  scrolling area and below it (a title, an input box, a status line) stay where they are; the rows
+  between scroll as a native list with its momentum, the next rows asked for a screen before
+  either edge, and half a second after scrolling stops the computer moves the program there, so
+  keys and its screen carry on where the view is. New output where the program is ends the page
+  (the live screen comes back); a program whose screen does not scroll like a document (htop, a
+  menu) answers `flat` and keeps the wheel. While a page shows, a hold selects nothing and a tap
+  clicks nothing. **Paste** puts the clipboard in the message box and sends nothing (below); on **Send** an image
   goes to the computer (feature `upload`, operate only, at most 10 MB, `src/upload.ts`), which saves it and
   pastes its path into the running program, as dropping the file on the window does: Claude
   Code and Codex attach it. A file on the clipboard goes the same way (feature `upload_files`): a Files copy through iOS's paste button, the clip's content URI on Android, which shows its own "pasted from" notice. It keeps only its extension (1 to 8 letters or digits; a file without one is refused, and so is anything over 10 MB, at a shell prompt, or to an older computer's Rift, each with a message). On iOS the key block's Paste reads the clipboard itself, so iOS asks "Allow Paste"; the Attach sheet's Paste row is the system's own button, with no prompt. `src/pickFile.ts` wraps `expo-document-picker` for picking a file. Selecting copies, with no Copy button: hold a finger still (450 ms) on the screen and the word under it is selected and copied (a light vibration), with an 18 pt accent knob with a dark rim on each end (the first cell's top left corner, the last cell's bottom right, taken within 44 pt); a dragged handle shows a loupe over the finger (150 × 46 on the surface, the row in mono 22 with a caret) and ticks at each word it steps onto, and lifting it copies the new range (nothing is copied while it moves). The bar docked over the keys shows the lines and characters selected and **✓ Copied** while the selection is on the clipboard (announced once per copy), then **Word**, **Line**, **All** (widen to whole words, whole rows or the whole screen), **To prompt** (disabled unless the command line shows under the screen; a screen reader hears why) and ✕, over "All selects the whole screen."; Android's Back ends the selection; a tap copies nothing and leaves the clipboard as it was; the screen stands still until then (a screen reader's **Copy the screen** action takes it all). A tap is a click for a program that tracks the mouse (feature `mouse`). The message box grows to five lines: **+** beside it opens Attach (what it brings goes in the message, as for Paste below), the phone keyboard's Return is a new line and only the round **Send** or **Run** button sends (an empty box sends nothing; the key row's **Return** key is a new line with text in the box, and with an empty box confirms what the program shows). With a hardware keyboard Shift+Return is a new line and Return sends. **New line** is not in the default key row; it stays in Choose keys. Both screens have pinch to zoom, double-tap to reset, with the controls floating over the screen while it changes
@@ -439,6 +449,11 @@ with Face ID** (the device's own name for it).
   ("LAN 192.168.1.29", "Relay relay.example.com"). A LAN address that answers with
   another key than the paired one is skipped; the host stops with "key mismatch" only when the
   relay, or every path, does. A network change tries it again.
+- The computer's addresses follow it: each `welcome` names where it can be reached now (it moves
+  between networks, and the pairing code's addresses go stale), stored first with the host, the
+  older ones after (4 in all). Over the relay, each new one is opened beside it; the first that
+  answers takes the connection over (the pane resumes on it), and none that does leaves the relay
+  as it was.
 - A command, key or answer on its way when the connection drops or the wait runs out is never sent
   again by the app (a reconnect carries none of it; an old acknowledgement settles nothing new).
   The error says "It may have gone through: check the pane before sending it again", and the draft
