@@ -6,6 +6,16 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.9.0 · update 8 — 2026-11-18
+
+Scrolling a full-screen program no longer stops partway up.
+
+### Fixed
+
+- **Scrolling a full-screen program no longer stops partway up** — When your computer loses its
+  place in the page (Claude Code laying a long message out again), your phone asks it to carry
+  on a moment later, without another swipe. Best with Rift 0.30.1 on your computer.
+
 ## 0.9.0 · update 7 — 2026-11-17
 
 Full-screen programs scroll like a native list, with your phone's own momentum.

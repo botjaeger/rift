@@ -8,6 +8,15 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.30.1 — 2026-11-18
+
+### Fixed
+
+- **Scrolling Claude Code from your phone no longer stops partway up** — Claude Code sometimes
+  jumps far ahead while it lays a long message out again at your phone's width; your computer
+  now finds its place again and keeps adding the page, and it recognises the start of the
+  conversation even while Claude Code's clock ticks.
+
 ## 0.30.0 — 2026-11-17
 
 Full-screen programs scroll on your phone like a native list, and README pages look right.
