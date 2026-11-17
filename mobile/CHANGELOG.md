@@ -6,6 +6,19 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.9.0 · update 7 — 2026-11-17
+
+Full-screen programs scroll like a native list, with your phone's own momentum.
+
+### New
+
+- **Native scrolling of full-screen programs** — In Claude Code's full-screen view, `less`, `man`
+  and similar programs, you now scroll the whole page with your phone's own momentum; the
+  program's header and prompt stay in place, and when you stop, the program on your computer
+  follows to where you are. Needs Rift 0.30.0 on the computer.
+- **Back to the direct connection** — When your computer's address changes, the app learns the
+  new one, and moves from the relay to the faster direct connection as soon as it answers.
+
 ## 0.9.0 · update 6 — 2026-11-13
 
 A new tab follows its output to the end, and cards show what they hide.

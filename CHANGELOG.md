@@ -8,6 +8,27 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.30.0 — 2026-11-17
+
+Full-screen programs scroll on your phone like a native list, and README pages look right.
+
+### New
+
+- **Native scrolling of full-screen programs on your phone** — In a full-screen program such as
+  Claude Code's full-screen view, `less` or `man`, your computer now scrolls the program itself and
+  sends your phone the whole page, so the phone scrolls it with its own momentum instead of one
+  step at a time. The program's fixed rows (a header, a prompt, a status line) stay in place. When
+  you stop, the program follows to where you are (Rift for iPhone and Android 0.9.0 · update 7).
+- **Phone finds your computer again on the same Wi-Fi** — When your computer's address changes,
+  your phone learns the new one, and a phone reaching it through the relay switches to the faster
+  direct connection as soon as it answers.
+
+### Fixed
+
+- **README HTML in the viewer** — Rendered Markdown no longer shows raw tags such as
+  `<p align="center">`, `<h1>` or `<img>`: headings and centred lines show as on GitHub, bold and
+  keys are styled, comments are hidden, and an image shows its description.
+
 ## 0.29.0 — 2026-11-12
 
 Typing from your phone shows up sooner.
