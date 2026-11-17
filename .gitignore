@@ -31,3 +31,4 @@ assets/icon/rift.iconset/
 /docs/audits/
 /reports/
 /research_notes/
+/.playwright-cli/
