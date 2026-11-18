@@ -227,6 +227,11 @@ lives outside the workspace in `mobile/` (pnpm; the `mobile` gate).
   (TIOCSWINSZ only), diverts the redraw to an empty `Term` and signals back.
   The real `Term` is never resized by it. Only the alternate screen: on the
   primary screen diverted output would be lost history.
+- **Held tall.** A stitch job holds a pane's program at 1000 rows
+  (`remote-tall`, `PaneState::tall`, `PaneState::fitted`) so it draws its
+  document a thousand rows at a time. Only while the window is not in use,
+  for `TALL_LEASE` at most, and never the columns: a width change lays every
+  line out anew.
 - **Marker idempotence.** Users' own iTerm2 integration emits OSC 133 next to
   ours; `BlockStore` handlers tolerate duplicated A/B/C/D markers. Keep new
   handlers idempotent.

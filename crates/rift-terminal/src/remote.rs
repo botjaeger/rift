@@ -542,6 +542,20 @@ impl Source for ControlSource {
         self.act(pane, &req).map(|_| ())
     }
 
+    fn tall(&self, pane: u64, rows: Option<u16>) -> Result<(), InputError> {
+        // a background shell has no window: nothing sizes it
+        if is_background(pane) {
+            return Err(InputError::Unavailable(
+                "a background shell is not held tall".into(),
+            ));
+        }
+        let req = Request::RemoteTall {
+            pane: local_pane(pane),
+            rows,
+        };
+        self.act(pane, &req).map(|_| ())
+    }
+
     fn reset_elapsed(&self, pane: u64, device: &str) -> Result<(), InputError> {
         // a background shell has no tab clock
         if is_background(pane) {

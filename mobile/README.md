@@ -307,10 +307,13 @@ card cannot answer (a password, other input, a view-only device), and from an al
   but not a program. With a computer whose Rift has `stitch` (and a device that may operate), a
   full-screen program scrolls natively instead (`src/stitch.ts`): the first vertical drag asks the
   computer for a page of one screen; it scrolls the program itself, joins its screens and sends the
-  rows (about 90 rows a second of Claude Code: each wheel step waits for its redraw). The rows above
+  rows (the first page at the pane's own size; after it the computer holds the pane 1000 rows tall
+  while it reads, about 1250 rows of Claude Code in a job of 1.5 to 3 s). A first page that has not
+  come after 3 s, or whose request was refused, leaves the drag to the wheel for a while
+  (`wheelInstead`): a drag always moves something. The rows above
   the program's scrolling area and below it (a title, an input box, a status line) stay where they
   are; the rows between scroll as a native list with its momentum, and more rows are asked for as
-  each batch comes in until three screens (`PAGE_READ_AHEAD`) wait past the view toward an edge
+  each batch comes in until eight screens (`PAGE_READ_AHEAD`) wait past the view toward an edge
   whose end is not reached, so a flick finds them there. Half a second after scrolling stops the computer moves the program there, so
   keys and its screen carry on where the view is. New output where the program is ends the page
   (the live screen comes back); a program whose screen does not scroll like a document (htop, a

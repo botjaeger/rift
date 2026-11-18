@@ -118,11 +118,29 @@ export function mayAskPage(page: StitchPage | null, now: number, stoppedAt: numb
 export const PAGE_AUTO_RETRIES = 2;
 
 /**
- * Screens of rows kept ready past the view toward an edge whose end the program has not reached:
- * the computer brings about 90 rows a second (each wheel step waits for the program to redraw),
- * so rows are asked for well before the finger gets there, and again as each batch comes in.
+ * Screens of rows kept ready past the view toward an edge whose end the program has not reached.
+ * After the first page the computer holds the pane tall and brings several hundred rows in one
+ * job of a few seconds, so rows are asked for well before the finger gets there (a flick covers
+ * a few screens a second), and again as each batch comes in.
  */
-export const PAGE_READ_AHEAD = 3;
+export const PAGE_READ_AHEAD = 8;
+
+/**
+ * A first page that has not come this long after it was asked for (the computer answers within
+ * two seconds), or whose request was refused: for this long the wheel scrolls the program, as
+ * for one that cannot be stitched. A drag always moves something.
+ */
+export const PAGE_FIRST_MS = 3000;
+export const PAGE_WHEEL_MS = 10_000;
+
+/**
+ * The wheel scrolls the program although it could be stitched: no page yet, and the request for
+ * one was refused (`refusedAt`) within PAGE_WHEEL_MS, or went out (`askedAt`) PAGE_FIRST_MS ago.
+ */
+export function wheelInstead(now: number, askedAt: number | null, refusedAt: number): boolean {
+  if (now - refusedAt < PAGE_WHEEL_MS) return true;
+  return askedAt !== null && now - askedAt >= PAGE_FIRST_MS;
+}
 
 /**
  * Which way a `page_ahead` goes for a scroller at `y` (`viewH` tall, `contentH` of content):

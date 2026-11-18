@@ -310,6 +310,18 @@ pub enum Request {
         #[serde(default)]
         rows: Option<u16>,
     },
+    /// The gateway reads a full-screen program's document for a phone
+    /// (stitching): the pane's program is held at `rows` rows (its columns
+    /// stay) so it draws that much of the document at once, until released
+    /// (`null`) or `TALL_LEASE` passes. Refused (`busy`) while the window is
+    /// in use (it keeps its size) and for a pane that is not on the
+    /// alternate screen (its scrollback is never laid out for a phone).
+    /// Accepted only while `remote_access` is on, like `remote-input`.
+    RemoteTall {
+        pane: u64,
+        #[serde(default)]
+        rows: Option<u16>,
+    },
     /// A paired phone's Reset on the Time on tab card, sent by the remote
     /// gateway: restarts the clock of the tab holding `pane`, as the
     /// card's own Reset does. Accepted only while `remote_access` is on,
@@ -360,6 +372,7 @@ impl Request {
             | Request::RemoteScroll { .. }
             | Request::RemoteUpload { .. }
             | Request::RemoteFit { .. }
+            | Request::RemoteTall { .. }
             | Request::RemoteResetElapsed { .. }
             | Request::RemoteOpen { .. }
             | Request::RemoteMove { .. }
@@ -1198,6 +1211,8 @@ mod tests {
             r#"{"cmd":"remote-input","pane":12,"device":"Sam's iPhone","text":":wq"}"#,
             r#"{"cmd":"remote-fit","pane":12,"cols":64,"rows":40}"#,
             r#"{"cmd":"remote-fit","pane":12,"cols":null,"rows":null}"#,
+            r#"{"cmd":"remote-tall","pane":12,"rows":1000}"#,
+            r#"{"cmd":"remote-tall","pane":12,"rows":null}"#,
             r#"{"cmd":"screen","pane":12,"force":false}"#,
             r#"{"cmd":"screen","pane":12,"force":true,"since":41}"#,
             r#"{"cmd":"output","pane":12,"block":86,"from":0,"limit":500}"#,

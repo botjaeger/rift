@@ -50,7 +50,7 @@ import { RUN_BOLD, RUN_ITALIC, RUN_STRIKE, RUN_UNDERLINE, type ScreenRun } from 
 import { authenticate, fleet, useApp } from "@/runtime";
 import { useActionScope } from "./useActionScope";
 import { DRAG_SLOP, DragVelocity, dragLines, dragScrollsPane, Fling, ScrollCoalescer } from "@/scroll";
-import { aheadRows, edgeToAsk, liveMatches, mayAskPage, mergePage, PAGE_AUTO_RETRIES, PAGE_RETRY_MS, pageBody as stitchedBody, pageComplete, pageFixed, pageUsable, type StitchPage } from "@/stitch";
+import { aheadRows, edgeToAsk, liveMatches, mayAskPage, mergePage, PAGE_AUTO_RETRIES, PAGE_RETRY_MS, pageBody as stitchedBody, pageComplete, pageFixed, pageUsable, wheelInstead, type StitchPage } from "@/stitch";
 import { composite, HISTORY_PAGE, missing, nextCache, withPage, type HistoryCache } from "@/history";
 import { draftKey } from "@/fleet";
 import { pending, PENDING_FULL, readClipboard, type AttachRules, type Attached } from "@/pending";
@@ -906,6 +906,8 @@ export function TerminalView({
   // when a page_ahead went out and is not answered yet (one at a time; the computer refuses a
   // second); a reply lost with the connection counts as none after PAGE_REPLY_MS
   const askedAt = useRef<number | null>(null);
+  // when a page_ahead was last refused (not for a job already running): the wheel takes over
+  const refusedAt = useRef(-Infinity);
   const asking = () => askedAt.current !== null && Date.now() - askedAt.current < PAGE_REPLY_MS;
   // when the last `stopped` came: stitching is asked to go on after a pause (mayAskPage)
   const stoppedAt = useRef(0);
@@ -951,7 +953,9 @@ export function TerminalView({
     if (asking() || !mayAskPage(p, Date.now(), stoppedAt.current)) return;
     askedAt.current = Date.now();
     void fleet.pageAhead(hostKey, paneId, p?.epoch ?? 0, dir, aheadRows(p, liveScreen?.rows ?? 24)).then((r) => {
-      if (!r.ok) askedAt.current = null;
+      if (r.ok) return;
+      askedAt.current = null;
+      if (r.code !== "busy") refusedAt.current = Date.now();
     });
   };
   const pageScroller = useRef<ScrollView>(null);
@@ -1273,10 +1277,15 @@ export function TerminalView({
     if (!d.vertical || !canScroll || !online || dy === 0) return;
     // a program the computer can stitch: the page is asked for, the wheel left alone (its steps
     // would break the stitching); without a page to show (`flat`, or stitching stopped before a
-    // row) the wheel scrolls the program as before
+    // row) the wheel scrolls the program as before, and so it does when no page came (the
+    // request refused, or unanswered): a drag always moves something
     if (canStitch && page === null) {
-      askPage(dy > 0 ? "up" : "down");
-      return;
+      // a request that got no answer at all (the connection dropped) is asked again
+      if (askedAt.current !== null && !asking()) askedAt.current = null;
+      if (!wheelInstead(Date.now(), askedAt.current, refusedAt.current)) {
+        askPage(dy > 0 ? "up" : "down");
+        return;
+      }
     }
     const { y: at, viewH, contentH } = local.current;
     const edges = { overflow: contentH - viewH > 1, atTop: at <= 1, atBottom: at + viewH >= contentH - 1 };

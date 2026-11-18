@@ -323,6 +323,24 @@ describe("the lines above a primary screen (feature `history`)", () => {
     h.unmount();
   });
 
+  it("a first page that does not come leaves the drag to the wheel: a drag always moves something", () => {
+    const h = harness(false, { screen: styled(true), canStitch: true });
+    h.pageAhead.mockImplementation(() => new Promise(() => {}));
+    drag(h);
+    // on its way: the wheel is left alone (its steps would break the stitching)
+    vi.advanceTimersByTime(2000);
+    drag(h);
+    vi.advanceTimersByTime(200);
+    expect(h.send).not.toHaveBeenCalled();
+    // overdue: the program is scrolled as one that cannot be stitched
+    vi.advanceTimersByTime(1000);
+    drag(h);
+    vi.advanceTimersByTime(200);
+    expect(h.send).toHaveBeenCalled();
+    expect(h.pageAhead).toHaveBeenCalledTimes(1);
+    h.unmount();
+  });
+
   it("one request at a time; one never answered (the connection dropped) counts as lost after 8 s", () => {
     const h = harness(false, { screen: styled(true), canStitch: true });
     h.pageAhead.mockImplementation(() => new Promise(() => {}));

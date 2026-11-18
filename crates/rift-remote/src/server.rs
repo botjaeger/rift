@@ -2816,7 +2816,19 @@ fn stitch_loop<S: Source>(shared: &Shared<S>, jobs: std::sync::mpsc::Receiver<St
         };
         let (pane, client) = (job.pane, job.client);
         let started = Instant::now();
-        let msgs = run_stitch(shared, job);
+        // a job that panics must not end the worker (every later page_ahead would wait
+        // for a page that never comes): the pane's page is dropped, its size given back,
+        // and the phone told the page stopped
+        let ran =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_stitch(shared, job)));
+        let msgs = ran.unwrap_or_else(|_| {
+            log::error!("remote: pane {pane}: the stitch job panicked; its page is dropped");
+            let _ = shared.source.tall(pane, None);
+            if let Some(p) = shared.pages.lock().unwrap().get_mut(&pane) {
+                p.page = None;
+            }
+            vec![page_msg(shared, pane, PageState::Stopped)]
+        });
         if let Some(ServerMsg::Page {
             epoch,
             top,
@@ -2851,43 +2863,451 @@ fn stitch_loop<S: Source>(shared: &Shared<S>, jobs: std::sync::mpsc::Receiver<St
 
 /// `pane`'s screen once it rests: [`crate::SETTLE`] without a change after
 /// one was seen, or [`crate::SETTLE_NO_CHANGE`] without any (the program
-/// did not move). None when the pane has no screen.
+/// did not move). None when the pane has no screen. `tall`: the pane is
+/// held tall ([`Source::tall`]): the screen keeps up to
+/// [`crate::TALL_ROWS`] rows, and the program gets [`crate::SETTLE_TALL`]
+/// to draw them.
 fn rested_screen<S: Source>(
     shared: &Shared<S>,
     pane: u64,
     before: Option<&Screen>,
+    tall: bool,
 ) -> Option<Screen> {
+    let clamp = if tall { clamp_tall } else { clamp_screen };
+    rested_with(shared, pane, before, clamp, tall, None)
+}
+
+/// [`rested_screen`] with the screen's bound and the pace apart: `slow` for
+/// a screen the program draws anew in several passes (a tall one, and its
+/// own again after it was tall). `page`: only its rows count as a change
+/// once both screens show them: what moves beside the document all the time
+/// (a clock, a spinner, a panel that counts seconds) would keep the screen
+/// from ever resting.
+fn rested_with<S: Source>(
+    shared: &Shared<S>,
+    pane: u64,
+    before: Option<&Screen>,
+    clamp: fn(Screen) -> Screen,
+    slow: bool,
+    page: Option<&crate::stitch::Page>,
+) -> Option<Screen> {
+    let same = |a: &Option<Screen>, b: &Option<Screen>| match (page, a, b) {
+        (Some(p), Some(x), Some(y)) if p.height_of(&frame_of(x)) > 0 => {
+            p.same_area(&frame_of(x), &frame_of(y))
+        }
+        _ => a == b,
+    };
+    let (most, settle, no_change) = if slow {
+        (
+            Duration::from_millis(1500),
+            crate::SETTLE_TALL,
+            crate::SETTLE_NO_CHANGE * 3,
+        )
+    } else {
+        (
+            Duration::from_millis(600),
+            crate::SETTLE,
+            crate::SETTLE_NO_CHANGE,
+        )
+    };
     let start = Instant::now();
     let mut last = before.cloned();
     let mut changed: Option<Instant> = None;
     loop {
         // an error is no news (the poller reads the same pane, and the window may answer
         // "read again"): only an answer counts, a pane without a screen included
-        let Ok(now) = shared
-            .source
-            .screen(pane, false)
-            .map(|s| s.map(clamp_screen))
-        else {
-            if start.elapsed() >= Duration::from_millis(600) {
+        let Ok(now) = shared.source.screen(pane, false).map(|s| s.map(clamp)) else {
+            if start.elapsed() >= most {
                 return last;
             }
             std::thread::sleep(Duration::from_millis(4));
             continue;
         };
         let t = Instant::now();
-        if now != last {
-            last = now;
+        if !same(&now, &last) {
             changed = Some(t);
         }
+        last = now;
         let done = match changed {
-            Some(c) => t - c >= crate::SETTLE,
-            None => t - start >= crate::SETTLE_NO_CHANGE,
+            Some(c) => t - c >= settle,
+            None => t - start >= no_change,
         };
-        if done || t - start >= Duration::from_millis(600) {
+        if done || t - start >= most {
             return last;
         }
         std::thread::sleep(Duration::from_millis(4));
     }
+}
+
+/// [`clamp_screen`] for a pane held tall: up to [`crate::TALL_ROWS`] rows.
+fn clamp_tall(mut s: Screen) -> Screen {
+    s.cols = s.cols.min(MAX_SCREEN_COLS);
+    s.rows = s.rows.min(crate::TALL_ROWS);
+    s.lines.resize(s.rows as usize, Vec::new());
+    s.cursor = s.cursor.filter(|[r, c]| *r < s.rows && *c < s.cols);
+    s
+}
+
+/// One wheel step of a stitch job: `lines` toward `dir`.
+fn wheel<S: Source>(
+    shared: &Shared<S>,
+    pane: u64,
+    operate: bool,
+    dir: crate::stitch::Dir,
+    lines: i32,
+) -> bool {
+    let lines = match dir {
+        crate::stitch::Dir::Up => lines,
+        crate::stitch::Dir::Down => -lines,
+    };
+    match shared.source.scroll(pane, lines, operate) {
+        Ok(()) => true,
+        Err(e) => {
+            log::debug!("remote: pane {pane}: stitching stopped, the wheel was refused: {e:?}");
+            false
+        }
+    }
+}
+
+/// Hold `pane` tall and its screen once the program drew it, or none when
+/// the pane did not grow (a window in use keeps its size, a source without
+/// the feature): the job then goes on at the pane's own size.
+fn enter_tall<S: Source>(
+    shared: &Shared<S>,
+    pane: u64,
+    live: &Screen,
+    page: &crate::stitch::Page,
+) -> Option<Screen> {
+    if live.rows >= MAX_SCREEN_ROWS || shared.source.tall(pane, Some(crate::TALL_ROWS)).is_err() {
+        return None;
+    }
+    // the grid is tall at once; the program's redraw follows
+    let grown = shared
+        .source
+        .screen(pane, false)
+        .ok()
+        .flatten()
+        .map(clamp_tall);
+    let tall = rested_with(shared, pane, grown.as_ref(), clamp_tall, true, Some(page))
+        .filter(|s| s.alt && s.rows > live.rows && s.cols == live.cols);
+    if tall.is_none() {
+        let _ = shared.source.tall(pane, None);
+    }
+    tall
+}
+
+/// Give `pane` its own size back; its screen once the program drew it
+/// there (none when it did not come back to `live`'s size).
+fn leave_tall<S: Source>(
+    shared: &Shared<S>,
+    pane: u64,
+    live: &Screen,
+    page: Option<&crate::stitch::Page>,
+) -> Option<Screen> {
+    let _ = shared.source.tall(pane, None);
+    let shrunk = shared
+        .source
+        .screen(pane, false)
+        .ok()
+        .flatten()
+        .map(clamp_screen);
+    rested_with(shared, pane, shrunk.as_ref(), clamp_screen, true, page)
+        .filter(|s| s.alt && s.rows == live.rows && s.cols == live.cols)
+}
+
+/// Step the program until it shows page row `at` first, each screen found
+/// in the page. A step is as many lines as the rows left divided by the
+/// most rows a line has moved it so far (a program speeds up under a
+/// repeated wheel: Claude Code moves one to six rows a line), so a long way
+/// takes a few steps and none goes far past the target. `Stopped` when the
+/// program shows rows the page does not hold.
+fn seek_live<S: Source>(
+    shared: &Shared<S>,
+    pane: u64,
+    operate: bool,
+    page: &mut crate::stitch::Page,
+    at: i64,
+    mut prev: Screen,
+    until: Instant,
+) -> PageState {
+    use crate::stitch::Dir;
+    let mut stuck = 0;
+    // rows a line, in tenths: six until a step shows less
+    let mut pace: u64 = 60;
+    while page.at() != at && Instant::now() < until {
+        let dir = if at < page.at() { Dir::Up } else { Dir::Down };
+        let d = (at - page.at()).unsigned_abs();
+        let lines = (d * 10 / pace).clamp(1, MAX_SCROLL_LINES as u64);
+        if !wheel(shared, pane, operate, dir, lines as i32) {
+            break;
+        }
+        let Some(now) = rested_with(shared, pane, Some(&prev), clamp_screen, false, Some(page))
+        else {
+            break;
+        };
+        prev = now.clone();
+        match page.locate(&frame_of(&now)) {
+            Some(i) if i != page.at() => {
+                // half as fast again as it just went: the next step may speed up
+                let went = (i - page.at()).unsigned_abs();
+                pace = (went * 15 / lines).clamp(10, 200);
+                page.set_at(i);
+                stuck = 0;
+            }
+            Some(_) => {
+                stuck += 1;
+                if stuck >= 2 {
+                    break;
+                }
+            }
+            // the program showed something the page does not hold (it laid a
+            // message out anew since): the next page_ahead starts a page there
+            None => {
+                log::debug!(
+                    "remote: pane {pane}: seek: the program shows rows the page does not hold"
+                );
+                return PageState::Stopped;
+            }
+        }
+    }
+    PageState::Ok
+}
+
+/// A `page_ahead` for a page the pane already has, with the pane held tall:
+/// each step shows hundreds of rows, so a page grows by a screen of the
+/// phone's in a few milliseconds, and a program that jumps (Claude Code
+/// lays a long message out anew) still overlaps the page. The pane has its
+/// own size again when this returns, the program where the last step left
+/// it (the page's `at` says where: the phone seeks from there). None when
+/// the pane did not grow, or shows no document when tall.
+#[allow(clippy::too_many_arguments)]
+fn ahead_tall<S: Source>(
+    shared: &Shared<S>,
+    pane: u64,
+    operate: bool,
+    page: &mut crate::stitch::Page,
+    dir: crate::stitch::Dir,
+    want: usize,
+    live: &Screen,
+    ends: &mut [bool; 2],
+    new_rows: &mut Option<(i64, i64)>,
+) -> Option<PageState> {
+    use crate::stitch::{Dir, Joined};
+    if page.tall_failed() {
+        return None;
+    }
+    let mut prev = enter_tall(shared, pane, live, page)?;
+    let started = Instant::now();
+    let until = started + shared.config.page_job_time;
+    let end = match dir {
+        Dir::Up => 0,
+        Dir::Down => 1,
+    };
+    let back = match dir {
+        Dir::Up => Dir::Down,
+        Dir::Down => Dir::Up,
+    };
+    let mut state = PageState::Ok;
+    let mut note = |j: &Joined| {
+        if let Joined::Added { from, count } = j {
+            let r = new_rows.get_or_insert((*from, *from + *count as i64));
+            r.0 = r.0.min(*from);
+            r.1 = r.1.max(*from + *count as i64);
+        }
+    };
+    // the page's edge on the side asked for: what a step gained there (a tall
+    // screen may add rows on the other side too, which nobody asked for)
+    let edge = |p: &crate::stitch::Page| match dir {
+        Dir::Up => -p.top(),
+        Dir::Down => p.bottom(),
+    };
+    // wheel lines a step: toward a third of the tall area's rows a step, from
+    // what the last one brought (Claude Code moves one to six rows a line)
+    let mut lines: i32 = 40;
+    let mut added = 0usize;
+    let mut still = 0;
+    let mut retries = 0;
+    // Two small steps first. A program that draws a taller screen's rows late
+    // shows them all after one (Claude Code fills it at the next wheel event);
+    // the two screens then tell which rows scroll at this height (not the
+    // phone-size area moved down: a taller screen has room for a panel a short
+    // one hides). A program that shows no document there keeps its own size.
+    let mut begun = false;
+    'begin: {
+        if !wheel(shared, pane, operate, dir, 1) {
+            break 'begin;
+        }
+        let Some(a) = rested_with(shared, pane, Some(&prev), clamp_tall, true, Some(page)) else {
+            break 'begin;
+        };
+        prev = a;
+        if !page.knows_tall(&frame_of(&prev)) {
+            if !wheel(shared, pane, operate, dir, 2) {
+                break 'begin;
+            }
+            let Some(b) = rested_screen(shared, pane, Some(&prev), true) else {
+                break 'begin;
+            };
+            let learned = page.learn_tall(&frame_of(&prev), &frame_of(&b), dir);
+            prev = b;
+            if !learned {
+                break 'begin;
+            }
+        }
+        let was = edge(page);
+        match page.extend_tall(&frame_of(&prev), dir, true) {
+            Joined::Unstitched => break 'begin,
+            j => note(&j),
+        }
+        added += (edge(page) - was) as usize;
+        begun = true;
+    }
+    log::trace!(
+        "remote: pane {pane}: tall: begun {begun} at {:?}",
+        started.elapsed()
+    );
+    if !begun {
+        log::debug!("remote: pane {pane}: tall: no document found on the tall screen");
+        page.set_tall_failed();
+        let _ = leave_tall(shared, pane, live, None);
+        return None;
+    }
+    while added < want && Instant::now() < until {
+        if page.len() >= crate::MAX_PAGE_ROWS {
+            state = PageState::Stopped;
+            break;
+        }
+        // a step may be more lines than one `scroll` takes
+        let step = lines;
+        let rest = step - step.min(MAX_SCROLL_LINES);
+        if !wheel(shared, pane, operate, dir, step.min(MAX_SCROLL_LINES))
+            || (rest > 0 && !wheel(shared, pane, operate, dir, rest))
+        {
+            state = PageState::Stopped;
+            break;
+        }
+        let Some(now) = rested_with(shared, pane, Some(&prev), clamp_tall, true, Some(page)) else {
+            state = PageState::Stopped;
+            break;
+        };
+        let moved = !page.same_area(&frame_of(&prev), &frame_of(&now));
+        prev = now;
+        let f = frame_of(&prev);
+        let was = edge(page);
+        if !moved {
+            still += 1;
+            if still >= 2 {
+                ends[end] = true;
+                break;
+            }
+            continue;
+        }
+        still = 0;
+        let h = page.height_of(&f).max(1);
+        let joined = page.extend_tall(&f, dir, false);
+        log::trace!(
+            "remote: pane {pane}: tall: {step} lines, {joined:?}, page {}..{} at {:?}",
+            page.top(),
+            page.bottom(),
+            started.elapsed()
+        );
+        match joined {
+            j @ Joined::Added { .. } => {
+                note(&j);
+                let count = (edge(page) - was) as usize;
+                added += count;
+                // toward a third of the area a step, growing by half at most: a
+                // program speeds up under a repeated wheel, more the longer the run
+                if let Some(aim) = (lines as usize * (h / 3).max(1)).checked_div(count) {
+                    lines = aim
+                        .min(lines as usize + (lines as usize / 2).max(1))
+                        .clamp(1, 2 * MAX_SCROLL_LINES as usize) as i32;
+                }
+            }
+            // inside the rows the page holds: on toward its end in long steps
+            Joined::Same => {
+                let left = match dir {
+                    Dir::Up => page.at() - page.top(),
+                    Dir::Down => page.bottom() - page.at() - h as i64,
+                };
+                lines = (left / 6).clamp(lines as i64, 2 * MAX_SCROLL_LINES as i64) as i32;
+            }
+            Joined::Unstitched => {
+                // too far for an overlap: back, and on in smaller steps
+                retries += 1;
+                let mut found = false;
+                // its own time: the way back is as long as the jump was
+                let back_until = Instant::now() + shared.config.page_job_time;
+                for _ in 0..crate::STITCH_BACK_STEPS {
+                    if retries > crate::STITCH_RECOVERIES
+                        || Instant::now() >= back_until
+                        || !wheel(shared, pane, operate, back, MAX_SCROLL_LINES)
+                    {
+                        break;
+                    }
+                    let Some(now) =
+                        rested_with(shared, pane, Some(&prev), clamp_tall, true, Some(page))
+                    else {
+                        break;
+                    };
+                    prev = now;
+                    if page.extend_tall(&frame_of(&prev), back, false) != Joined::Unstitched {
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    log::debug!("remote: pane {pane}: stitching: a tall screen too far to join");
+                    state = PageState::Stopped;
+                    break;
+                }
+                lines = (step / 4).max(1);
+            }
+        }
+    }
+    log::debug!(
+        "remote: pane {pane}: tall: {added} rows in {:?}, page {}..{}",
+        started.elapsed(),
+        page.top(),
+        page.bottom()
+    );
+    match leave_tall(shared, pane, live, Some(page)) {
+        Some(mut now) => {
+            // A program that went past the page (a jump no step back found again)
+            // is walked back the way it came until it shows the page: left there,
+            // the next page_ahead would start a new page far from what the phone
+            // shows.
+            let mut at = page.locate(&frame_of(&now));
+            let back_until = Instant::now() + shared.config.page_job_time;
+            while at.is_none() && state == PageState::Stopped && Instant::now() < back_until {
+                if !wheel(shared, pane, operate, back, MAX_SCROLL_LINES) {
+                    break;
+                }
+                let Some(next) = rested_screen(shared, pane, Some(&now), false) else {
+                    break;
+                };
+                if next == now {
+                    break;
+                }
+                now = next;
+                at = page.locate(&frame_of(&now));
+            }
+            match at {
+                Some(i) => page.set_at(i),
+                None => {
+                    log::debug!(
+                        "remote: pane {pane}: tall: back at its own size the program shows rows the page does not hold"
+                    );
+                    state = PageState::Stopped;
+                }
+            }
+        }
+        None => {
+            log::debug!("remote: pane {pane}: tall: the pane did not come back to its own size");
+            state = PageState::Stopped;
+        }
+    }
+    Some(state)
 }
 
 fn frame_of(s: &Screen) -> crate::stitch::Frame {
@@ -2900,7 +3320,7 @@ fn run_stitch<S: Source>(shared: &Shared<S>, job: StitchJob) -> Vec<ServerMsg> {
     use crate::stitch::{Dir, Joined, Page};
     let pane = job.pane;
     let started = Instant::now();
-    let Some(first) = rested_screen(shared, pane, None).filter(|s| s.alt) else {
+    let Some(first) = rested_screen(shared, pane, None, false).filter(|s| s.alt) else {
         return vec![page_msg(shared, pane, PageState::Flat)];
     };
     let first_frame = frame_of(&first);
@@ -2988,7 +3408,42 @@ fn run_stitch<S: Source>(shared: &Shared<S>, job: StitchJob) -> Vec<ServerMsg> {
             // repeated wheel, as Claude Code does, moves one row for one line), growing again
             let mut ahead = crate::STITCH_STEP_LINES;
             let mut recoveries = 0;
-            while added < want && started.elapsed() < shared.config.page_job_time {
+            // a page the pane already has grows with the pane held tall (a step there
+            // brings hundreds of rows); the first page comes at the pane's own size (it
+            // shows sooner), and so does every page of a pane that cannot grow
+            let mut tall_done = false;
+            if let Some(p) = page.as_mut() {
+                let rows = want.max(crate::TALL_ROWS as usize);
+                match ahead_tall(
+                    shared,
+                    pane,
+                    job.operate,
+                    p,
+                    dir,
+                    rows,
+                    &first,
+                    &mut ends,
+                    &mut new_rows,
+                ) {
+                    Some(s) => {
+                        state = s;
+                        tall_done = true;
+                    }
+                    None => match rested_screen(shared, pane, None, false).filter(|s| s.alt) {
+                        Some(now) => {
+                            if let Some(i) = p.locate(&frame_of(&now)) {
+                                p.set_at(i);
+                            }
+                            prev = now;
+                        }
+                        None => {
+                            state = PageState::Stopped;
+                            tall_done = true;
+                        }
+                    },
+                }
+            }
+            while !tall_done && added < want && started.elapsed() < shared.config.page_job_time {
                 if page
                     .as_ref()
                     .is_some_and(|p| p.len() >= crate::MAX_PAGE_ROWS)
@@ -3008,7 +3463,7 @@ fn run_stitch<S: Source>(shared: &Shared<S>, job: StitchJob) -> Vec<ServerMsg> {
                     state = PageState::Stopped;
                     break;
                 }
-                let Some(now) = rested_screen(shared, pane, Some(&prev)) else {
+                let Some(now) = rested_screen(shared, pane, Some(&prev), false) else {
                     state = PageState::Stopped;
                     break;
                 };
@@ -3079,7 +3534,8 @@ fn run_stitch<S: Source>(shared: &Shared<S>, job: StitchJob) -> Vec<ServerMsg> {
                                     break;
                                 }
                                 lines = (lines * 2).min(quarter);
-                                let Some(now) = rested_screen(shared, pane, Some(&prev)) else {
+                                let Some(now) = rested_screen(shared, pane, Some(&prev), false)
+                                else {
                                     break;
                                 };
                                 prev = now.clone();
@@ -3157,45 +3613,8 @@ fn run_stitch<S: Source>(shared: &Shared<S>, job: StitchJob) -> Vec<ServerMsg> {
         }
         StitchKind::Seek { at } => {
             if let Some(page) = taken.as_mut() {
-                let mut prev = first;
-                let mut stuck = 0;
-                while page.at() != at && started.elapsed() < shared.config.page_job_time {
-                    let dir = if at < page.at() { Dir::Up } else { Dir::Down };
-                    // at most half the area at a time, so each screen is found in
-                    // the page; a step past the target is fine: the next comes back
-                    let far = (at - page.at())
-                        .unsigned_abs()
-                        .min(page.height() as u64 / 2)
-                        .max(1);
-                    if !step(dir, far as i32) {
-                        break;
-                    }
-                    let Some(now) = rested_screen(shared, pane, Some(&prev)) else {
-                        break;
-                    };
-                    prev = now.clone();
-                    match page.locate(&frame_of(&now)) {
-                        Some(i) if i != page.at() => {
-                            page.set_at(i);
-                            stuck = 0;
-                        }
-                        Some(_) => {
-                            stuck += 1;
-                            if stuck >= 2 {
-                                break;
-                            }
-                        }
-                        // the program showed something the page does not hold (it laid a
-                        // message out anew since): the next page_ahead starts a page there
-                        None => {
-                            log::debug!(
-                                "remote: pane {pane}: seek: the program shows rows the page does not hold"
-                            );
-                            state = PageState::Stopped;
-                            break;
-                        }
-                    }
-                }
+                let until = started + shared.config.page_job_time;
+                state = seek_live(shared, pane, job.operate, page, at, first.clone(), until);
             } else {
                 state = PageState::Stopped;
             }

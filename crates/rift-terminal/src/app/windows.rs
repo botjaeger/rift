@@ -565,6 +565,7 @@ impl App {
             | R::RemoteClose { pane, .. }
             | R::RemoteMove { pane, .. }
             | R::RemoteFit { pane, .. }
+            | R::RemoteTall { pane, .. }
             | R::RemoteResetElapsed { pane, .. }
             | R::Focus {
                 pane: Some(pane), ..

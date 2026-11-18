@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { aheadRows, edgeToAsk, liveMatches, mayAskPage, mergePage, PAGE_READ_AHEAD, PAGE_RETRY_MS, pageComplete, pageScreens, pageUsable, type StitchPage } from "../src/stitch";
+import { aheadRows, edgeToAsk, liveMatches, mayAskPage, mergePage, PAGE_FIRST_MS, PAGE_READ_AHEAD, PAGE_RETRY_MS, PAGE_WHEEL_MS, pageComplete, pageScreens, pageUsable, wheelInstead, type StitchPage } from "../src/stitch";
 import type { ScreenState } from "../src/protocol/store";
 import type { PageMsg, ScreenRun } from "../src/protocol/types";
 
@@ -89,6 +89,19 @@ describe("mayAskPage", () => {
     expect(mayAskPage(stopped, 1000 + PAGE_RETRY_MS - 1, 1000)).toBe(false);
     expect(mayAskPage(stopped, 1000 + PAGE_RETRY_MS, 1000)).toBe(true);
     expect(mayAskPage({ ...ok, state: "flat" }, 1e9, 0)).toBe(false);
+  });
+});
+
+describe("wheelInstead", () => {
+  it("leaves the wheel alone while a first page is on its way", () => {
+    expect(wheelInstead(10_000, null, -Infinity)).toBe(false);
+    expect(wheelInstead(10_000, 10_000 - PAGE_FIRST_MS + 1, -Infinity)).toBe(false);
+  });
+  it("scrolls the program once the page is overdue, or its request was refused", () => {
+    expect(wheelInstead(10_000, 10_000 - PAGE_FIRST_MS, -Infinity)).toBe(true);
+    expect(wheelInstead(50_000, null, 50_000 - PAGE_WHEEL_MS + 1)).toBe(true);
+    // the refusal is forgotten after a while: a page is asked for again
+    expect(wheelInstead(50_000, null, 50_000 - PAGE_WHEEL_MS)).toBe(false);
   });
 });
 

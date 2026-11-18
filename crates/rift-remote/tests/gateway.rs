@@ -99,6 +99,29 @@ struct State {
     jump: Option<(i64, i64)>,
     /// The doc viewer's screen is [`TALL_DOC_ROWS`] rows (a phone's size), not [`DOC_ROWS`].
     tall: bool,
+    /// The doc viewer's pane may be held tall ([`Source::tall`]); without it the
+    /// pane keeps its size, as one whose window is in use does.
+    can_hold: bool,
+    /// Panes held tall, and at how many rows.
+    held: BTreeMap<u64, u16>,
+    /// What `tall` was told: (pane, rows or release).
+    talls: Vec<(u64, Option<u16>)>,
+    /// The doc viewer draws a taller screen's new rows only at the next wheel
+    /// event (Claude Code): until then they are blank.
+    late: bool,
+    /// Rows of the screen the viewer last drew in full (see `late`).
+    drawn_rows: BTreeMap<u64, usize>,
+}
+
+impl State {
+    /// Rows of `pane`'s doc viewer screen now.
+    fn doc_rows(&self, pane: u64) -> usize {
+        match self.held.get(&pane) {
+            Some(&r) => r as usize,
+            None if self.tall => TALL_DOC_ROWS,
+            None => DOC_ROWS,
+        }
+    }
 }
 
 /// Rows of a [`State::docs`] viewer's screen: a sticky header, the document,
@@ -277,6 +300,37 @@ impl Source for Fake {
         self.0.lock().unwrap().can_start
     }
 
+    /// A viewer like Claude Code: at its document's end it keeps its last rows
+    /// when its screen changes height; scrolled away from it, its first row
+    /// (as far as the document's end lets it).
+    fn tall(&self, pane: u64, rows: Option<u16>) -> Result<(), InputError> {
+        let mut st = self.0.lock().unwrap();
+        st.talls.push((pane, rows));
+        if !st.can_hold {
+            return Err(InputError::Unavailable("the window is in use".into()));
+        }
+        let before = st.doc_rows(pane);
+        match rows {
+            Some(r) => st.held.insert(pane, r),
+            None => st.held.remove(&pane),
+        };
+        let after = st.doc_rows(pane);
+        st.drawn_rows.entry(pane).or_insert(before);
+        if after < before {
+            st.drawn_rows.insert(pane, after);
+        }
+        if let Some((doc, top)) = st.docs.get_mut(&pane) {
+            let len = doc.len() as i64;
+            let last = |rows: usize| (len - (rows as i64 - 2)).max(0);
+            if *top >= last(before) {
+                *top = last(after);
+            } else {
+                *top = (*top).min(last(after));
+            }
+        }
+        Ok(())
+    }
+
     fn fit(&self, pane: u64, size: Option<(u16, u16)>) -> Result<(), InputError> {
         let mut st = self.0.lock().unwrap();
         if !st.panes.contains_key(&pane) {
@@ -358,8 +412,15 @@ impl Source for Fake {
         if let Some((lines, top)) = st.docs.get(&pane) {
             // the status ticks only now and then: a screen at rest stays equal
             let tick = reads / if st.ticking { 25 } else { 1000 };
-            let rows = if st.tall { TALL_DOC_ROWS } else { DOC_ROWS };
-            return Ok(Some(doc_screen(lines, *top, tick, rows)));
+            let rows = st.doc_rows(pane);
+            let mut s = doc_screen(lines, *top, tick, rows);
+            // rows a late viewer has not drawn yet: the ones a taller screen added on top
+            if let Some(&drawn) = st.drawn_rows.get(&pane).filter(|&&d| st.late && d < rows) {
+                for row in &mut s.lines[1..rows - drawn + 1] {
+                    *row = Vec::new();
+                }
+            }
+            return Ok(Some(s));
         }
         Ok(st.screens.get(&pane).filter(|s| s.alt || force).cloned())
     }
@@ -385,7 +446,8 @@ impl Source for Fake {
             }
         }
         let jump = st.jump;
-        let rows = if st.tall { TALL_DOC_ROWS } else { DOC_ROWS };
+        let rows = st.doc_rows(pane);
+        st.drawn_rows.insert(pane, rows);
         if let Some((doc, top)) = st.docs.get_mut(&pane) {
             let last = doc.len() as i64 - (rows as i64 - 2);
             *top = (*top - moved).clamp(0, last.max(0));
@@ -5439,4 +5501,269 @@ fn the_documents_start_is_found_while_a_status_line_ticks() {
     assert_eq!(got[0]["ends"], json!([true, false]), "{}", got[0]);
     let text: Vec<String> = got.iter().flat_map(page_text).collect();
     assert_eq!(text, doc[0..32].to_vec());
+}
+
+/// A first page (at the pane's own size), then `ask` on it: the answers.
+fn first_page_then(env: &Env, ch: &mut Ch, ask: Value) -> (u64, Vec<Value>) {
+    put(
+        ch,
+        json!({"t":"page_ahead","id":"t1","pane":12,"epoch":0,"dir":"up","rows":12}),
+    );
+    assert_eq!(ack(&recv_t(ch, "ack")), (true, ""));
+    let first = pages(ch);
+    assert_eq!(first[0]["state"], "ok", "{}", first[0]);
+    let epoch = first[0]["epoch"].as_u64().unwrap();
+    // the first page never holds the pane tall: it shows sooner at its own size
+    assert!(env.fake.0.lock().unwrap().talls.is_empty());
+    let mut ask = ask;
+    ask["epoch"] = json!(epoch);
+    put(ch, ask);
+    assert_eq!(ack(&recv_t(ch, "ack")), (true, ""));
+    (epoch, job_pages(ch))
+}
+
+/// Every `page` message of one job's answer: the first within the job's time,
+/// then until none comes for half a second (rows added above an existing
+/// page end before its bottom, so [`pages`] cannot tell the last one).
+fn job_pages(ch: &mut Ch) -> Vec<Value> {
+    let mut out = Vec::new();
+    let mut deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        match ch.recv() {
+            Recv::Msg(m) => {
+                let v: Value = serde_json::from_slice(&m).unwrap();
+                if v["t"] == "page" {
+                    out.push(v);
+                    deadline = Instant::now() + Duration::from_millis(500);
+                }
+            }
+            Recv::Idle | Recv::Alive | Recv::Partial => {}
+            other => panic!("expected a message, got {other:?}"),
+        }
+    }
+    assert!(!out.is_empty(), "no page within 30 s");
+    out
+}
+
+#[test]
+fn a_page_grows_by_hundreds_of_rows_a_step_with_the_pane_held_tall() {
+    let env = start(|_| {});
+    let doc = doc_lines(5000);
+    {
+        let mut st = env.fake.0.lock().unwrap();
+        st.docs.insert(12, (doc.clone(), 4000));
+        st.can_hold = true;
+        st.accelerate = true;
+        st.ticking = true;
+    }
+    let (_, mut ch, _) = env.pair(Permission::Operate);
+    let before = env.fake.0.lock().unwrap().scrolls.len();
+    let (_, got) = first_page_then(
+        &env,
+        &mut ch,
+        json!({"t":"page_ahead","id":"t2","pane":12,"dir":"up","rows":36}),
+    );
+    let p = &got[0];
+    assert_eq!(p["state"], "ok", "{p}");
+    // the area as the phone's screen has it, not the tall one's
+    assert_eq!(p["area"], json!([1, 13, 0, 30]));
+    let top = p["top"].as_i64().unwrap();
+    assert!(top <= -1000, "{p}");
+    let st = env.fake.0.lock().unwrap();
+    // every row from where it reached down to the first page's last, none missing or twice
+    let rows = (p["bottom"].as_i64().unwrap() - top) as usize;
+    let page_top = (st.docs[&12].1 + top - p["at"].as_i64().unwrap()) as usize;
+    drop(st);
+    // the answer carries the new rows (the first page's are on the phone already)
+    let mut text: Vec<String> = vec![String::new(); rows];
+    for m in &got {
+        let from = (m["from"].as_i64().unwrap() - top) as usize;
+        for (i, t) in page_text(m).into_iter().enumerate() {
+            text[from + i] = t;
+        }
+    }
+    let new = text.iter().take_while(|t| !t.is_empty()).count();
+    assert!(new >= 1000, "{new} new rows");
+    assert!(text[new..].iter().all(String::is_empty));
+    assert_eq!(text[..new], doc[page_top..page_top + new]);
+    let st = env.fake.0.lock().unwrap();
+    // held tall once and given back; `at` is where the program is, at its own size
+    assert_eq!(
+        st.talls,
+        vec![(12, Some(rift_remote::TALL_ROWS)), (12, None)]
+    );
+    assert!(st.held.is_empty());
+    assert_eq!(
+        p["at"].as_i64().unwrap(),
+        st.docs[&12].1 - page_top as i64 + top
+    );
+    // a thousand rows in a handful of steps (three lines a step would take hundreds)
+    let steps = st.scrolls.len() - before;
+    assert!(steps <= 60, "{steps} wheel steps");
+}
+
+#[test]
+fn a_program_that_draws_a_taller_screen_late_leaves_no_blank_rows_in_the_page() {
+    let env = start(|_| {});
+    let doc = doc_lines(3000);
+    {
+        let mut st = env.fake.0.lock().unwrap();
+        st.docs.insert(12, (doc.clone(), 2500));
+        st.can_hold = true;
+        st.late = true;
+    }
+    let (_, mut ch, _) = env.pair(Permission::Operate);
+    let (_, got) = first_page_then(
+        &env,
+        &mut ch,
+        json!({"t":"page_ahead","id":"t2","pane":12,"dir":"up","rows":36}),
+    );
+    assert_eq!(got[0]["state"], "ok", "{}", got[0]);
+    assert!(got[0]["top"].as_i64().unwrap() <= -900, "{}", got[0]);
+    let blank = got
+        .iter()
+        .flat_map(page_text)
+        .filter(|t| t.is_empty())
+        .count();
+    assert_eq!(blank, 0);
+}
+
+#[test]
+fn a_document_that_does_not_scroll_on_the_tall_screen_is_stitched_at_the_panes_own_size() {
+    let env = start(|_| {});
+    // shorter than the tall screen: there it shows whole and no wheel step moves it,
+    // so nothing tells which rows are the document's
+    let doc = doc_lines(200);
+    {
+        let mut st = env.fake.0.lock().unwrap();
+        st.docs.insert(12, (doc.clone(), 188));
+        st.can_hold = true;
+    }
+    let (_, mut ch, _) = env.pair(Permission::Operate);
+    let (epoch, mut got) = first_page_then(
+        &env,
+        &mut ch,
+        json!({"t":"page_ahead","id":"t2","pane":12,"dir":"up","rows":36}),
+    );
+    for i in 0..20 {
+        let p = got.last().unwrap();
+        assert_eq!(p["state"], "ok", "{p}");
+        if p["ends"][0] == true {
+            break;
+        }
+        put(
+            &mut ch,
+            json!({"t":"page_ahead","id":format!("m{i}"),"pane":12,"epoch":epoch,"dir":"up","rows":120}),
+        );
+        assert_eq!(ack(&recv_t(&mut ch, "ack")), (true, ""));
+        got = job_pages(&mut ch);
+    }
+    let p = got.last().unwrap();
+    assert_eq!(p["ends"][0], true, "{p}");
+    // the whole document above the first screen, and not one blank row of the tall screen
+    assert_eq!(p["top"].as_i64(), Some(-188), "{p}");
+    let st = env.fake.0.lock().unwrap();
+    // held tall once, given back, and not tried again for this page
+    assert_eq!(
+        st.talls,
+        vec![(12, Some(rift_remote::TALL_ROWS)), (12, None)]
+    );
+    assert!(st.held.is_empty());
+    assert_eq!(st.docs[&12].1, 0);
+}
+
+#[test]
+fn a_far_page_seek_takes_a_few_long_steps() {
+    let env = start(|_| {});
+    let doc = doc_lines(5000);
+    {
+        let mut st = env.fake.0.lock().unwrap();
+        st.docs.insert(12, (doc.clone(), 4000));
+        st.can_hold = true;
+    }
+    let (_, mut ch, _) = env.pair(Permission::Operate);
+    let (epoch, got) = first_page_then(
+        &env,
+        &mut ch,
+        json!({"t":"page_ahead","id":"t2","pane":12,"dir":"up","rows":36}),
+    );
+    let top = got[0]["top"].as_i64().unwrap();
+    let home = env.fake.0.lock().unwrap().docs[&12].1;
+    let at0 = got[0]["at"].as_i64().unwrap();
+    let before = env.fake.0.lock().unwrap().scrolls.len();
+    let target = top + 40;
+    put(
+        &mut ch,
+        json!({"t":"page_seek","id":"t3","pane":12,"epoch":epoch,"at":target}),
+    );
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (true, ""));
+    let p = &pages(&mut ch)[0];
+    assert_eq!(p["state"], "ok", "{p}");
+    assert_eq!(p["at"].as_i64(), Some(target));
+    let st = env.fake.0.lock().unwrap();
+    assert_eq!(st.docs[&12].1, home + (target - at0));
+    assert!(st.held.is_empty());
+    // half a small screen a step would take over a hundred
+    let steps = st.scrolls.len() - before;
+    assert!(steps <= 40, "{steps} wheel steps");
+    // at the pane's own size: only the page_ahead held it tall
+    assert_eq!(st.talls.len(), 2);
+}
+
+#[test]
+fn a_pane_that_cannot_be_held_tall_still_grows_its_page_at_its_own_size() {
+    let env = start(|_| {});
+    let doc = doc_lines(400);
+    env.fake
+        .0
+        .lock()
+        .unwrap()
+        .docs
+        .insert(12, (doc.clone(), 300));
+    let (_, mut ch, _) = env.pair(Permission::Operate);
+    let (_, got) = first_page_then(
+        &env,
+        &mut ch,
+        json!({"t":"page_ahead","id":"t2","pane":12,"dir":"up","rows":36}),
+    );
+    assert_eq!(got[0]["state"], "ok", "{}", got[0]);
+    let st = env.fake.0.lock().unwrap();
+    assert_eq!(st.talls.first(), Some(&(12, Some(rift_remote::TALL_ROWS))));
+    assert!(st.held.is_empty());
+}
+
+#[test]
+fn a_program_that_jumps_further_than_the_tall_screen_is_found_again() {
+    let env = start(|_| {});
+    let doc = doc_lines(9000);
+    {
+        let mut st = env.fake.0.lock().unwrap();
+        st.docs.insert(12, (doc.clone(), 8000));
+        st.can_hold = true;
+        // above line 7500 the view jumps 1500 lines further up: no screen overlaps the page
+        st.jump = Some((7500, 1500));
+    }
+    let (_, mut ch, _) = env.pair(Permission::Operate);
+    let (_, got) = first_page_then(
+        &env,
+        &mut ch,
+        json!({"t":"page_ahead","id":"t2","pane":12,"dir":"up","rows":36}),
+    );
+    let p = got.last().unwrap();
+    assert_eq!(p["state"], "ok", "{p}");
+    let (top, at) = (p["top"].as_i64().unwrap(), p["at"].as_i64().unwrap());
+    // the page went on past where the jump was, and holds no row of the screen it jumped to
+    let st = env.fake.0.lock().unwrap();
+    let page_top = (st.docs[&12].1 - (at - top)) as usize;
+    assert!(page_top < 7500, "page from line {page_top}");
+    let mut text: Vec<String> = vec![String::new(); (p["bottom"].as_i64().unwrap() - top) as usize];
+    for m in &got {
+        let from = (m["from"].as_i64().unwrap() - top) as usize;
+        for (i, t) in page_text(m).into_iter().enumerate() {
+            text[from + i] = t;
+        }
+    }
+    let new = text.iter().take_while(|t| !t.is_empty()).count();
+    assert_eq!(text[..new], doc[page_top..page_top + new]);
+    assert!(st.held.is_empty());
 }

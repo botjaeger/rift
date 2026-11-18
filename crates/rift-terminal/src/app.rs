@@ -20503,6 +20503,7 @@ impl App {
             // needs the event loop (closing the last tab quits): answered in `user_event`
             Request::RemoteClose { .. } => Response::error("remote-close needs the event loop"),
             Request::RemoteFit { pane, cols, rows } => self.remote_fit(pane, cols, rows),
+            Request::RemoteTall { pane, rows } => self.remote_tall(pane, rows),
             Request::RemoteResetElapsed { pane, .. } => {
                 if !self.config.remote_access {
                     return Response::error("remote access is off");
@@ -23291,6 +23292,45 @@ impl App {
         }
     }
 
+    /// The gateway holds `pane`'s program tall while it reads its document
+    /// (`remote-tall`), or gives its size back (`None`). A window in use
+    /// keeps its size: refused there.
+    fn remote_tall(&mut self, pane: u64, rows: Option<u16>) -> crate::control::Response {
+        use crate::control::Response;
+        if !self.config.remote_access {
+            return Response::error("remote access is off");
+        }
+        let Some(i) = self.win.tabs.iter().position(|t| t.pane(pane).is_some()) else {
+            return Response::error("no such pane");
+        };
+        let in_use = crate::remote::window_in_use(self.win.focused, self.win.used_at.elapsed());
+        if rows.is_some() && in_use {
+            return Response::error("busy: the window is in use");
+        }
+        if let Some(p) = self.win.tabs[i].pane_mut(pane) {
+            use rift_pty::alacritty_terminal::term::TermMode;
+            let full_screen = p.session.term.lock().mode().contains(TermMode::ALT_SCREEN);
+            if rows.is_some() && !full_screen {
+                return Response::error("busy: the pane shows no full-screen program");
+            }
+            p.tall = rows.map(|r| {
+                let r = r.clamp(*rift_remote::FIT_ROWS.start(), rift_remote::TALL_ROWS);
+                (r, Instant::now())
+            });
+            p.fit_paused = in_use;
+            // sized now, drawn or not (see `remote_fit`)
+            p.apply_fit();
+        }
+        if let Some(w) = &self.win.window {
+            w.request_redraw();
+        }
+        Response {
+            ok: true,
+            pane: Some(pane),
+            ..Default::default()
+        }
+    }
+
     /// Keys, clicks or the wheel reached this window: someone is at it.
     fn note_window_used(&mut self) {
         self.win.used_at = Instant::now();
@@ -23303,7 +23343,7 @@ impl App {
         let in_use = crate::remote::window_in_use(self.win.focused, self.win.used_at.elapsed());
         for tab in &mut self.win.tabs {
             for p in &mut tab.panes {
-                if p.fit.is_some() && p.fit_paused != in_use {
+                if (p.fit.is_some() || p.tall.is_some()) && p.fit_paused != in_use {
                     p.fit_paused = in_use;
                     p.apply_fit();
                 }
@@ -25400,6 +25440,20 @@ impl App {
         }
         // a phone's pane size whose lease ran out: the shell goes back to the
         // window's own size
+        // a pane the gateway held tall and never gave back (it stopped mid-job)
+        for tab in &mut self.win.tabs {
+            for p in &mut tab.panes {
+                let Some((_, at)) = p.tall else { continue };
+                let due = at + rift_remote::TALL_LEASE;
+                if now >= due {
+                    p.tall = None;
+                    p.apply_fit();
+                    repaint = true;
+                } else {
+                    deadlines.push(due);
+                }
+            }
+        }
         for tab in &mut self.win.tabs {
             for p in &mut tab.panes {
                 let Some((_, _, at)) = p.fit else { continue };

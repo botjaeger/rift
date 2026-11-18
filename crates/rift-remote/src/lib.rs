@@ -119,6 +119,10 @@ pub const PAGE_JOB_TIME: Duration = Duration::from_secs(3);
 /// A screen counts as drawn once it has not changed for this long (a
 /// program like Claude Code redraws a scroll in pieces).
 pub const SETTLE: Duration = Duration::from_millis(30);
+/// [`SETTLE`] for a pane held tall, and for its own screen after: a program
+/// draws a tall screen, a batch of wheel lines there, and its screen at a new
+/// size in several passes, further apart (Claude Code: up to about 120 ms).
+pub const SETTLE_TALL: Duration = Duration::from_millis(160);
 /// A wheel step the program did not answer within this long moved nothing.
 pub const SETTLE_NO_CHANGE: Duration = Duration::from_millis(150);
 /// Wheel lines per stitch step: small enough that a screen keeps the
@@ -131,6 +135,15 @@ pub const STITCH_BACK_STEPS: usize = 40;
 pub const STITCH_RECOVERIES: usize = 4;
 /// Rested screens the stitcher learns the scrolling area from.
 pub const STITCH_LEARN_FRAMES: usize = 8;
+/// Rows a pane is held at while a stitch job scrolls its program
+/// ([`Source::tall`]): a full-screen program then draws that many rows of
+/// its document at once (Claude Code draws 1000 rows in about a quarter of
+/// a second), so a step brings hundreds of rows and a program that jumps
+/// still overlaps the page.
+pub const TALL_ROWS: u16 = 1000;
+/// How long a pane stays tall without [`Source::tall`] being called again
+/// (a gateway that stopped mid-job gives the pane back).
+pub const TALL_LEASE: Duration = Duration::from_secs(8);
 /// Largest image or file an `upload` carries, in bytes.
 pub const MAX_UPLOAD_BYTES: u64 = 10 * 1024 * 1024;
 /// Most bytes in one `upload` chunk (60 000 characters of base64, which a
@@ -997,6 +1010,18 @@ pub trait Source: Send + Sync + 'static {
     fn fit(&self, pane: u64, size: Option<(u16, u16)>) -> Result<(), InputError> {
         let _ = (pane, size);
         Ok(())
+    }
+    /// Hold `pane`'s program at `rows` rows (its columns stay) while a
+    /// stitch job reads its document, or give its size back (`None`); held
+    /// for [`TALL_LEASE`] at most. A pane whose window is in use keeps its
+    /// size: [`Self::screen`] then stays as tall as it was, which is how
+    /// the job knows; an error says so at once. Defaults to
+    /// `Unavailable`.
+    fn tall(&self, pane: u64, rows: Option<u16>) -> Result<(), InputError> {
+        let _ = (pane, rows);
+        Err(InputError::Unavailable(
+            "this computer does not hold a pane tall".into(),
+        ))
     }
     /// Up to `limit` output lines of `block` in `pane` from line `from` on
     /// (see [`OutputPage`]). Defaults to `NoPane`.

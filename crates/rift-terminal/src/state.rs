@@ -1257,6 +1257,10 @@ pub struct PaneState {
     /// The window has focus: someone is using it, so it keeps its own size
     /// and the fit waits until they leave.
     pub fit_paused: bool,
+    /// Rows the program is held at while the remote gateway reads its
+    /// document for a phone (`remote-tall`), and since when: a lease of
+    /// [`rift_remote::TALL_LEASE`]. Only while the window is not in use.
+    pub tall: Option<(u16, std::time::Instant)>,
     /// The window's own grid at the last layout (columns, rows, cell size
     /// in px), before any `fit`.
     pub base_grid: Option<(usize, usize, (u16, u16))>,
@@ -1387,6 +1391,7 @@ impl PaneState {
             title: String::new(),
             fit: None,
             fit_paused: false,
+            tall: None,
             base_grid: None,
             program_grid: None,
             launch: Default::default(),
@@ -1453,7 +1458,13 @@ impl PaneState {
         if self.fit_paused {
             return (cols, rows);
         }
-        fitted_grid(self.fit, cols, rows)
+        let (cols, rows) = fitted_grid(self.fit, cols, rows);
+        match self.tall {
+            Some((tall, at)) if at.elapsed() < rift_remote::TALL_LEASE => {
+                (cols, rows.max(tall as usize))
+            }
+            _ => (cols, rows),
+        }
     }
 
     /// The size a capture for the phone is taken at: while the window in use

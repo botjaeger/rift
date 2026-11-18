@@ -1020,6 +1020,34 @@ scrolls natively.
   quarter of the page) until a screen joins or is found, then on at half the
   step that went too far; after 4 such jumps in a job, or a screen caught mid-redraw that never
   joins, the page stops growing (`stopped`).
+- The first page comes at the pane's own size (it shows within about 1.5 s).
+  For every `page_ahead` after it the gateway holds the pane tall
+  (`Source::tall`, 1000 rows, `TALL_ROWS`; the columns stay; only while the
+  pane's window is not in use, else it goes on at the pane's own size): the
+  program then draws up to 1000 rows of its document at once, a wheel step
+  brings hundreds of rows, and a screen that jumped still has rows in common
+  with the page. Measured on Claude Code: about 1250 rows a job of 1.5 to 3 s
+  (at the pane's own size: about 90 rows a second). There it first takes two
+  small steps (1 line, then 2): a program that draws a taller screen's rows
+  late shows them after the first (Claude Code), and the two screens tell
+  which rows scroll at that height, which is not the short screen's area
+  moved down (Claude Code docks a panel under the conversation that a short
+  screen has no room for). The rows above the area stay out as on the short
+  screen, and so does the last row of the run (a "jump to bottom" hint is
+  drawn over it). A tall screen joins only past 24 rows in common
+  (`MIN_OVERLAP_TALL`), blank rows at its ends left out (a program with less
+  to show than the screen holds fills the rest with nothing); it is read once
+  the page's rows have not changed for 160 ms (`SETTLE_TALL`: a clock, a
+  spinner or a panel beside them never rests). A pane that shows no document
+  when tall (nothing moves there: a short document, a program that lays its
+  screen out differently) is not held tall again for that page. When the job
+  ends the pane has its own size back and `at` says where the program is; a
+  program a jump took past the page is walked back until it shows the page
+  again. A job that panics drops the pane's page and answers `stopped`: the
+  worker goes on.
+- `page_seek` steps at the pane's own size: as many lines as the rows left
+  divided by the most rows a line moved the program so far (Claude Code: one
+  to six), so 900 rows take under a second.
 - `stopped` is not the end: the phone asks again after 1.5 s (on its own
   twice in a row while the view is near that edge, again from each drag). A seek that
   finds rows the page does not hold (the program laid them out anew since)
@@ -1243,6 +1271,13 @@ before, for the phone's Run sheet and the pane's suggestions:
   of one) has the same gate and the errors `remote access is off`, `no such
   pane` and `bad request: …`; the window sizes the pane to the smaller of its
   own grid and the fit until the release or 30 s without a refresh.
+  `remote-tall` (`{"cmd":"remote-tall","pane":12,"rows":1000}`, or `null`
+  to release) holds the pane's program at that many rows, its columns as they
+  are, while the gateway reads its document (stitching), for 8 s at most
+  (`TALL_LEASE`); same gate, and `busy: the window is in use` while someone
+  is at the window: it keeps its size. `screen` then answers a full-screen
+  program's rows up to 1000 (what goes to a phone is cut to 120 by the
+  gateway).
   `remote-open`
   (`{"cmd":"remote-open","pane":12,"device":"Sam's iPhone","kind":"tab"}`,
   answering the new pane as `pane`) has the same gate and the errors

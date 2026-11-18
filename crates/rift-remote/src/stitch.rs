@@ -20,6 +20,10 @@ use crate::protocol::Run;
 
 /// Fewest rows a screen must share with the page to be joined to it.
 pub(crate) const MIN_OVERLAP: usize = 4;
+/// [`MIN_OVERLAP`] for a screen of the pane held tall: its steps leave
+/// hundreds of rows in common, so a short run that repeats elsewhere in the
+/// document (a list, a table, wrapped boilerplate) is never taken for one.
+pub(crate) const MIN_OVERLAP_TALL: usize = 24;
 /// Unchanged columns bridged inside the changing band (spaces in a sentence).
 const BRIDGE: usize = 3;
 
@@ -209,11 +213,23 @@ pub(crate) struct Page {
     text: Vec<String>,
     /// Index of the row the program shows first in the area now.
     at: i64,
+    /// Rows of the screens the area was learned on.
+    frame_rows: usize,
+    /// The rows the document scrolls in on a taller screen of the same
+    /// program (the pane held tall for a job): that screen's rows, and the
+    /// span ([`Self::learn_tall`]). Not the area's rows moved down: a
+    /// program lays a taller screen out anew (Claude Code docks a panel
+    /// under the conversation that a short screen has no room for).
+    tall: Option<(usize, Range<usize>)>,
+    /// No document was found on a taller screen: the pane is not held tall
+    /// for this page again.
+    tall_failed: bool,
 }
 
 impl Page {
     /// The area's rows of `frame`, at index 0.
     pub(crate) fn new(area: Area, frame: &Frame) -> Page {
+        let frame_rows = frame.text.len();
         let rows = area
             .rows
             .clone()
@@ -230,7 +246,97 @@ impl Page {
             rows,
             text,
             at: 0,
+            frame_rows,
+            tall: None,
+            tall_failed: false,
         }
+    }
+
+    /// The rows of `frame` the document scrolls in: the area on a screen of
+    /// the height it was learned on, the learned span on the taller one.
+    /// None for any other screen (another size: another layout).
+    fn span(&self, frame: &Frame) -> Option<Range<usize>> {
+        let rows = frame.text.len();
+        let cols = frame.text.first().map_or(0, Vec::len);
+        if cols < self.area.cols.end {
+            return None;
+        }
+        if rows == self.frame_rows {
+            return Some(self.area.rows.clone());
+        }
+        match &self.tall {
+            Some((tall, span)) if *tall == rows => Some(span.clone()),
+            _ => None,
+        }
+    }
+
+    /// The span of a screen as tall as `frame` is known.
+    pub(crate) fn knows_tall(&self, frame: &Frame) -> bool {
+        frame.text.len() != self.frame_rows && self.span(frame).is_some()
+    }
+    pub(crate) fn tall_failed(&self) -> bool {
+        self.tall_failed
+    }
+    pub(crate) fn set_tall_failed(&mut self) {
+        self.tall_failed = true;
+    }
+
+    /// Learn where the document scrolls on a taller screen from two of its
+    /// screens a small step `dir` apart: the rows of `a` found `s` rows
+    /// further along in `b`, for the `s` with the longest such run of rows
+    /// (rows that stay where they are, a panel or a status line, break it).
+    /// False when nothing moved like that.
+    pub(crate) fn learn_tall(&mut self, a: &Frame, b: &Frame, dir: Dir) -> bool {
+        let rows = a.text.len();
+        let cols = a.text.first().map_or(0, Vec::len);
+        if !a.same_shape(b) || rows <= self.frame_rows || cols < self.area.cols.end {
+            return false;
+        }
+        let band =
+            |f: &Frame| -> Vec<String> { (0..rows).map(|i| f.band(i, &self.area.cols)).collect() };
+        // `y` holds `x`'s rows `s` rows further down
+        let (x, y) = match dir {
+            Dir::Up => (band(a), band(b)),
+            Dir::Down => (band(b), band(a)),
+        };
+        let mut best: Option<(usize, Range<usize>, usize)> = None;
+        for s in 1..=rows / 2 {
+            let mut start = 0;
+            let mut text = 0;
+            for r in 0..=rows - s {
+                let same = r < rows - s && y[r + s] == x[r];
+                if same {
+                    text += usize::from(!x[r].trim().is_empty() && y[r] != x[r]);
+                    continue;
+                }
+                if best.as_ref().is_none_or(|b| text > b.2) && text > 0 {
+                    best = Some((s, start..r, text));
+                }
+                start = r + 1;
+                text = 0;
+            }
+        }
+        // The rows above the area stay out as on the short screen (Claude Code's
+        // sticky prompt row is not there yet this close to the end), and so does the
+        // last row of the run: a program draws a hint over it once it is scrolled
+        // away from its end ("Jump to bottom").
+        match best {
+            Some((s, run, text)) if text >= MIN_OVERLAP * 2 => {
+                let start = run.start.max(self.area.rows.start);
+                let end = (run.end + s).saturating_sub(1);
+                if end < start + MIN_OVERLAP * 2 {
+                    return false;
+                }
+                self.tall = Some((rows, start..end));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// How many rows of `frame` the area covers (0 when it does not).
+    pub(crate) fn height_of(&self, frame: &Frame) -> usize {
+        self.span(frame).map_or(0, |s| s.len())
     }
 
     pub(crate) fn area(&self) -> &Area {
@@ -255,47 +361,122 @@ impl Page {
         &self.rows[a..b]
     }
 
-    fn area_text(&self, frame: &Frame) -> Vec<String> {
-        self.area
-            .rows
-            .clone()
-            .map(|i| frame.band(i, &self.area.cols))
-            .collect()
+    fn area_text(&self, frame: &Frame) -> Option<Vec<String>> {
+        Some(
+            self.span(frame)?
+                .map(|i| frame.band(i, &self.area.cols))
+                .collect(),
+        )
     }
 
     /// `a` and `b` show the same rows in the area (what else changed, a
     /// status line or a pane beside it, does not count). False when either
     /// does not cover the area.
     pub(crate) fn same_area(&self, a: &Frame, b: &Frame) -> bool {
-        let covers = |f: &Frame| {
-            f.text.len() >= self.area.rows.end
-                && f.text.first().map_or(0, Vec::len) >= self.area.cols.end
-        };
-        covers(a) && covers(b) && self.area_text(a) == self.area_text(b)
+        match (self.area_text(a), self.area_text(b)) {
+            (Some(a), Some(b)) => a == b,
+            _ => false,
+        }
     }
 
     /// Where `frame`'s area rows sit in the page (the first such index), if
-    /// they do, exactly.
+    /// they do, exactly. None for a screen of another layout. On a taller
+    /// screen the blank rows at its ends do not count ([`Self::core`]).
     pub(crate) fn locate(&self, frame: &Frame) -> Option<i64> {
-        let s = self.area_text(frame);
+        let (span, above) = self.core(frame)?;
+        let s: Vec<String> = span.map(|i| frame.band(i, &self.area.cols)).collect();
         let h = s.len();
         (0..=self.text.len().checked_sub(h)?)
             .find(|&i| self.text[i..i + h] == s[..])
-            .map(|i| self.top + i as i64)
+            .map(|i| self.top + i as i64 - above as i64)
+    }
+
+    /// The rows of `frame` that hold the document, and how many blank rows
+    /// of its span come before them. On a taller screen a program that has
+    /// less to show than the screen holds leaves the rest empty (Claude Code
+    /// scrolled up to near its end keeps its first row and fills below with
+    /// nothing): those rows are not the document's. None for a screen of
+    /// another layout, or one with no text in its span.
+    fn core(&self, frame: &Frame) -> Option<(Range<usize>, usize)> {
+        let span = self.span(frame)?;
+        if frame.text.len() == self.frame_rows {
+            return Some((span, 0));
+        }
+        let blank = |i: &usize| frame.band(*i, &self.area.cols).trim().is_empty();
+        let above = span.clone().take_while(blank).count();
+        let below = span.clone().rev().take_while(blank).count();
+        (above + below < span.len()).then(|| (span.start + above..span.end - below, above))
     }
 
     /// Joins `frame`, the screen after a step `dir`: what it shows past its
     /// longest overlap (at least [`MIN_OVERLAP`] rows) with the page's end
     /// on that side is added there, and the program is then at that end.
     pub(crate) fn extend(&mut self, frame: &Frame, dir: Dir) -> Joined {
-        if frame.text.len() < self.area.rows.end
-            || frame.text.first().map(Vec::len).unwrap_or(0) < self.area.cols.end
-        {
-            return Joined::Unstitched;
+        match self.span(frame) {
+            Some(span) => self.join(frame, span, dir, false, MIN_OVERLAP),
+            None => Joined::Unstitched,
         }
-        let s = self.area_text(frame);
+    }
+
+    /// [`Self::extend`] for a screen of the pane held tall: at least
+    /// [`MIN_OVERLAP_TALL`] rows in common (the whole page when it is
+    /// shorter). `either`: the screen may run past either end of the page
+    /// whichever way the program was stepped (the first one of a job: where
+    /// the program keeps its rows when its screen grows is its own choice).
+    pub(crate) fn extend_tall(&mut self, frame: &Frame, dir: Dir, either: bool) -> Joined {
+        let least = MIN_OVERLAP_TALL.min(self.text.len()).max(MIN_OVERLAP);
+        let Some((span, above)) = self.core(frame) else {
+            return Joined::Unstitched;
+        };
+        let joined = self.join(frame, span, dir, either, least);
+        if joined != Joined::Unstitched {
+            // `at` is the screen's first row, blank or not
+            self.at -= above as i64;
+        }
+        joined
+    }
+
+    /// Joins rows `span` of `frame` (see [`Self::extend`]). A span that
+    /// holds the whole page (a tall screen around a short page) adds its
+    /// rows on both sides. `either`: a span that overlaps the page's other
+    /// end is joined there (a tall screen that starts inside the page and
+    /// runs past its end, whichever way the program was stepped).
+    fn join(
+        &mut self,
+        frame: &Frame,
+        span: Range<usize>,
+        dir: Dir,
+        either: bool,
+        least: usize,
+    ) -> Joined {
+        let s: Vec<String> = span
+            .clone()
+            .map(|i| frame.band(i, &self.area.cols))
+            .collect();
+        let row = |i: usize| cut(&frame.rows[span.start + i], &self.area.cols);
         let h = s.len();
         let n = self.text.len();
+        if h > n && n >= MIN_OVERLAP {
+            let mut holds = (0..=h - n).filter(|&j| s[j..j + n] == self.text[..]);
+            let held = match dir {
+                Dir::Down => holds.next_back(),
+                Dir::Up => holds.next(),
+            };
+            if let Some(j) = held {
+                let before: Vec<Vec<Run>> = (0..j).map(row).collect();
+                let after: Vec<Vec<Run>> = (j + n..h).map(row).collect();
+                self.rows.splice(0..0, before);
+                self.text.splice(0..0, s[..j].iter().cloned());
+                self.rows.extend(after);
+                self.text.extend(s[j + n..].iter().cloned());
+                self.top -= j as i64;
+                self.at = self.top;
+                return Joined::Added {
+                    from: self.top,
+                    count: h,
+                };
+            }
+        }
         // still inside the rows the page holds (on the way to its end): only
         // where the program is changes (the first match from the end it
         // moves toward, where a repeat is likelier the right one)
@@ -309,44 +490,49 @@ impl Page {
             self.at = self.top + i as i64;
             return Joined::Same;
         }
-        match dir {
-            Dir::Down => {
-                let Some(k) = (MIN_OVERLAP..h.min(n) + 1)
-                    .rev()
-                    .find(|&k| self.text[n - k..] == s[..k])
-                else {
-                    return Joined::Unstitched;
-                };
-                let from = self.bottom();
-                for (i, text) in s.iter().enumerate().skip(k) {
-                    self.rows
-                        .push(cut(&frame.rows[self.area.rows.start + i], &self.area.cols));
-                    self.text.push(text.clone());
+        let other = match dir {
+            Dir::Down => Dir::Up,
+            Dir::Up => Dir::Down,
+        };
+        let sides: &[Dir] = if either { &[dir, other] } else { &[dir] };
+        for &side in sides {
+            match side {
+                Dir::Down => {
+                    let Some(k) = (least..h.min(n) + 1)
+                        .rev()
+                        .find(|&k| self.text[n - k..] == s[..k])
+                    else {
+                        continue;
+                    };
+                    let from = self.bottom();
+                    for (i, text) in s.iter().enumerate().skip(k) {
+                        self.rows.push(row(i));
+                        self.text.push(text.clone());
+                    }
+                    self.at = self.bottom() - h as i64;
+                    return Joined::Added { from, count: h - k };
                 }
-                self.at = self.bottom() - h as i64;
-                Joined::Added { from, count: h - k }
-            }
-            Dir::Up => {
-                let Some(k) = (MIN_OVERLAP..h.min(n) + 1)
-                    .rev()
-                    .find(|&k| self.text[..k] == s[h - k..])
-                else {
-                    return Joined::Unstitched;
-                };
-                let count = h - k;
-                let rows: Vec<Vec<Run>> = (0..count)
-                    .map(|i| cut(&frame.rows[self.area.rows.start + i], &self.area.cols))
-                    .collect();
-                self.rows.splice(0..0, rows);
-                self.text.splice(0..0, s[..count].iter().cloned());
-                self.top -= count as i64;
-                self.at = self.top;
-                Joined::Added {
-                    from: self.top,
-                    count,
+                Dir::Up => {
+                    let Some(k) = (least..h.min(n) + 1)
+                        .rev()
+                        .find(|&k| self.text[..k] == s[h - k..])
+                    else {
+                        continue;
+                    };
+                    let count = h - k;
+                    let rows: Vec<Vec<Run>> = (0..count).map(row).collect();
+                    self.rows.splice(0..0, rows);
+                    self.text.splice(0..0, s[..count].iter().cloned());
+                    self.top -= count as i64;
+                    self.at = self.top;
+                    return Joined::Added {
+                        from: self.top,
+                        count,
+                    };
                 }
             }
         }
+        Joined::Unstitched
     }
 
     /// The program's view moved to `at` (a seek that landed there).
@@ -607,5 +793,124 @@ mod tests {
             ["b", "cde"]
         );
         assert_eq!(out[1].fg.as_deref(), Some("ff0000"));
+    }
+
+    /// A screen of `rows` rows, `cols` wide: a header row, document lines
+    /// from `top`, then `panel` rows of a docked panel whose last line counts
+    /// seconds (`tick`), and a status row.
+    fn tall_screen(top: i64, rows: usize, cols: usize, panel: usize, tick: u32) -> Frame {
+        let mut lines = Vec::new();
+        let doc = rows - 2 - panel;
+        for r in 0..rows {
+            let text = match r {
+                0 => "header".to_string(),
+                r if r <= doc => line(top + r as i64 - 1),
+                r if r < rows - 2 => format!("| panel {}", r - doc),
+                r if r == rows - 2 => format!("| verified {tick}s ago"),
+                _ => "status".to_string(),
+            };
+            lines.push(vec![run(&text)]);
+        }
+        Frame::new(&lines, rows as u16, cols as u16)
+    }
+
+    fn short_page() -> Page {
+        // learned on a 12-row screen with no room for the panel: rows 1..11 scroll
+        let first = tall_screen(500, 12, 40, 0, 0);
+        Page::new(
+            Area {
+                rows: 1..10,
+                cols: 0..40,
+            },
+            &first,
+        )
+    }
+
+    #[test]
+    fn a_screen_of_another_size_is_never_located_or_joined() {
+        // the pane changed width under a page it kept: no row of it reads as before
+        let page = short_page();
+        let narrow = tall_screen(500, 12, 20, 0, 0);
+        assert_eq!(page.locate(&narrow), None);
+        assert!(!page.same_area(&narrow, &narrow));
+        let mut page = page;
+        assert_eq!(page.extend(&narrow, Dir::Up), Joined::Unstitched);
+        // taller, before its rows were learned: not the short screen's rows moved down
+        let tall = tall_screen(400, 100, 40, 20, 0);
+        assert_eq!(page.locate(&tall), None);
+        assert_eq!(page.extend_tall(&tall, Dir::Up, true), Joined::Unstitched);
+    }
+
+    #[test]
+    fn a_tall_screens_rows_are_learned_without_its_panel_and_joined_whole() {
+        let mut page = short_page();
+        // the program keeps its first row when the screen grows: 78 document rows, a
+        // 20-row panel the short screen had no room for, its clock ticking
+        let a = tall_screen(499, 100, 40, 20, 1);
+        let b = tall_screen(497, 100, 40, 20, 2);
+        assert!(page.learn_tall(&a, &b, Dir::Up));
+        assert!(page.knows_tall(&b));
+        // rows 1..78: the header and the last document row (where a hint is drawn) stay out
+        assert_eq!(page.height_of(&b), 77);
+        assert_eq!(
+            page.extend_tall(&b, Dir::Up, true),
+            Joined::Added {
+                from: -3,
+                count: 77
+            }
+        );
+        assert_eq!((page.top(), page.bottom(), page.at()), (-3, 74, -3));
+        let want: Vec<String> = (497..574).map(line).collect();
+        assert_eq!(texts(&page), want);
+        // further up: joined by the rows in common, the panel's clock is no change
+        let c = tall_screen(450, 100, 40, 20, 9);
+        assert!(!page.same_area(&b, &c));
+        assert!(page.same_area(&c, &tall_screen(450, 100, 40, 20, 10)));
+        assert_eq!(
+            page.extend_tall(&c, Dir::Up, false),
+            Joined::Added {
+                from: -50,
+                count: 47
+            }
+        );
+        assert_eq!(page.locate(&c), Some(-50));
+        // too far for MIN_OVERLAP_TALL rows in common: never joined on a short run
+        let far = tall_screen(450 - 77 + 10, 100, 40, 20, 11);
+        assert_eq!(page.extend_tall(&far, Dir::Up, false), Joined::Unstitched);
+    }
+
+    #[test]
+    fn nothing_is_learned_from_a_tall_screen_that_does_not_scroll() {
+        let mut page = short_page();
+        let a = tall_screen(0, 100, 40, 20, 1);
+        let b = tall_screen(0, 100, 40, 20, 2);
+        assert!(!page.learn_tall(&a, &b, Dir::Up));
+        assert!(!page.knows_tall(&a));
+    }
+
+    #[test]
+    fn blank_rows_under_a_short_document_stay_out_of_the_page() {
+        let mut page = short_page();
+        assert!(page.learn_tall(
+            &tall_screen(499, 100, 40, 20, 1),
+            &tall_screen(497, 100, 40, 20, 2),
+            Dir::Up
+        ));
+        // the document's last rows on top, nothing below them
+        let mut lines: Vec<Vec<Run>> = vec![vec![run("header")]];
+        for n in 480..520 {
+            lines.push(vec![run(&line(n))]);
+        }
+        lines.resize(100, Vec::new());
+        let f = Frame::new(&lines, 100, 40);
+        assert_eq!(
+            page.extend_tall(&f, Dir::Up, true),
+            Joined::Added {
+                from: -20,
+                count: 40
+            }
+        );
+        assert_eq!((page.top(), page.bottom()), (-20, 20));
+        assert_eq!(page.locate(&f), Some(-20));
     }
 }

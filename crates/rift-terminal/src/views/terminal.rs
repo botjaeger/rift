@@ -2400,7 +2400,14 @@ fn screen_of<T>(
     let runs = GridRuns::new(term, theme);
     let g = term.grid();
     let cols = g.columns().min(rift_remote::MAX_SCREEN_COLS as usize);
-    let rows = g.screen_lines().min(rift_remote::MAX_SCREEN_ROWS as usize);
+    // a full-screen program held tall for the gateway (`remote-tall`) is read whole;
+    // what goes to a phone is cut to MAX_SCREEN_ROWS by the gateway
+    let most = if alt {
+        rift_remote::TALL_ROWS.max(rift_remote::MAX_SCREEN_ROWS)
+    } else {
+        rift_remote::MAX_SCREEN_ROWS
+    };
+    let rows = g.screen_lines().min(most as usize);
     let lines = (0..rows).map(|r| runs.row(Line(r as i32), cols)).collect();
     let cursor = term.grid().cursor.point;
     let shown = term.mode().contains(TermMode::SHOW_CURSOR)
@@ -4593,11 +4600,21 @@ mod tests {
                 run(" d", None, None, 0)
             ]
         );
-        // larger than 300 × 120: the top-left part; a cursor outside it is none
+        // A full-screen program taller than a window is one held tall for the
+        // gateway (`remote-tall`): read whole, up to TALL_ROWS (the gateway cuts
+        // what a phone gets to MAX_SCREEN_ROWS). Larger than 300 × 1000: the
+        // top-left part; a cursor outside it is none
         let (t, _) = fed(310, 130, 100, b"\x1b[?1049h\x1b[126;1Hx");
         let s = screen_of(&t, &theme, false).unwrap();
-        assert_eq!((s.cols, s.rows, s.cursor), (300, 120, None));
-        assert_eq!(s.lines.len(), 120);
+        assert_eq!((s.cols, s.rows, s.cursor), (300, 130, Some([125, 1])));
+        let (t, _) = fed(310, 1010, 100, b"\x1b[?1049h\x1b[1006;1Hx");
+        let s = screen_of(&t, &theme, false).unwrap();
+        assert_eq!((s.cols, s.rows, s.cursor), (300, 1000, None));
+        assert_eq!(s.lines.len(), 1000);
+        // the primary screen keeps the window's bound
+        let (t, _) = fed(310, 130, 100, b"x");
+        let s = screen_of(&t, &theme, true).unwrap();
+        assert_eq!((s.cols, s.rows), (300, 120));
     }
 
     /// The rows of a done block holding everything fed: from absolute row 0
