@@ -966,12 +966,15 @@ impl Reader {
         use alacritty_terminal::term::TermMode;
         let term = self.ctx.term.lock();
         let scrolled = self.ctx.scrolled.load(Ordering::Acquire);
-        let boundary = if term.mode().contains(TermMode::ALT_SCREEN) {
+        let alt = term.mode().contains(TermMode::ALT_SCREEN);
+        let boundary = if alt {
             scrolled
         } else {
             scrolled + term.grid().cursor.point.line.0.max(0) as u64
         };
-        self.ctx.marks.lock().unwrap().note(seq, boundary);
+        let mut marks = self.ctx.marks.lock().unwrap();
+        marks.note(seq, boundary);
+        marks.note_alt(seq, alt);
     }
 
     /// Parse kept lines ([`crate::kept::Kept::prelude`]) and scroll them
@@ -1127,8 +1130,21 @@ impl Reader {
                 }
                 // the lines before the replay's first byte, as the window
                 // before an update restart had them
-                if let Some(bytes) = kept.and_then(|k| k.prelude(from)) {
+                if let Some(bytes) = kept.as_ref().and_then(|k| k.prelude(from)) {
                     self.feed_kept(&bytes);
+                }
+                // and the modes a full-screen program set in output the
+                // service no longer holds: its replay goes on from there
+                let mut redraw = false;
+                if let Some((k, modes)) =
+                    kept.as_ref().and_then(|k| Some((k, k.modes_before(from)?)))
+                {
+                    let mut parser: vte::ansi::Processor = vte::ansi::Processor::new();
+                    let mut scanner = OscScanner::new();
+                    // the shell's screen first: the program covers it
+                    feed(&mut parser, &mut scanner, &k.screen_before(from), &self.ctx);
+                    feed(&mut parser, &mut scanner, modes, &self.ctx);
+                    redraw = true;
                 }
                 // first byte not yet fed to the parser, and resumes since
                 // the last output
@@ -1252,6 +1268,31 @@ impl Reader {
                                 // directories they ran in
                                 if let Some(dir) = known_cwd.take() {
                                     self.ctx.cwd.lock().unwrap().get_or_insert(dir);
+                                }
+                                // A replay that started inside a full-screen
+                                // program's run drew its changes over an empty
+                                // screen: one row less and back makes the
+                                // program draw it whole (two size signals).
+                                if std::mem::take(&mut redraw) {
+                                    let ws = *self.ctx.window_size.lock().unwrap();
+                                    let c = conn.lock().unwrap();
+                                    for rows in
+                                        [ws.num_lines.saturating_sub(1).max(1), ws.num_lines]
+                                    {
+                                        let Some(stream) = c.stream.as_ref() else {
+                                            break;
+                                        };
+                                        let _ = crate::ipc::send_json(
+                                            &mut &*stream,
+                                            &crate::ipc::Request::Resize {
+                                                session,
+                                                cols: ws.num_cols,
+                                                rows,
+                                                cell_w: ws.cell_width,
+                                                cell_h: ws.cell_height,
+                                            },
+                                        );
+                                    }
                                 }
                                 muted.store(false, Ordering::Release);
                                 self.wake();
@@ -1714,10 +1755,18 @@ impl Session {
         }
         // under the term lock, as a resize remaps the marks
         let term = self.term.lock();
-        let marks = self.feed_ctx.marks.lock().unwrap().list();
+        let (marks, alt_since) = {
+            let m = self.feed_ctx.marks.lock().unwrap();
+            (m.list(), m.alt_since())
+        };
         let lines =
             crate::kept::lines_of(term.primary_grid(), self.scrolled.load(Ordering::Acquire));
-        Some(crate::kept::Kept { marks, lines })
+        Some(crate::kept::Kept {
+            marks,
+            lines,
+            modes: crate::kept::modes_of(*term.mode()),
+            alt_since,
+        })
     }
 
     /// The working directory when it is on this machine: `None` while the
@@ -4076,10 +4125,82 @@ mod tests {
     /// What a window keeps of its pane for an update restart.
     fn kept_of(c: &FeedCtx) -> crate::kept::Kept {
         let term = c.term.lock();
+        let marks = c.marks.lock().unwrap();
         crate::kept::Kept {
-            marks: c.marks.lock().unwrap().list(),
-            lines: crate::kept::lines_of(term.grid(), c.scrolled.load(Ordering::Acquire)),
+            marks: marks.list(),
+            lines: crate::kept::lines_of(term.primary_grid(), c.scrolled.load(Ordering::Acquire)),
+            modes: crate::kept::modes_of(*term.mode()),
+            alt_since: marks.alt_since(),
         }
+    }
+
+    /// A full-screen program that has run for long set its modes in output the
+    /// service no longer holds (an agent redraws megabytes an hour): after an
+    /// update restart its pane is on the alternate screen again, with its
+    /// mouse and paste modes, the shell's lines still in the scrollback.
+    #[test]
+    fn a_reattach_inside_a_full_screen_programs_run_restores_its_modes() {
+        use alacritty_terminal::term::TermMode;
+        let mut seq = 0u64;
+        let mut chunk = |text: String| {
+            let at = seq;
+            seq += text.len() as u64;
+            (at, text.into_bytes())
+        };
+        let mut chunks = vec![chunk("shell one\r\nshell two\r\n".into())];
+        chunks.push(chunk(
+            "\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[?2004h\x1b[?25l".into(),
+        ));
+        for i in 0..20 {
+            chunks.push(chunk(format!("\x1b[2;1Hframe {i}  ")));
+        }
+        let modes = |c: &FeedCtx| {
+            let m = *c.term.lock().mode();
+            (
+                m.contains(TermMode::ALT_SCREEN),
+                m.contains(TermMode::MOUSE_REPORT_CLICK),
+                m.contains(TermMode::SGR_MOUSE),
+                m.contains(TermMode::BRACKETED_PASTE),
+                m.contains(TermMode::SHOW_CURSOR),
+            )
+        };
+        let on = (true, true, true, true, false);
+        let history = |c: &FeedCtx| -> Vec<String> {
+            let t = c.term.lock();
+            let g = t.primary_grid();
+            let h = g.history_size() as i32;
+            (-h..g.screen_lines() as i32)
+                .map(|r| {
+                    let row: String = (0..g.columns()).map(|c| g[Line(r)][Column(c)].c).collect();
+                    row.trim_end().to_string()
+                })
+                .filter(|r| !r.is_empty())
+                .collect()
+        };
+        let before = reattach(ctx(20, 5), &chunks, 0, None);
+        assert_eq!(modes(&before), on);
+        let kept = kept_of(&before);
+        assert_eq!(kept.alt_since, Some(chunks[2].0));
+        // the service retained only the program's last frames
+        let from = chunks[12].0;
+        let after = reattach(ctx(20, 5), &chunks[12..], from, Some(kept.clone()));
+        assert_eq!(modes(&after), on);
+        assert_eq!(history(&after), ["shell one", "shell two"]);
+        // without what the window kept: the frames land on the shell's screen
+        let bare = reattach(ctx(20, 5), &chunks[12..], from, None);
+        assert!(!modes(&bare).0);
+        // a replay that still holds the program's start sets the modes itself: nothing
+        // is parsed before it (the shell's lines would land on the alternate screen)
+        assert_eq!(kept.modes_before(0), None);
+        assert_eq!(kept.modes_before(chunks[1].0), None);
+        let full = reattach(ctx(20, 5), &chunks, 0, Some(kept));
+        assert_eq!(modes(&full), on);
+        assert_eq!(history(&full), ["shell one", "shell two"]);
+        // a program that left the alternate screen keeps nothing to restore
+        let mut left = chunks.clone();
+        left.push(chunk("\x1b[?1049l".into()));
+        let gone = reattach(ctx(20, 5), &left, 0, None);
+        assert_eq!(kept_of(&gone).alt_since, None);
     }
 
     /// A shell whose service kept only its last lines comes back after an
@@ -4154,6 +4275,7 @@ mod tests {
             crate::kept::Kept {
                 marks: vec![(0, scrolled + term.grid().cursor.point.line.0 as u64)],
                 lines: crate::kept::lines_of(term.grid(), scrolled),
+                ..Default::default()
             }
         };
         let bytes = kept.prelude(0).unwrap();

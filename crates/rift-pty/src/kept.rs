@@ -39,9 +39,26 @@ const MAX_FILE: u64 = 256 << 20;
 /// that once the service's output up to byte `seq` was parsed, every line
 /// above abs line `boundary` (the cursor's) was drawn.
 #[derive(Debug, Default, Clone)]
-pub(crate) struct Marks(VecDeque<(u64, u64)>);
+pub(crate) struct Marks(VecDeque<(u64, u64)>, Option<u64>);
 
 impl Marks {
+    /// Output up to byte `seq` was parsed and the terminal shows the
+    /// alternate screen (`alt`) or not: remembers the first such `seq` of
+    /// the stretch it has been on it without a break.
+    pub(crate) fn note_alt(&mut self, seq: u64, alt: bool) {
+        if !alt {
+            self.1 = None;
+        } else if self.1.is_none() {
+            self.1 = Some(seq);
+        }
+    }
+
+    /// The output position from which the terminal has been on the
+    /// alternate screen until now, if it is.
+    pub(crate) fn alt_since(&self) -> Option<u64> {
+        self.1
+    }
+
     /// Output up to byte `seq` was parsed; lines above `boundary` are
     /// drawn.
     pub(crate) fn note(&mut self, seq: u64, boundary: u64) {
@@ -84,6 +101,15 @@ pub struct Kept {
     /// The grid's logical (unwrapped) lines, oldest first: the abs line of
     /// each one's first row and its text with SGR styles.
     pub lines: Vec<(u64, String)>,
+    /// The terminal's modes then, as the sequences that set them
+    /// (`modes_of`): alternate screen, mouse reporting, bracketed paste,
+    /// keyboard protocol, cursor keys.
+    #[serde(default)]
+    pub modes: String,
+    /// The output position from which the terminal had been on the
+    /// alternate screen without a break, if it was on it.
+    #[serde(default)]
+    pub alt_since: Option<u64>,
 }
 
 impl Kept {
@@ -100,6 +126,89 @@ impl Kept {
         }
         (!out.is_empty()).then_some(out)
     }
+
+    /// With [`Self::modes_before`]: the shell's screen under the full-screen
+    /// program, the lines [`Self::prelude`] leaves out (it stops at the
+    /// history: a replay from inside the program's run never draws the
+    /// screen the program covers). Each line ends in CRLF, so the cursor is
+    /// below them, where the shell left it.
+    pub fn screen_before(&self, from: u64) -> Vec<u8> {
+        let boundary = self
+            .marks
+            .iter()
+            .rev()
+            .find(|m| m.0 <= from)
+            .map_or(0, |m| m.1);
+        let rest: Vec<&(u64, String)> = self.lines.iter().filter(|l| l.0 >= boundary).collect();
+        let used = rest
+            .iter()
+            .rposition(|l| !l.1.is_empty())
+            .map_or(0, |i| i + 1);
+        let mut out = Vec::new();
+        for (_, text) in &rest[..used] {
+            out.extend_from_slice(text.as_bytes());
+            out.extend_from_slice(b"\x1b[0m\r\n");
+        }
+        out
+    }
+
+    /// The mode sequences to parse before a replay starting at byte `from`:
+    /// a full-screen program that has run since before `from` set its modes
+    /// in output the service no longer holds (an agent redraws megabytes an
+    /// hour), so the replay alone would draw its screens over the shell's
+    /// and leave the mouse and the keyboard as a shell has them. None when
+    /// the replay holds them itself: it starts at the first byte, or the
+    /// program entered the alternate screen after `from`.
+    pub fn modes_before(&self, from: u64) -> Option<&[u8]> {
+        let since = self.alt_since?;
+        (from > 0 && since <= from && !self.modes.is_empty()).then_some(self.modes.as_bytes())
+    }
+}
+
+/// The sequences that put a fresh terminal into `mode`.
+pub(crate) fn modes_of(mode: alacritty_terminal::term::TermMode) -> String {
+    use alacritty_terminal::term::TermMode as M;
+    let mut out = String::new();
+    for (flag, on) in [
+        (M::APP_CURSOR, "\x1b[?1h"),
+        (M::APP_KEYPAD, "\x1b="),
+        (M::MOUSE_REPORT_CLICK, "\x1b[?1000h"),
+        (M::MOUSE_DRAG, "\x1b[?1002h"),
+        (M::MOUSE_MOTION, "\x1b[?1003h"),
+        (M::UTF8_MOUSE, "\x1b[?1005h"),
+        (M::SGR_MOUSE, "\x1b[?1006h"),
+        (M::FOCUS_IN_OUT, "\x1b[?1004h"),
+        (M::BRACKETED_PASTE, "\x1b[?2004h"),
+    ] {
+        if mode.contains(flag) {
+            out.push_str(on);
+        }
+    }
+    if !mode.contains(M::ALTERNATE_SCROLL) {
+        out.push_str("\x1b[?1007l");
+    }
+    let kitty = [
+        (M::DISAMBIGUATE_ESC_CODES, 1),
+        (M::REPORT_EVENT_TYPES, 2),
+        (M::REPORT_ALTERNATE_KEYS, 4),
+        (M::REPORT_ALL_KEYS_AS_ESC, 8),
+        (M::REPORT_ASSOCIATED_TEXT, 16),
+    ]
+    .iter()
+    .filter(|(flag, _)| mode.contains(*flag))
+    .map(|(_, bit)| bit)
+    .sum::<u32>();
+    if mode.contains(M::ALT_SCREEN) {
+        out.push_str("\x1b[?1049h");
+    }
+    // after the screen switch: each screen has its own keyboard flags
+    if kitty > 0 {
+        out.push_str(&format!("\x1b[>{kitty}u"));
+    }
+    if !mode.contains(M::SHOW_CURSOR) {
+        out.push_str("\x1b[?25l");
+    }
+    out
 }
 
 /// `grid`'s rows (history and screen) as logical lines, the top row at abs
@@ -359,6 +468,7 @@ mod tests {
         let kept = Kept {
             marks: vec![(100, 2), (500, 4)],
             lines: (0..6).map(|i| (i, format!("l{i}"))).collect(),
+            ..Default::default()
         };
         // the replay starts at the shell's first byte: it draws everything
         assert_eq!(kept.prelude(0), None);
@@ -379,6 +489,7 @@ mod tests {
         let kept = Kept {
             marks: vec![(1, 1)],
             lines: vec![(0, "hi".into())],
+            ..Default::default()
         };
         save_in(&dir, 7, &kept).unwrap();
         let mode = std::fs::metadata(path_in(&dir, 7))
@@ -402,5 +513,45 @@ mod tests {
         assert!(!path_in(&dir, 8).exists());
         assert!(path_in(&dir, 9).exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn modes_of_names_what_a_full_screen_program_set() {
+        use alacritty_terminal::term::TermMode as M;
+        // a shell at its prompt: nothing but what a fresh terminal has
+        assert_eq!(
+            modes_of(M::SHOW_CURSOR | M::LINE_WRAP | M::ALTERNATE_SCROLL),
+            ""
+        );
+        let agent = M::LINE_WRAP
+            | M::ALTERNATE_SCROLL
+            | M::ALT_SCREEN
+            | M::MOUSE_REPORT_CLICK
+            | M::SGR_MOUSE
+            | M::BRACKETED_PASTE
+            | M::DISAMBIGUATE_ESC_CODES
+            | M::REPORT_ALTERNATE_KEYS;
+        assert_eq!(
+            modes_of(agent),
+            "\x1b[?1000h\x1b[?1006h\x1b[?2004h\x1b[?1049h\x1b[>5u\x1b[?25l"
+        );
+        let kept = Kept {
+            modes: modes_of(agent),
+            alt_since: Some(100),
+            ..Default::default()
+        };
+        // only a replay that starts inside the program's run needs them
+        assert!(kept.modes_before(100).is_some());
+        assert!(kept.modes_before(5000).is_some());
+        assert_eq!(kept.modes_before(99), None);
+        assert_eq!(kept.modes_before(0), None);
+        assert_eq!(
+            Kept {
+                alt_since: None,
+                ..kept
+            }
+            .modes_before(5000),
+            None
+        );
     }
 }

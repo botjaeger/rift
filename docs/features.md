@@ -1110,6 +1110,13 @@ Each becomes a `rift://action/new_tab` link (`new_window` with
   output; clearing blocks does not bring it back, a shell reattached after a
   restart or update never shows it, and it never covers text the pane shows
   (a shell's startup output).
+- A full-screen program that keeps running across an update (Claude Code, vim)
+  comes back full-screen: the session service holds only a pane's last 8 MiB
+  of output, which a long-running program fills with redraws, so the window
+  saves the terminal's modes (alternate screen, mouse reporting, bracketed
+  paste, keyboard protocol) and the shell's screen under the program before
+  the restart, restores them before the replay when the replay starts inside
+  the program's run, and makes the program draw its screen once more.
 - Panes: split right/down, directional focus (⌥⌘arrows), keyboard resize
   (⌃⌘arrows), drag resize, zoom toggle (⇧⌘⏎), close (⌃⇧W/⌘W or the title
   bar's × — last pane closes the tab, last tab exits).
