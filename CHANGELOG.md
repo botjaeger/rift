@@ -8,6 +8,17 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.30.4 — 2026-11-18
+
+### Fixed
+
+- **A full-screen program is still full-screen after Rift updates** — Claude Code, vim or any
+  program that had been running for a while came back from an update on the normal screen:
+  its redraws piled up in the scrollback, and your phone showed a few hundred lines of that
+  instead of the program, so it could not scroll further up. Rift now brings such a program
+  back as it was. This starts with the update after this one; a program already affected
+  needs one restart (in Claude Code: `/exit`, then `claude --resume`).
+
 ## 0.30.3 — 2026-11-18
 
 ### Fixed
