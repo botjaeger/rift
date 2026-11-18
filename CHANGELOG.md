@@ -8,6 +8,25 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.30.3 — 2026-11-18
+
+### Fixed
+
+- **Scrolling a full-screen program from your phone no longer goes dead** — After a pane changed
+  width, scrolling Claude Code from the phone could stop for good until Rift was restarted. It
+  now recovers by itself.
+- **Rift no longer freezes for seconds with many tabs or a long command line** — Tab titles and
+  the chips over the command line were measured again on every frame; while that held Rift up,
+  your phone got nothing either.
+
+### Improved
+
+- **Scrolling Claude Code from your phone is about ten times faster to fill** — While your
+  phone reads back, your computer briefly shows Claude Code a much taller screen (only while
+  you are not at the window), so about a thousand lines arrive every two or three seconds
+  instead of ninety a second. A long conversation scrolls back to its start, up to 20 000
+  lines, and Claude Code jumping far ahead no longer loses your place.
+
 ## 0.30.2 — 2026-11-18
 
 ### Improved

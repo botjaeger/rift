@@ -6,6 +6,22 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.9.0 · update 10 — 2026-11-18
+
+Scrolling a full-screen program always moves, and long conversations scroll back much further.
+
+### Fixed
+
+- **A swipe over a full-screen program always scrolls** — When your computer could not send
+  the scrolling page, a swipe did nothing. It now scrolls the program itself until the page
+  comes.
+
+### Improved
+
+- **Earlier lines are ready well before you reach them** — Your phone asks for more of the
+  conversation while eight screens still wait ahead of you. With Rift 0.30.3 on your computer
+  they arrive about a thousand lines at a time.
+
 ## 0.9.0 · update 9 — 2026-11-18
 
 Scrolling a full-screen program no longer waits at the edge.
