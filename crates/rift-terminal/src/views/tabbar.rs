@@ -360,36 +360,62 @@ pub(crate) fn make_text(
     buf
 }
 
-/// Longest prefix of `text` (plus `…`) that fits `max_w`.
+/// Longest prefix of `text` (plus `…`) that fits `max_w`. The width grows
+/// with the prefix, so the cut is found by bisection.
 pub(crate) fn elide(engine: &mut TextEngine, text: &str, size: f32, max_w: f32) -> String {
     if engine.measure(text, size, FONT_SANS, Weight::NORMAL) <= max_w {
         return text.to_string();
     }
-    let mut out: String = text.to_string();
-    while !out.is_empty() {
-        out.pop();
-        let candidate = format!("{}…", out.trim_end());
-        if engine.measure(&candidate, size, FONT_SANS, Weight::NORMAL) <= max_w {
-            return candidate;
+    let chars: Vec<char> = text.chars().collect();
+    let candidate = |keep: usize| {
+        let head: String = chars[..keep].iter().collect();
+        format!("{}…", head.trim_end())
+    };
+    let mut fits =
+        |keep: usize| engine.measure(&candidate(keep), size, FONT_SANS, Weight::NORMAL) <= max_w;
+    if chars.is_empty() || !fits(0) {
+        return String::new();
+    }
+    // `keep` chars fit; `hi` and beyond do not (the whole text was tested)
+    let (mut keep, mut hi) = (0, chars.len());
+    while hi - keep > 1 {
+        let mid = keep + (hi - keep) / 2;
+        if fits(mid) {
+            keep = mid;
+        } else {
+            hi = mid;
         }
     }
-    String::new()
+    candidate(keep)
 }
 
 /// `…` plus the longest suffix of `text` that fits `max_w` (a path keeps
-/// its last folders).
+/// its last folders). Bisection, as [`elide`].
 pub(crate) fn elide_start(engine: &mut TextEngine, text: &str, size: f32, max_w: f32) -> String {
     if engine.measure(text, size, FONT_SANS, Weight::NORMAL) <= max_w {
         return text.to_string();
     }
     let chars: Vec<char> = text.chars().collect();
-    for skip in 1..chars.len() {
-        let candidate = format!("…{}", chars[skip..].iter().collect::<String>().trim_start());
-        if engine.measure(&candidate, size, FONT_SANS, Weight::NORMAL) <= max_w {
-            return candidate;
+    let candidate = |skip: usize| {
+        let tail: String = chars[skip..].iter().collect();
+        format!("…{}", tail.trim_start())
+    };
+    let mut fits =
+        |skip: usize| engine.measure(&candidate(skip), size, FONT_SANS, Weight::NORMAL) <= max_w;
+    if chars.len() < 2 || !fits(chars.len() - 1) {
+        return String::new();
+    }
+    // `skip` chars cut does not fit; `hi` and beyond do (the last one was tested)
+    let (mut lo, mut hi) = (0, chars.len() - 1);
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2;
+        if fits(mid) {
+            hi = mid;
+        } else {
+            lo = mid;
         }
     }
-    String::new()
+    candidate(hi)
 }
 
 /// State of the top-bar panel buttons.

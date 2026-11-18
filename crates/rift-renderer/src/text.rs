@@ -73,11 +73,89 @@ pub struct TextEngine {
     frame: u64,
     /// [`Self::family_covers`] answers.
     coverage: HashMap<(String, char), bool>,
+    measured: MeasureCache,
 }
 
 struct ShapedEntry {
     buf: Arc<Buffer>,
     last_used: u64,
+}
+
+/// Entries [`MeasureCache`] keeps before it starts over.
+const MEASURE_MAX_ENTRIES: usize = 4096;
+/// Text bytes [`MeasureCache`] keeps before it starts over.
+const MEASURE_MAX_BYTES: usize = 1 << 20;
+/// Longer strings are measured but not kept: they are rarely asked twice
+/// and terminal output is untrusted.
+const MEASURE_MAX_TEXT: usize = 1024;
+
+struct Measured {
+    text: String,
+    size: u32,
+    family: &'static str,
+    weight: u16,
+    width: f32,
+}
+
+/// Memo of [`TextEngine::measure`] answers, keyed by a hash of every input
+/// and checked against the stored inputs. Bounded in entries and text
+/// bytes; it starts over when a bound is hit.
+#[derive(Default)]
+struct MeasureCache {
+    map: HashMap<u64, Measured>,
+    bytes: usize,
+}
+
+impl MeasureCache {
+    fn width(
+        &mut self,
+        text: &str,
+        size: f32,
+        family: &'static str,
+        weight: u16,
+        shape: impl FnOnce() -> f32,
+    ) -> f32 {
+        use std::hash::{Hash, Hasher};
+        let size = size.to_bits();
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (text, size, family, weight).hash(&mut h);
+        let key = h.finish();
+        if let Some(m) = self.map.get(&key)
+            && m.size == size
+            && m.family == family
+            && m.weight == weight
+            && m.text == text
+        {
+            return m.width;
+        }
+        let width = shape();
+        if text.len() <= MEASURE_MAX_TEXT {
+            if self.map.len() >= MEASURE_MAX_ENTRIES || self.bytes + text.len() > MEASURE_MAX_BYTES
+            {
+                self.clear();
+            }
+            let old = self.map.insert(
+                key,
+                Measured {
+                    text: text.to_string(),
+                    size,
+                    family,
+                    weight,
+                    width,
+                },
+            );
+            self.bytes += text.len();
+            if let Some(old) = old {
+                self.bytes -= old.text.len();
+            }
+        }
+        width
+    }
+
+    fn clear(&mut self) {
+        self.map.clear();
+        self.bytes = 0;
+    }
 }
 
 impl TextEngine {
@@ -137,6 +215,7 @@ impl TextEngine {
             shape_cache: HashMap::new(),
             frame: 0,
             coverage: HashMap::new(),
+            measured: MeasureCache::default(),
         }
     }
 
@@ -204,6 +283,7 @@ impl TextEngine {
         if resolved != mono_family() {
             *MONO_FAMILY.write().unwrap() = resolved;
             self.shape_cache.clear();
+            self.measured.clear();
         }
         resolved
     }
@@ -242,8 +322,26 @@ impl TextEngine {
         out
     }
 
-    /// Layout width of a one-line string (logical px).
+    /// Layout width of a one-line string (logical px). Memoized on
+    /// (text, size, family, weight): shaping dominates frame time and the
+    /// views ask for the same strings every frame. The memo is dropped when
+    /// it outgrows its bounds or the terminal font changes.
     pub fn measure(
+        &mut self,
+        text: &str,
+        font_size: f32,
+        family: &'static str,
+        weight: glyphon::Weight,
+    ) -> f32 {
+        let mut cache = std::mem::take(&mut self.measured);
+        let width = cache.width(text, font_size, family, weight.0, || {
+            self.shape_width(text, font_size, family, weight)
+        });
+        self.measured = cache;
+        width
+    }
+
+    fn shape_width(
         &mut self,
         text: &str,
         font_size: f32,
@@ -362,5 +460,73 @@ mod tests {
         assert!(!is_terminal_font(INTER, 0));
         assert!(!is_terminal_font(SYMBOLS, 0));
         assert!(!is_terminal_font(b"not a font", 0));
+    }
+
+    /// `width` through `cache`, counting the times it shaped.
+    fn ask(
+        cache: &mut MeasureCache,
+        shaped: &mut u32,
+        text: &str,
+        size: f32,
+        family: &'static str,
+    ) -> f32 {
+        cache.width(text, size, family, 400, || {
+            *shaped += 1;
+            text.len() as f32 * size
+        })
+    }
+
+    #[test]
+    fn measure_shapes_a_repeated_input_once() {
+        let (mut c, mut n) = (MeasureCache::default(), 0);
+        let a = ask(&mut c, &mut n, "hello", 12.0, FONT_SANS);
+        let b = ask(&mut c, &mut n, "hello", 12.0, FONT_SANS);
+        assert_eq!((a, b, n), (60.0, 60.0, 1));
+    }
+
+    #[test]
+    fn measure_keys_on_every_input() {
+        let (mut c, mut n) = (MeasureCache::default(), 0);
+        ask(&mut c, &mut n, "hello", 12.0, FONT_SANS);
+        ask(&mut c, &mut n, "hello", 13.0, FONT_SANS);
+        ask(&mut c, &mut n, "hello", 12.0, FONT_MONO);
+        ask(&mut c, &mut n, "hellp", 12.0, FONT_SANS);
+        c.width("hello", 12.0, FONT_SANS, 500, || {
+            n += 1;
+            0.0
+        });
+        assert_eq!(n, 5);
+        assert_eq!(c.map.len(), 5);
+    }
+
+    #[test]
+    fn measure_cache_stays_bounded() {
+        let (mut c, mut n) = (MeasureCache::default(), 0);
+        for i in 0..MEASURE_MAX_ENTRIES * 3 {
+            ask(&mut c, &mut n, &format!("text {i}"), 12.0, FONT_SANS);
+            assert!(c.map.len() <= MEASURE_MAX_ENTRIES);
+        }
+        // by bytes: 1000-byte strings reach the byte bound first
+        let mut c = MeasureCache::default();
+        for i in 0..(MEASURE_MAX_BYTES / 1000) * 3 {
+            ask(&mut c, &mut n, &format!("{i:0>1000}"), 12.0, FONT_SANS);
+            assert!(c.bytes <= MEASURE_MAX_BYTES);
+        }
+        // oversized strings are answered but never kept
+        let long = "x".repeat(MEASURE_MAX_TEXT + 1);
+        let before = n;
+        ask(&mut c, &mut n, &long, 12.0, FONT_SANS);
+        ask(&mut c, &mut n, &long, 12.0, FONT_SANS);
+        assert_eq!(n, before + 2);
+    }
+
+    #[test]
+    fn measure_cache_clear_forgets() {
+        let (mut c, mut n) = (MeasureCache::default(), 0);
+        ask(&mut c, &mut n, "hello", 12.0, FONT_SANS);
+        c.clear();
+        assert_eq!((c.map.len(), c.bytes), (0, 0));
+        ask(&mut c, &mut n, "hello", 12.0, FONT_SANS);
+        assert_eq!(n, 2);
     }
 }
