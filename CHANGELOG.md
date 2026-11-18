@@ -8,6 +8,14 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.30.2 — 2026-11-18
+
+### Improved
+
+- **Scrolling Claude Code from your phone keeps up with your finger** — Your computer now brings
+  the earlier part of the conversation about half again as fast, so the page your phone scrolls
+  grows ahead of you instead of making you wait at its edge.
+
 ## 0.30.1 — 2026-11-18
 
 ### Fixed

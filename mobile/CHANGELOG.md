@@ -6,6 +6,16 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.9.0 · update 9 — 2026-11-18
+
+Scrolling a full-screen program no longer waits at the edge.
+
+### Improved
+
+- **Scrolling a full-screen program no longer waits at the edge** — The page shows sooner after
+  your first swipe, and your phone keeps fetching the earlier rows while you read, so a flick
+  finds them already there. Fastest with Rift 0.30.2 on your computer.
+
 ## 0.9.0 · update 8 — 2026-11-18
 
 Scrolling a full-screen program no longer stops partway up.
