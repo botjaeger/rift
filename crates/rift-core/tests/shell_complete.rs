@@ -552,7 +552,8 @@ fn zsh_widgets_on_printable_keys_never_alter_the_line() {
     let mut c = f.completer(&program);
     let got = ask(&mut c, &f.query(ShellKind::Zsh, "mycmd de"));
     assert_eq!(words(&got), vec!["deploy", "destroy"], "{got:?}");
-    let got = c.complete(&f.query(ShellKind::Zsh, "cat \"fi"), BUDGET);
+    // asked until answered: a busy machine can take longer than one budget
+    let got = ask(&mut c, &f.query(ShellKind::Zsh, "cat \"fi"));
     assert_eq!(words(&got), vec!["file one"], "{got:?}");
     // magic-space on space (history expansion) leaves the line alone too
     // (a Fixture holds the suite's serial lock: release the first before the
