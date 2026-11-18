@@ -3096,6 +3096,10 @@ fn ahead_tall<S: Source>(
     if page.tall_failed() {
         return None;
     }
+    // a full page stops before the pane is touched
+    if page.len() >= crate::MAX_PAGE_ROWS {
+        return Some(PageState::Stopped);
+    }
     let mut prev = enter_tall(shared, pane, live, page)?;
     let started = Instant::now();
     let until = started + shared.config.page_job_time;
@@ -3241,6 +3245,9 @@ fn ahead_tall<S: Source>(
                 for _ in 0..crate::STITCH_BACK_STEPS {
                     if retries > crate::STITCH_RECOVERIES
                         || Instant::now() >= back_until
+                        // long steps: the page is far longer than a step, so its end
+                        // is not passed over
+                        || !wheel(shared, pane, operate, back, MAX_SCROLL_LINES)
                         || !wheel(shared, pane, operate, back, MAX_SCROLL_LINES)
                     {
                         break;
@@ -3251,7 +3258,12 @@ fn ahead_tall<S: Source>(
                         break;
                     };
                     prev = now;
-                    if page.extend_tall(&frame_of(&prev), back, false) != Joined::Unstitched {
+                    // joined at either end: on the way back a screen overlaps the end
+                    // of the page the program left through before it is inside it
+                    let j = page.extend_tall(&frame_of(&prev), back, true);
+                    log::trace!("remote: pane {pane}: tall: back, {j:?}");
+                    if j != Joined::Unstitched {
+                        note(&j);
                         found = true;
                         break;
                     }
@@ -3273,16 +3285,19 @@ fn ahead_tall<S: Source>(
     );
     match leave_tall(shared, pane, live, Some(page)) {
         Some(mut now) => {
-            // A program that went past the page (a jump no step back found again)
-            // is walked back the way it came until it shows the page: left there,
-            // the next page_ahead would start a new page far from what the phone
-            // shows.
+            // A program that shows rows past the page (a row or two where its own
+            // screen starts higher than the tall one did, or far off after a jump
+            // no step back found again) is walked back the way it came until it
+            // shows the page: left there, the next page_ahead would start a new
+            // page far from what the phone shows. Small steps first.
             let mut at = page.locate(&frame_of(&now));
             let back_until = Instant::now() + shared.config.page_job_time;
-            while at.is_none() && state == PageState::Stopped && Instant::now() < back_until {
-                if !wheel(shared, pane, operate, back, MAX_SCROLL_LINES) {
+            let mut lines = 2;
+            while at.is_none() && Instant::now() < back_until {
+                if !wheel(shared, pane, operate, back, lines) {
                     break;
                 }
+                lines = (lines * 3).min(MAX_SCROLL_LINES);
                 let Some(next) = rested_screen(shared, pane, Some(&now), false) else {
                     break;
                 };

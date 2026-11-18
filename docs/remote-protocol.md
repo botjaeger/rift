@@ -1058,7 +1058,7 @@ scrolls natively.
   menu), so there is no page; the phone keeps the wheel (`scroll`).
 - While a job runs the pane's screens wait (none go out); afterwards the
   screen shows where the program is now. A job stops after 3 s, and a page
-  at 5000 rows.
+  at 20 000 rows.
 
 ### Prompt chip menus (feature `chips`)
 

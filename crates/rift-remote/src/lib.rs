@@ -107,7 +107,7 @@ pub const PAGE_RATE: usize = 5;
 /// Most rows one `page_ahead` stitches.
 pub const MAX_PAGE_AHEAD: u32 = 500;
 /// Most rows a pane's page holds; past it `page_ahead` stops (`stopped`).
-pub const MAX_PAGE_ROWS: usize = 5000;
+pub const MAX_PAGE_ROWS: usize = 20_000;
 /// Most rows one `page` message carries (a longer answer is split).
 pub const PAGE_CHUNK: usize = 200;
 /// Most bytes of rows one `page` message carries, well under
