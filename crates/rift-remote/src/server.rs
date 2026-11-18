@@ -2981,9 +2981,12 @@ fn run_stitch<S: Source>(shared: &Shared<S>, job: StitchJob) -> Vec<ServerMsg> {
             let mut added = 0usize;
             let mut still = 0;
             let mut page = taken;
-            // after a screen too far to join: one line a step (a program that speeds up under
-            // a repeated wheel, as Claude Code does, moves one row for one line)
-            let mut fine = false;
+            // wheel lines a step past the page's end: doubled while a step brings less than a
+            // third of the area, halved when it brings more than two thirds, so each screen
+            // still overlaps the last and a page grows several times faster than at a fixed
+            // step. After a screen too far to join: one line (a program that speeds up under a
+            // repeated wheel, as Claude Code does, moves one row for one line), growing again
+            let mut ahead = crate::STITCH_STEP_LINES;
             let mut recoveries = 0;
             while added < want && started.elapsed() < shared.config.page_job_time {
                 if page
@@ -2994,10 +2997,12 @@ fn run_stitch<S: Source>(shared: &Shared<S>, job: StitchJob) -> Vec<ServerMsg> {
                     break;
                 }
                 // learning the area: single lines too, so its screens always overlap
-                let lines = if fine || page.is_none() {
-                    1
-                } else {
-                    stride(page.as_ref(), dir)
+                let lines = match page.as_ref() {
+                    None => 1,
+                    Some(p) => match stride(Some(p), dir) {
+                        inside if inside > crate::STITCH_STEP_LINES => inside,
+                        _ => ahead,
+                    },
                 };
                 if !step(dir, lines) {
                     state = PageState::Stopped;
@@ -3049,6 +3054,7 @@ fn run_stitch<S: Source>(shared: &Shared<S>, job: StitchJob) -> Vec<ServerMsg> {
                     }
                     Some(p) => {
                         let mut joined = p.extend(&f, dir);
+                        let recovered = joined == Joined::Unstitched;
                         // a step that went too far for an overlap (Claude Code jumps tens or
                         // hundreds of rows now and then: a long message above is laid out anew
                         // at its real height): back in steps that double until the screen is
@@ -3059,7 +3065,7 @@ fn run_stitch<S: Source>(shared: &Shared<S>, job: StitchJob) -> Vec<ServerMsg> {
                         // its height now)
                         if joined == Joined::Unstitched && recoveries < crate::STITCH_RECOVERIES {
                             recoveries += 1;
-                            fine = true;
+                            ahead = (lines / 2).max(1);
                             let back = match dir {
                                 Dir::Up => Dir::Down,
                                 Dir::Down => Dir::Up,
@@ -3101,6 +3107,20 @@ fn run_stitch<S: Source>(shared: &Shared<S>, job: StitchJob) -> Vec<ServerMsg> {
                         }
                         match joined {
                             Joined::Added { from, count } => {
+                                // the next step aims at a third of the area from this one's
+                                // rows a line (a step that came back from too far keeps its
+                                // halved lines). Claude Code moves up to 2.5 rows a line under a
+                                // repeated wheel: at most 2/5 of the area past the overlap a step
+                                if !recovered && count > 0 && lines == ahead {
+                                    let h = p.height();
+                                    let most = (h.saturating_sub(crate::stitch::MIN_OVERLAP) * 2
+                                        / 5)
+                                    .clamp(1, MAX_SCROLL_LINES as usize);
+                                    let aim =
+                                        (lines as usize * (h / 3).max(1) / count).clamp(1, most);
+                                    // grows by half at most a step: the program speeds up too
+                                    ahead = (aim as i32).min(ahead + (ahead / 2).max(1));
+                                }
                                 added += count;
                                 let r = new_rows.get_or_insert((from, from + count as i64));
                                 r.0 = r.0.min(from);

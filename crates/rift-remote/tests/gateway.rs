@@ -97,13 +97,16 @@ struct State {
     /// Once the view's first line goes above `.0` scrolling up, it jumps `.1`
     /// lines further (Claude Code laying a long message out anew at its height).
     jump: Option<(i64, i64)>,
+    /// The doc viewer's screen is [`TALL_DOC_ROWS`] rows (a phone's size), not [`DOC_ROWS`].
+    tall: bool,
 }
 
 /// Rows of a [`State::docs`] viewer's screen: a sticky header, the document,
 /// a status row that ticks with every read; a side panel at column 30.
 const DOC_ROWS: usize = 14;
+const TALL_DOC_ROWS: usize = 40;
 
-fn doc_screen(lines: &[String], top: i64, tick: usize) -> Screen {
+fn doc_screen(lines: &[String], top: i64, tick: usize, rows: usize) -> Screen {
     let row = |left: String, r: usize| {
         let mut l: String = left.chars().take(29).collect();
         while l.chars().count() < 30 {
@@ -125,14 +128,14 @@ fn doc_screen(lines: &[String], top: i64, tick: usize) -> Screen {
         ]
     };
     let mut out = vec![row(format!("❯ section {}", top / 10), 0)];
-    for r in 1..DOC_ROWS - 1 {
+    for r in 1..rows - 1 {
         let n = top + r as i64 - 1;
         out.push(row(lines.get(n as usize).cloned().unwrap_or_default(), r));
     }
-    out.push(row(format!("status {tick}"), DOC_ROWS - 1));
+    out.push(row(format!("status {tick}"), rows - 1));
     Screen {
         cols: 40,
-        rows: DOC_ROWS as u16,
+        rows: rows as u16,
         alt: true,
         cursor: None,
         fg: None,
@@ -355,7 +358,8 @@ impl Source for Fake {
         if let Some((lines, top)) = st.docs.get(&pane) {
             // the status ticks only now and then: a screen at rest stays equal
             let tick = reads / if st.ticking { 25 } else { 1000 };
-            return Ok(Some(doc_screen(lines, *top, tick)));
+            let rows = if st.tall { TALL_DOC_ROWS } else { DOC_ROWS };
+            return Ok(Some(doc_screen(lines, *top, tick, rows)));
         }
         Ok(st.screens.get(&pane).filter(|s| s.alt || force).cloned())
     }
@@ -381,8 +385,9 @@ impl Source for Fake {
             }
         }
         let jump = st.jump;
+        let rows = if st.tall { TALL_DOC_ROWS } else { DOC_ROWS };
         if let Some((doc, top)) = st.docs.get_mut(&pane) {
-            let last = doc.len() as i64 - (DOC_ROWS as i64 - 2);
+            let last = doc.len() as i64 - (rows as i64 - 2);
             *top = (*top - moved).clamp(0, last.max(0));
             if let Some((at, extra)) = jump
                 && moved > 0
@@ -5232,7 +5237,7 @@ fn page_ahead_reports_the_documents_start_and_a_screen_that_does_not_scroll() {
 
     // a full-screen program that does not move under the wheel (htop): no page
     env.fake.0.lock().unwrap().docs.remove(&12);
-    let mut s = doc_screen(&doc, 0, 0);
+    let mut s = doc_screen(&doc, 0, 0, DOC_ROWS);
     s.alt = true;
     env.fake.0.lock().unwrap().screens.insert(12, s);
     put(
@@ -5339,6 +5344,32 @@ fn a_program_that_speeds_up_under_the_wheel_still_stitches_whole() {
     let text: Vec<String> = got.iter().flat_map(page_text).collect();
     // every line from where it reached down to the screen it started from, none missing
     assert_eq!(text, doc[(300 + top) as usize..312].to_vec());
+}
+
+#[test]
+fn steps_grow_past_the_page_while_screens_still_overlap() {
+    let env = start(|_| {});
+    let doc = doc_lines(400);
+    {
+        let mut st = env.fake.0.lock().unwrap();
+        st.docs.insert(12, (doc.clone(), 300));
+        st.tall = true;
+    }
+    let (_, mut ch, _) = env.pair(Permission::Operate);
+    put(
+        &mut ch,
+        json!({"t":"page_ahead","id":"g1","pane":12,"epoch":0,"dir":"up","rows":120}),
+    );
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (true, ""));
+    let got = pages(&mut ch);
+    assert_eq!(got[0]["state"], "ok", "{}", got[0]);
+    let top = got[0]["top"].as_i64().unwrap();
+    assert!(top <= -120, "{}", got[0]);
+    let text: Vec<String> = got.iter().flat_map(page_text).collect();
+    assert_eq!(text, doc[(300 + top) as usize..338].to_vec());
+    // a fixed step of STITCH_STEP_LINES would take 40 steps past the 8 the area is learned in
+    let steps = env.fake.0.lock().unwrap().scrolls.len();
+    assert!(steps <= 30, "{steps} wheel steps");
 }
 
 #[test]

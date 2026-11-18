@@ -306,11 +306,12 @@ card cannot answer (a password, other input, a view-only device), and from an al
   itself first and the computer's pane past its edges. A view-only device scrolls a pane's view
   but not a program. With a computer whose Rift has `stitch` (and a device that may operate), a
   full-screen program scrolls natively instead (`src/stitch.ts`): the first vertical drag asks the
-  computer for a page; it scrolls the program itself, joins its screens and sends the rows (a
-  third of a second to a second for a few screens of Claude Code). The rows above the program's
-  scrolling area and below it (a title, an input box, a status line) stay where they are; the rows
-  between scroll as a native list with its momentum, the next rows asked for a screen before
-  either edge, and half a second after scrolling stops the computer moves the program there, so
+  computer for a page of one screen; it scrolls the program itself, joins its screens and sends the
+  rows (about 90 rows a second of Claude Code: each wheel step waits for its redraw). The rows above
+  the program's scrolling area and below it (a title, an input box, a status line) stay where they
+  are; the rows between scroll as a native list with its momentum, and more rows are asked for as
+  each batch comes in until three screens (`PAGE_READ_AHEAD`) wait past the view toward an edge
+  whose end is not reached, so a flick finds them there. Half a second after scrolling stops the computer moves the program there, so
   keys and its screen carry on where the view is. New output where the program is ends the page
   (the live screen comes back); a program whose screen does not scroll like a document (htop, a
   menu) answers `flat` and keeps the wheel. A page that stopped growing (`stopped`: a screen the

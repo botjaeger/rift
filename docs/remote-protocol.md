@@ -1002,7 +1002,11 @@ scrolls natively.
   the row the program shows first. `area` is the scrolling rectangle: screen
   rows `[0]..[1]`, columns `[2]..[3]`; `lines` are that rectangle's cells.
 - How the gateway joins screens (`crates/rift-remote/src/stitch.rs`): it
-  scrolls 3 wheel lines a step (more inside rows the page already holds), and
+  scrolls 3 wheel lines a step at first, then past the page's end as many as
+  bring about a third of the area (from the last step's rows a line, growing
+  by half at most a step, at most 2/5 of the area past the overlap: Claude
+  Code moves up to 2.5 rows a line under a repeated wheel); more inside rows
+  the page already holds. It
   reads the screen once it has not changed for 30 ms (Claude Code redraws a
   scroll in pieces; a step it does not answer within 150 ms moved nothing).
   From the first 8 screens it learns the area: the rows whose text moves
@@ -1013,8 +1017,8 @@ scrolls natively.
   found inside the page; it never adds wrong rows. A screen too far to join
   (Claude Code jumps tens or hundreds of rows now and then, laying a long
   message out anew) sends the program back in steps that double (at most a
-  quarter of the page) until a screen joins or is found, then on one line a
-  step; after 4 such jumps in a job, or a screen caught mid-redraw that never
+  quarter of the page) until a screen joins or is found, then on at half the
+  step that went too far; after 4 such jumps in a job, or a screen caught mid-redraw that never
   joins, the page stops growing (`stopped`).
 - `stopped` is not the end: the phone asks again after 1.5 s (on its own
   twice in a row while the view is near that edge, again from each drag). A seek that

@@ -118,18 +118,28 @@ export function mayAskPage(page: StitchPage | null, now: number, stoppedAt: numb
 export const PAGE_AUTO_RETRIES = 2;
 
 /**
- * Which way a `page_ahead` goes for a scroller at `y` (`viewH` tall, `contentH` of content): a
- * screen's worth from an edge whose end the program has not reached, the next rows are asked for
- * before the finger gets there.
+ * Screens of rows kept ready past the view toward an edge whose end the program has not reached:
+ * the computer brings about 90 rows a second (each wheel step waits for the program to redraw),
+ * so rows are asked for well before the finger gets there, and again as each batch comes in.
+ */
+export const PAGE_READ_AHEAD = 3;
+
+/**
+ * Which way a `page_ahead` goes for a scroller at `y` (`viewH` tall, `contentH` of content):
+ * within PAGE_READ_AHEAD screens of an edge whose end the program has not reached.
  */
 export function edgeToAsk(page: StitchPage, y: number, viewH: number, contentH: number): "up" | "down" | null {
-  if (y < viewH && !page.ends[0]) return "up";
-  if (contentH - y - viewH < viewH && !page.ends[1]) return "down";
+  const reach = viewH * PAGE_READ_AHEAD;
+  if (y < reach && !page.ends[0]) return "up";
+  if (contentH - y - viewH < reach && !page.ends[1]) return "down";
   return null;
 }
 
-/** How many rows a `page_ahead` asks for: a few screens of the area, within the bound. */
+/**
+ * How many rows a `page_ahead` asks for: the first, one screen (the page shows sooner, the rest
+ * is read ahead); then a few screens of the area, within the bound.
+ */
 export function aheadRows(page: StitchPage | null, liveRows: number): number {
-  const h = page ? page.area[1] - page.area[0] : liveRows;
-  return Math.min(500, Math.max(20, h * 3));
+  if (!page) return Math.min(500, Math.max(20, liveRows));
+  return Math.min(500, Math.max(20, (page.area[1] - page.area[0]) * 3));
 }

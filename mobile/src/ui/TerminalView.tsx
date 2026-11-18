@@ -1025,9 +1025,10 @@ export function TerminalView({
   });
   // a new page opens where the user was looking (row 0: the screen the page started from); rows
   // that came in above keep what is in view where it is
-  const onPageContent = () => {
+  const onPageContent = (_w: number, contentH: number) => {
     const p = pageRef.current;
     if (!p) return;
+    pageView.current = { ...pageView.current, contentH };
     const v = pageView.current;
     const h = rowHeight.current;
     if (v.epoch !== p.epoch) {
@@ -1041,6 +1042,12 @@ export function TerminalView({
       pageScroller.current?.scrollTo({ y, animated: false });
       pageView.current = { ...v, y, top: p.top };
     }
+    // rows came in: more are asked for until PAGE_READ_AHEAD screens wait past the view (the
+    // program is moved back to the view once they stop: the seek waits while one is asked)
+    const now = pageView.current;
+    if (p.state !== "ok" || !pageUsable(p) || now.viewH <= 0) return;
+    const dir = edgeToAsk(p, now.y, now.viewH, contentH);
+    if (dir) askPage(dir);
   };
   // The program drew something else where it is (new output): the page no longer says what is
   // there. In view of that spot the live screen takes over; scrolled away from it, the page stays.
@@ -1610,6 +1617,9 @@ export function TerminalView({
           onScrollEndDrag={onPageRest}
           onMomentumScrollEnd={onPageRest}
           onContentSizeChange={onPageContent}
+          onLayout={(e) => {
+            pageView.current = { ...pageView.current, viewH: e.nativeEvent.layout.height };
+          }}
         >
           <Pressable onPress={() => { if (focus && focusOnTap.current) capture.current?.focus(); }} accessible={false}>
             {/* drawn light in chunks by page row, as the history above a primary screen: a long page stays cheap */}

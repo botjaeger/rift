@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { aheadRows, edgeToAsk, liveMatches, mayAskPage, mergePage, PAGE_RETRY_MS, pageComplete, pageScreens, pageUsable, type StitchPage } from "../src/stitch";
+import { aheadRows, edgeToAsk, liveMatches, mayAskPage, mergePage, PAGE_READ_AHEAD, PAGE_RETRY_MS, pageComplete, pageScreens, pageUsable, type StitchPage } from "../src/stitch";
 import type { ScreenState } from "../src/protocol/store";
 import type { PageMsg, ScreenRun } from "../src/protocol/types";
 
@@ -71,9 +71,10 @@ describe("liveMatches", () => {
 });
 
 describe("aheadRows", () => {
-  it("asks for three areas' worth, within the bounds", () => {
-    expect(aheadRows(null, 40)).toBe(120);
+  it("asks for one screen first, then three areas' worth, within the bounds", () => {
+    expect(aheadRows(null, 40)).toBe(40);
     expect(aheadRows(null, 3)).toBe(20);
+    expect(aheadRows(mergePage(null, msg({ area: [1, 21, 0, 10] })) as StitchPage, 40)).toBe(60);
     expect(aheadRows(mergePage(null, msg({ area: [0, 300, 0, 10] })) as StitchPage, 40)).toBe(500);
   });
 });
@@ -92,15 +93,16 @@ describe("mayAskPage", () => {
 });
 
 describe("edgeToAsk", () => {
-  it("asks a screen's worth from an edge whose end is not reached, up first", () => {
+  it("asks within PAGE_READ_AHEAD screens of an edge whose end is not reached, up first", () => {
     const p = mergePage(null, msg({ lines: [row("a"), row("b"), row("c")] })) as StitchPage;
     const open = { ...p, ends: [false, false] as [boolean, boolean] };
-    // 100 tall view over 1000 of content
-    expect(edgeToAsk(open, 0, 100, 1000)).toBe("up");
-    expect(edgeToAsk(open, 99, 100, 1000)).toBe("up");
-    expect(edgeToAsk(open, 100, 100, 1000)).toBe(null);
-    expect(edgeToAsk(open, 801, 100, 1000)).toBe("down");
-    expect(edgeToAsk(open, 800, 100, 1000)).toBe(null);
+    const reach = 100 * PAGE_READ_AHEAD;
+    // 100 tall view over 2000 of content
+    expect(edgeToAsk(open, 0, 100, 2000)).toBe("up");
+    expect(edgeToAsk(open, reach - 1, 100, 2000)).toBe("up");
+    expect(edgeToAsk(open, reach, 100, 2000)).toBe(null);
+    expect(edgeToAsk(open, 2000 - 100 - reach + 1, 100, 2000)).toBe("down");
+    expect(edgeToAsk(open, 2000 - 100 - reach, 100, 2000)).toBe(null);
     expect(edgeToAsk({ ...open, ends: [true, false] }, 0, 100, 150)).toBe("down");
     expect(edgeToAsk({ ...open, ends: [true, true] }, 0, 100, 150)).toBe(null);
     // not laid out yet: nothing
