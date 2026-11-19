@@ -1,6 +1,7 @@
 import { Pressable, Text, View } from "react-native";
 import type { HostView } from "@/fleet";
 import { tabPane } from "@/now";
+import { replacedPairing } from "@/stores";
 import { hostLine, lastSeenAt } from "./connStatus";
 import { hostDot } from "./hostDot";
 import { glyph } from "./Screen";
@@ -51,7 +52,7 @@ export function ComputerMenu({
         const open = h.conn.status === "open";
         const pane = open ? landingPane(h) : null;
         // where it is: "This network · 30 tabs", "Over the relay", "Can’t reach it · last seen 2 h ago"
-        const line = hostLine(h.conn, now, open ? tabs : null, lastSeenAt(h)).text;
+        const line = hostLine(h.conn, now, open ? tabs : null, lastSeenAt(h), replacedPairing(h.record, hosts.map((o) => o.record))).text;
         const usable = on || pane !== null;
         return (
           <Pressable

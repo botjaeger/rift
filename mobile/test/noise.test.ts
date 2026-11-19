@@ -180,6 +180,39 @@ describe("XXHandshake", () => {
     expect(ini.isComplete).toBe(false);
   });
 
+  it("says whose key answered only when the responder proved it holds that key", () => {
+    // a computer paired again (another key) answers: its key, proven
+    const other = generateKeyPair(rng).publicKey;
+    const { gw, ini, res } = pair(other);
+    res.readMessage(ini.writeMessage(new Uint8Array(0)));
+    let err: unknown = null;
+    try {
+      ini.readMessage(res.writeMessage(utf8Encode("gateway hello")));
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(NoiseKeyMismatchError);
+    expect(bytesToHex((err as NoiseKeyMismatchError).proven!)).toBe(bytesToHex(gw.publicKey));
+
+    // one that only claims a key (sends another computer's public key with its own private one)
+    const claimed = generateKeyPair(rng).publicKey;
+    const own = generateKeyPair(rng);
+    const prologue = utf8Encode("rift-remote/2");
+    const dev = generateKeyPair(rng);
+    const ini2 = new XXHandshake({ initiator: true, prologue, s: dev, random: rng, pinnedRemoteStatic: other });
+    const liar = new XXHandshake({ initiator: false, prologue, s: { publicKey: claimed, privateKey: own.privateKey }, random: rng });
+    liar.readMessage(ini2.writeMessage(new Uint8Array(0)));
+    let err2: unknown = null;
+    try {
+      ini2.readMessage(liar.writeMessage(utf8Encode("gateway hello")));
+    } catch (e) {
+      err2 = e;
+    }
+    expect(err2).toBeInstanceOf(NoiseKeyMismatchError);
+    expect((err2 as NoiseKeyMismatchError).proven).toBeNull();
+    expect(() => ini2.writeMessage(new Uint8Array(0))).toThrow(NoiseError);
+  });
+
   it("rejects a tampered handshake message and a tampered transport message", () => {
     const { ini, res } = pair();
     res.readMessage(ini.writeMessage(new Uint8Array(0)));

@@ -6,7 +6,7 @@
 import { alertAnswers, answerPlan, questionKey, sameQuestion, type Pick as AnswerPick } from "./answer";
 import { askText, doneText } from "./notifyText";
 import { programName } from "./now";
-import { fromBase64Url } from "./noise/bytes";
+import { fromBase64Url, toBase64Url } from "./noise/bytes";
 import type { KeyPair, RandomBytes } from "./noise/noise";
 import { emptyEarlier, fetchRange, mergeRange, nextRequest, type EarlierOutput } from "./earlier";
 import {
@@ -65,6 +65,7 @@ import {
   saveLastView,
   savePaneTitles,
   saveSettings,
+  replacedPairing,
   type HostRecord,
   type KeyValueStore,
   type LastView,
@@ -507,7 +508,8 @@ export class Fleet {
           ...(themes.has(record.key) ? { theme: themes.get(record.key)! } : {}),
         })),
       }));
-      for (const r of records) this.connect(r);
+      // an old pairing of a computer paired again waits for the user (replacedPairing)
+      for (const r of records) if (!replacedPairing(r, records)) this.connect(r);
       this.store.update((s) => ({ ...s, ready: true }));
     } catch (e) {
       this.store.update((s) => ({
@@ -562,6 +564,9 @@ export class Fleet {
           const was = this.host(key)?.conn.status;
           this.patchHost(key, conn.status === "open" || was === "open" ? { conn, lastSeen: this.now() } : { conn });
           if (conn.status !== "open") this.failPending(key, "disconnected");
+          // a round that ended without a welcome (the relay may still have reached it)
+          const ended = conn.status === "closed" || conn.status === "failed";
+          if (ended && client.answeredByKey && this.clients.get(key) === client) void this.markReplaced(key, client.answeredByKey);
         },
         onGatewayHello: (gateway) => this.patchHost(key, { gateway }),
         onWelcome: (welcome) => {
@@ -677,10 +682,38 @@ export class Fleet {
    * that changes it closes the connection, and the next welcome carries the new one), and the
    * path that worked (address order, LAN or relay).
    */
+  /**
+   * Another paired computer answered in this one's place, proving it holds its key (`answeredBy`):
+   * this is an old pairing of a computer paired again. It stops trying at once (each try is a
+   * failed handshake that computer counts against this phone's address, which it then refuses
+   * for a minute, the new pairing too) and is remembered, so the next launch does not try it.
+   */
+  private async markReplaced(key: string, answeredBy: Uint8Array | null): Promise<void> {
+    const view = this.host(key);
+    if (!view || !answeredBy) return;
+    const by = toBase64Url(answeredBy);
+    // only another paired computer's key: an unknown one may be anything on this network
+    const records = this.store.peek().hosts.map((h) => h.record);
+    const record: HostRecord = { ...view.record, replacedBy: by };
+    if (!replacedPairing(record, records)) return;
+    const client = this.clients.get(key);
+    this.clients.delete(key);
+    client?.stop();
+    if (view.record.replacedBy === by) return;
+    this.patchHost(key, { record });
+    try {
+      await this.hostsStore.refresh(record);
+      if (this.unpaired.has(key)) await this.hostsStore.remove(key);
+    } catch {
+      // kept for this run; the next launch learns it again on its first try
+    }
+  }
+
   private async refreshRecord(key: string, welcome: WelcomeMsg, client: RiftClient): Promise<void> {
     const view = this.host(key);
     if (!view) return;
-    const r = view.record;
+    // it answered as itself: not an old pairing after all
+    const { replacedBy, ...r } = view.record;
     const address = client.preferredAddress;
     // what the client tries now: the pairing link's and the addresses a welcome named since
     const lan = client.lanAddresses;
@@ -698,7 +731,8 @@ export class Fleet {
       (r.via ?? "lan") === via &&
       r.os === os &&
       r.version === version &&
-      !seenStale
+      !seenStale &&
+      replacedBy === undefined
     ) {
       return;
     }

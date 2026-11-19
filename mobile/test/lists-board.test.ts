@@ -227,7 +227,7 @@ describe("Portals: the New Portals board", () => {
     "@/fleet": { canOperate: () => true },
     "@/lock": { needsAuthBeforeRun: () => false },
     "@/runtime": { authenticate: vi.fn(), fleet: { retry: vi.fn(), unpair: vi.fn(), waitingSince: () => null, answer: vi.fn() }, useApp: () => ({ hosts, ready: true, loadError: null, asked: [], lastView: null, settings: {} }) },
-    "@/stores": { restoreTarget: () => null },
+    "@/stores": { restoreTarget: () => null, replacedPairing: () => false },
     "@/ui/Avatar": { Tile: "Tile" },
     "@/ui/Button": { Button: "Button" },
     "@/ui/ConnectionSheet": { lineColor: () => ({ muted: "m", busy: "b", bad: "r", dim: "d" }) },
@@ -303,7 +303,7 @@ describe("First run: a plain list of steps (the New Portals board)", () => {
 });
 
 describe("Computer menu: one hairline per row, 68 pt rows (the New Portals board)", () => {
-  const deps = uiDeps("ios", { "@/now": now, "./connStatus": connStatus, "./hostDot": hostDot });
+  const deps = uiDeps("ios", { "@/now": now, "@/stores": { replacedPairing: () => false }, "./connStatus": connStatus, "./hostDot": hostDot });
   const { ComputerMenu } = load("ui/ComputerMenu.tsx", deps) as { ComputerMenu: (p: object) => unknown };
   const hosts = [host("A", "studio-mac", conn({})), host("B", "build-box", UNREACHABLE, { record: { key: "B", name: "build-box", addresses: [], permission: "operate", pairedAt: "2026-11-01T09:00:00Z", seenAt: NOW - 2 * 3_600_000 } })];
   const tree = render({ type: ComputerMenu, props: { hosts, current: "A", now: NOW, top: 117, onOpen: vi.fn(), onConnection: vi.fn(), onPortals: vi.fn(), onDismiss: vi.fn(), children: [] } }) as Node;
@@ -336,6 +336,7 @@ describe("Connection sheet: one line per path, the one in use ticked, Test again
   const deps = uiDeps("ios", {
     "expo-router": { useRouter: () => ({ back: vi.fn(), replace: vi.fn(), canGoBack: () => true, push }) },
     "@/runtime": { fleet: { retry: vi.fn() }, useApp: () => ({ hosts: [host("A", "studio-mac", c)] }), useLock: () => ({ locked: false, covered: false }) },
+    "@/stores": { replacedPairing: () => false },
     "./connStatus": connStatus,
     "./useNow": { useNow: () => NOW },
   });

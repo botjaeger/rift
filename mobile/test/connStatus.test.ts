@@ -170,6 +170,14 @@ describe("hostLine: the status line of a computer's card", () => {
     expect(auth).toMatchObject({ text: "Can’t connect to it", retry: false, hint: "This computer no longer accepts this device. Pair it again." });
     expect(hostLine(conn({ status: "failed", failure: "key_mismatch" }), NOW, null).retry).toBe(true);
   });
+  it("an old pairing of a computer paired again says so and offers no Try again (Unpair is its fix)", () => {
+    for (const c of [conn({ status: "idle" }), conn({ status: "closed" }), conn({ status: "failed", failure: "key_mismatch" })]) {
+      expect(hostLine(c, NOW, null, null, true)).toMatchObject({ text: "Paired again · this is the old pairing", tone: "dim", retry: false });
+    }
+    // tried again by hand: it says what it does, and once it answers it is itself again
+    expect(hostLine(conn({ status: "connecting" }), NOW, null, null, true).text).toBe("Connecting…");
+    expect(hostLine(conn({ status: "open" }), NOW, 2, null, true).text).toBe("This network · 2 tabs");
+  });
   it("a client held in the background says Not connected, with no countdown", () => {
     expect(hostLine(conn({ status: "closed" }), NOW, null)).toMatchObject({ text: "Not connected", retry: false });
   });

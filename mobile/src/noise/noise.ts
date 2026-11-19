@@ -37,9 +37,13 @@ export class NoiseError extends Error {
   }
 }
 
-/** The responder's static key differs from the one pinned at pairing. */
+/**
+ * The responder's static key differs from the one pinned at pairing. `proven`: the rest of its
+ * message decrypted with that key, so the responder holds it (`received` is the key of whoever
+ * answered, not only a claim); null when the message failed to decrypt.
+ */
 export class NoiseKeyMismatchError extends NoiseError {
-  constructor() {
+  constructor(readonly proven: Uint8Array | null = null) {
     super("the computer's key does not match the paired key");
     this.name = "NoiseKeyMismatchError";
   }
@@ -339,8 +343,22 @@ export class XXHandshake {
           this.readE(take(DHLEN));
           this.ss.mixKey(dh(this.e!, this.re!));
           const rs = this.ss.decryptAndHash(take(keyLen()));
-          // Pinning: abort before anything else is derived from or trusted about this key.
-          if (this.pinned && !equalBytes(rs, this.pinned)) throw new NoiseKeyMismatchError();
+          // Pinning: this handshake ends here, whatever follows. Only to say whose key answered
+          // (an old pairing of a computer paired again), the rest of the message is read with
+          // it: it decrypts only for a responder that holds that key, so a key merely claimed
+          // is never reported.
+          if (this.pinned && !equalBytes(rs, this.pinned)) {
+            const claimed = Uint8Array.from(rs);
+            let proven: Uint8Array | null = null;
+            try {
+              this.ss.mixKey(dh(this.e!, claimed));
+              this.ss.decryptAndHash(message.subarray(at));
+              proven = claimed;
+            } catch {
+              // not its key: nothing is said about who answered
+            }
+            throw new NoiseKeyMismatchError(proven);
+          }
           this.rs = Uint8Array.from(rs);
           this.ss.mixKey(dh(this.e!, this.rs)); // es, initiator side: DH(e, rs)
           break;

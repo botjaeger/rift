@@ -66,13 +66,15 @@ export function backInText(closing: NonNullable<ConnState["closing"]>, now: numb
 export const UPDATE_HINT = "Nothing is wrong. Your tabs come back by themselves.";
 /** The hint once Rift quit on the computer. */
 export const QUIT_HINT = "Open Rift on the computer, then tap Try again.";
+export const REPLACED_HINT =
+  "This computer was paired with this phone again, and its other card now connects to it. This card is from the first pairing: unpair it.";
 
 /**
  * The status line under a computer's name: where it is ("This network · 30 tabs", "Over the
  * relay"), or what is being tried. `seenAt`: epoch ms it was last connected (null: not known),
  * for a computer that stopped answering ("Can't reach it · last seen 2 h ago").
  */
-export function hostLine(conn: ConnState, now: number, tabs: number | null, seenAt: number | null = null): HostLine {
+export function hostLine(conn: ConnState, now: number, tabs: number | null, seenAt: number | null = null, replaced = false): HostLine {
   const line = (text: string, tone: LineTone, more: Partial<HostLine> = {}): HostLine => ({
     text,
     tone,
@@ -81,6 +83,10 @@ export function hostLine(conn: ConnState, now: number, tabs: number | null, seen
     hint: null,
     ...more,
   });
+  // an old pairing of a computer paired again (replacedPairing): never tried on its own; Unpair
+  if (replaced && conn.status !== "open" && conn.status !== "connecting") {
+    return line("Paired again · this is the old pairing", "dim", { hint: REPLACED_HINT });
+  }
   if (updating(conn) && conn.closing) {
     // expected: Rift restarts on the computer; no retry counter, nothing alarming
     return line(`Updating Rift · ${backInText(conn.closing, now)}`, "busy", {

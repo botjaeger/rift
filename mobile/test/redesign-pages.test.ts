@@ -44,7 +44,7 @@ const host = (key: string, name: string, c: ConnState, extra: object = {}) => ({
 });
 
 describe("Computer menu: each computer with where it is, the current one ticked", () => {
-  const deps = uiDeps("ios", { "@/now": now, "./connStatus": connStatus, "./hostDot": hostDot });
+  const deps = uiDeps("ios", { "@/now": now, "@/stores": { replacedPairing: () => false }, "./connStatus": connStatus, "./hostDot": hostDot });
   const { ComputerMenu } = load("ui/ComputerMenu.tsx", deps) as { ComputerMenu: (p: object) => unknown };
   const hosts = [
     host("A", "studio-mac", conn({})),
@@ -74,6 +74,7 @@ describe("Connection sheet: the standard header and Test again", () => {
     const deps = uiDeps("ios", {
       "expo-router": { useRouter: () => ({ back: vi.fn(), replace: vi.fn(), canGoBack: () => true }) },
       "@/runtime": { fleet: { retry }, useApp: () => ({ hosts: [host("A", "studio-mac", c)] }), useLock: () => ({ locked: false, covered: false }) },
+      "@/stores": { replacedPairing: () => false },
       "./connStatus": connStatus,
       "./useNow": { useNow: () => NOW },
     });
@@ -169,7 +170,7 @@ describe("Portals page", () => {
     "@/fleet": { canOperate: () => true },
     "@/lock": { needsAuthBeforeRun: () => false },
     "@/runtime": { authenticate: vi.fn(), fleet: { retry, unpair, waitingSince: () => null, answer: vi.fn() }, useApp: () => ({ hosts, ready: true, loadError: null, asked: [], lastView: null, settings: {} }) },
-    "@/stores": { restoreTarget: () => null },
+    "@/stores": { restoreTarget: () => null, replacedPairing: () => false },
     "@/ui/Avatar": { Tile: "Tile" },
     "@/ui/Button": { Button: "Button" },
     "@/ui/ConnectionSheet": { lineColor: () => ({ muted: "m", busy: "b", bad: "r", dim: "d" }) },

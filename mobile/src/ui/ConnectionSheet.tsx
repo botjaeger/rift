@@ -3,6 +3,7 @@ import { useEffect } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { ConnState } from "@/protocol/client";
 import { fleet, useApp } from "@/runtime";
+import { replacedPairing } from "@/stores";
 import { Button } from "./Button";
 import { hostLine, lastSeenAt, pathLine, pathRows, type LineTone, type PathTone } from "./connStatus";
 import { Icon } from "./Icon";
@@ -57,7 +58,7 @@ export function ConnectionSheet({ hostKey }: { hostKey: string }) {
   }, [gone]);
   if (!host) return null;
   const tabs = host.conn.status === "open" ? host.windows.reduce((n, w) => n + w.tabs.length, 0) : null;
-  const line = hostLine(host.conn, now, tabs, lastSeenAt(host));
+  const line = hostLine(host.conn, now, tabs, lastSeenAt(host), replacedPairing(host.record, s.hosts.map((h) => h.record)));
   const open = host.conn.status === "open";
   const rows = pathRows(host.conn);
   return (

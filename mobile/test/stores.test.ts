@@ -12,6 +12,7 @@ import {
   loadSeenRelease,
   loadSettings,
   saveSeenRelease,
+  replacedPairing,
   restoreTarget,
   saveLastView,
   saveSettings,
@@ -308,6 +309,21 @@ describe("last view", () => {
     }
     await saveLastView(kv, null);
     expect(kv.data.has("rift.last")).toBe(false);
+  });
+
+  it("an old pairing is one whose computer answered as a later pairing of the same name", () => {
+    const next = host(2, { name: "mac-1", pairedAt: "2026-11-18T10:00:00.000Z" });
+    const old = host(1, { replacedBy: next.key });
+    expect(replacedPairing(old, [old, next])).toBe(true);
+    // the new pairing unpaired: the old one is itself again
+    expect(replacedPairing(old, [old])).toBe(false);
+    // another computer (another name), or one paired before it: not this one paired again
+    expect(replacedPairing(old, [old, { ...next, name: "build-box" }])).toBe(false);
+    expect(replacedPairing(old, [old, { ...next, pairedAt: "2026-10-01T10:00:00.000Z" }])).toBe(false);
+    expect(replacedPairing({ ...old, replacedBy: old.key }, [old])).toBe(false);
+    expect(replacedPairing(host(1), [host(1), next])).toBe(false);
+    expect(isHostRecord(old)).toBe(true);
+    expect(isHostRecord({ ...old, replacedBy: "nope" })).toBe(false);
   });
 
   it("reopens only a host that is still paired", () => {

@@ -881,6 +881,67 @@ describe("Fleet audit fixes", () => {
     expect(await result).toMatchObject({ ok: true, host: { via: "relay" } });
   });
 
+  it("an old pairing of a computer paired again stops trying, is remembered, and is not tried at the next launch", async () => {
+    // the same computer paired twice: the old pairing's key is gone, the computer answers with the new one
+    const OLD = toBase64Url(gatewayKey().publicKey);
+    const t = setup({ gatewayFor: (url) => (url.startsWith("wss://") ? gatewayKey() : GW) });
+    const store = new HostsStore(t.kv);
+    // the new pairing names the computer's address now; the old one an address it also answers at
+    await store.save(record({ addresses: ["10.0.0.9:7878"], pairedAt: "2026-11-18T10:00:00.000Z" }));
+    await store.save(record({ key: OLD, pairedAt: "2026-10-01T10:00:00.000Z", relay: "wss://relay.example.com" }));
+    await t.fleet.init();
+    expect(t.sockets.map((s) => s.url)).toEqual(["ws://10.0.0.9:7878", "ws://10.0.0.5:7878"]);
+    t.sockets[0]!.connect();
+    t.sockets[0]!.recv(welcome());
+    t.sockets[1]!.open();
+    t.sockets[1]!.deliver();
+    expect(t.sockets[1]!.clientHello).toBeNull();
+    // the relay does not know the old key: the round ends without a welcome
+    expect(t.last().url).toContain("wss://relay.example.com");
+    t.last().drop();
+    await settle();
+    const oldTries = () => t.sockets.filter((s) => !s.url.includes("10.0.0.9")).length;
+    expect(oldTries()).toBe(2);
+    vi.advanceTimersByTime(10 * 60_000);
+    t.fleet.resumeConnections({ lanFirst: false, force: false });
+    t.fleet.probeStopped();
+    // no try after that (each would be a failed handshake against this phone's address)
+    expect(oldTries()).toBe(2);
+    expect(t.fleet.host(OLD)!.record.replacedBy).toBe(GW_KEY);
+    expect((await store.load()).find((r) => r.key === OLD)!.replacedBy).toBe(GW_KEY);
+
+    // the next launch tries the new pairing only
+    const opened: string[] = [];
+    const again = new Fleet({
+      kv: t.kv,
+      randomBytes: rng,
+      platform: "ios",
+      systemDeviceName: "x",
+      notifier: { requestPermission: async () => true, notify: async () => undefined },
+      socket: (url) => {
+        opened.push(url);
+        return new FakeGatewaySocket(url, { key: GW });
+      },
+    });
+    await again.init();
+    expect(opened).toEqual(["ws://10.0.0.9:7878"]);
+    expect(again.state.hosts.map((h) => h.record.key)).toEqual([GW_KEY, OLD]);
+  });
+
+  it("another paired computer of another name at the address is not an old pairing", async () => {
+    const OTHER = toBase64Url(gatewayKey().publicKey);
+    const t = setup();
+    const store = new HostsStore(t.kv);
+    await store.save(record({ pairedAt: "2026-11-18T10:00:00.000Z" }));
+    await store.save(record({ key: OTHER, name: "build-box", pairedAt: "2026-10-01T10:00:00.000Z" }));
+    await t.fleet.init();
+    t.sockets[1]!.open();
+    t.sockets[1]!.deliver();
+    await settle();
+    expect(t.fleet.host(OTHER)!.conn).toMatchObject({ status: "failed", failure: "key_mismatch" });
+    expect(t.fleet.host(OTHER)!.record.replacedBy).toBeUndefined();
+  });
+
   it("a network change tries a key-mismatch host again; a foreground resume does not", async () => {
     const t = setup({ gateway: lanImpostor });
     await new HostsStore(t.kv).save(record());

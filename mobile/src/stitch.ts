@@ -41,6 +41,18 @@ export function pageUsable(page: StitchPage | null): page is StitchPage {
   return !!page && page.state !== "flat" && page.area[1] - page.area[0] > 0 && page.bottom > page.top && pageComplete(page);
 }
 
+/**
+ * The page the view shows when `next` came in, `shown` being the one it scrolls now. More rows
+ * for the same page come in pieces, each naming the page's new span: until the last one is here,
+ * the view keeps scrolling `shown`, so the scroller is never taken away under the finger (it
+ * went back to the live screen between pieces, and the scroll stopped). Anything else (a new
+ * epoch, a page complete, no page) shows at once.
+ */
+export function pageToShow(shown: StitchPage | null, next: StitchPage | null): StitchPage | null {
+  if (next && !pageComplete(next) && pageUsable(shown) && shown.epoch === next.epoch) return shown;
+  return next;
+}
+
 const BLANK: ScreenRun[] = [];
 
 function rowText(runs: readonly ScreenRun[]): string {
@@ -143,13 +155,38 @@ export function wheelInstead(now: number, askedAt: number | null, refusedAt: num
 }
 
 /**
- * Which way a `page_ahead` goes for a scroller at `y` (`viewH` tall, `contentH` of content):
- * within PAGE_READ_AHEAD screens of an edge whose end the program has not reached.
+ * How long a batch of rows takes to come once asked for (a held-tall job measured 1.9 to 2.4 s
+ * with `less`, a little margin over it): a flick is asked ahead of by the distance it covers in
+ * that time, so its rows are there before it reaches the edge.
  */
-export function edgeToAsk(page: StitchPage, y: number, viewH: number, contentH: number): "up" | "down" | null {
+export const PAGE_JOB_MS = 2500;
+
+/** A scroller's speed (px per ms, + toward the bottom), from its last two positions. */
+export type ScrollSpeed = { y: number; t: number; v: number };
+
+/**
+ * The speed after a scroll to `y` at `t`: averaged with the last (a single event's step is
+ * uneven), forgotten after a pause (a scroller that stopped has no speed).
+ */
+export function nextSpeed(prev: ScrollSpeed | null, y: number, t: number): ScrollSpeed {
+  const dt = prev ? t - prev.t : 0;
+  if (!prev || dt <= 0 || dt > 200) return { y, t, v: 0 };
+  return { y, t, v: (prev.v + (y - prev.y) / dt) / 2 };
+}
+
+/**
+ * Which way a `page_ahead` goes for a scroller at `y` (`viewH` tall, `contentH` of content,
+ * moving at `speed` px per ms, + toward the bottom): within PAGE_READ_AHEAD screens of an edge
+ * whose end the program has not reached, or within what the scroller covers toward it in
+ * PAGE_JOB_MS.
+ */
+export function edgeToAsk(page: StitchPage, y: number, viewH: number, contentH: number, speed = 0): "up" | "down" | null {
   const reach = viewH * PAGE_READ_AHEAD;
-  if (y < reach && !page.ends[0]) return "up";
-  if (contentH - y - viewH < reach && !page.ends[1]) return "down";
+  const up = Math.max(reach, -speed * PAGE_JOB_MS);
+  const down = Math.max(reach, speed * PAGE_JOB_MS);
+  if (viewH <= 0) return null;
+  if (y < up && !page.ends[0]) return "up";
+  if (contentH - y - viewH < down && !page.ends[1]) return "down";
   return null;
 }
 
@@ -160,4 +197,105 @@ export function edgeToAsk(page: StitchPage, y: number, viewH: number, contentH: 
 export function aheadRows(page: StitchPage | null, liveRows: number): number {
   if (!page) return Math.min(500, Math.max(20, liveRows));
   return Math.min(500, Math.max(20, (page.area[1] - page.area[0]) * 3));
+}
+
+/**
+ * How long a `page_ahead` waits for its page: one at a time (the computer refuses a second), and
+ * a reply lost with the connection counts as none after this.
+ */
+export const PAGE_REPLY_MS = 8000;
+
+/**
+ * Where asking for a page stands, in one place: a `page_ahead` on its way (`asked`: when it went
+ * out), the last refusal (`refused`: the wheel takes over, `wheelInstead`), the last `stopped`
+ * answer (`stopped`: another ask waits PAGE_RETRY_MS, `mayAskPage`), and the asks made without
+ * the finger since the last drag or `ok` (`retries`, at most PAGE_AUTO_RETRIES).
+ */
+export interface PageFlow {
+  asked: number | null;
+  refused: number;
+  stopped: number;
+  retries: number;
+  /**
+   * A whole page came that the view has not drawn yet: nothing is asked until it is (the view
+   * still has the page before it, or none, and would ask for another epoch, or a new page,
+   * throwing this one away).
+   */
+  undrawn: boolean;
+}
+
+export const PAGE_FLOW: PageFlow = { asked: null, refused: -Infinity, stopped: 0, retries: 0, undrawn: false };
+
+export type PageEvent =
+  /** The view wants rows toward an edge. */
+  | { e: "ask"; page: StitchPage | null; now: number }
+  /** The `page_ahead` itself was answered: taken, refused, or refused for a job already running. */
+  | { e: "reply"; ok: boolean; busy: boolean; now: number }
+  /** A page message came (`complete`: every row of the page is there with it). */
+  | { e: "page"; state: PageMsg["state"]; complete: boolean; now: number }
+  /** The pause after a `stopped` passed while the view is still near that edge. */
+  | { e: "retry" }
+  /** A finger started a drag. */
+  | { e: "drag" }
+  /** The program's screen changed shape: an answer for the old one never comes. */
+  | { e: "shape" }
+  /** The view drew what came. */
+  | { e: "drawn" };
+
+/**
+ * What the view does after an event: send the `page_ahead`, ask toward the edge it is near
+ * (`ask`: an "ask" event follows), move the program to the view, retry at `retryAt`.
+ */
+export interface PageEffect {
+  send?: boolean;
+  ask?: boolean;
+  seek?: boolean;
+  retryAt?: number;
+}
+
+/** A `page_ahead` is on its way at `now` (sent, not answered, not lost). */
+export function pageAsking(flow: PageFlow, now: number): boolean {
+  return flow.asked !== null && now - flow.asked < PAGE_REPLY_MS;
+}
+
+/** The flow after `ev`, and what to do. */
+export function pageFlow(flow: PageFlow, ev: PageEvent): [PageFlow, PageEffect] {
+  switch (ev.e) {
+    case "ask":
+      if (flow.undrawn || pageAsking(flow, ev.now) || !mayAskPage(ev.page, ev.now, flow.stopped)) return [flow, {}];
+      return [{ ...flow, asked: ev.now }, { send: true }];
+    case "reply":
+      if (ev.ok) return [flow, {}];
+      return [{ ...flow, asked: null, refused: ev.busy ? flow.refused : ev.now }, {}];
+    case "page": {
+      // a whole page replaces the one in view (pageToShow), so a draw always follows
+      let next = ev.complete ? { ...flow, undrawn: true } : flow;
+      const fx: PageEffect = {};
+      if (ev.state === "stopped") {
+        next = { ...next, stopped: ev.now };
+        // a little past the pause: a timer that fires a moment early is not refused
+        fx.retryAt = ev.now + PAGE_RETRY_MS + 100;
+      } else if (ev.state === "ok") next = { ...next, retries: 0 };
+      // the program sits at the page's far end: back to the view
+      if (ev.complete && next.asked !== null) {
+        next = { ...next, asked: null };
+        fx.seek = true;
+      }
+      return [next, fx];
+    }
+    case "retry":
+      if (flow.retries >= PAGE_AUTO_RETRIES) return [flow, {}];
+      return [{ ...flow, retries: flow.retries + 1 }, { ask: true }];
+    case "drag":
+      return [{ ...flow, retries: 0 }, {}];
+    case "shape":
+      return [{ ...flow, asked: null }, {}];
+    case "drawn":
+      return [flow.undrawn ? { ...flow, undrawn: false } : flow, {}];
+  }
+}
+
+/** The flow at `now` for the wheel: a request that got no answer at all counts as none. */
+export function pageExpire(flow: PageFlow, now: number): PageFlow {
+  return flow.asked !== null && !pageAsking(flow, now) ? { ...flow, asked: null } : flow;
 }

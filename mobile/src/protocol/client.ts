@@ -344,6 +344,17 @@ export class RiftClient {
   private lanTriedThisRound = false;
   /** Paths this round that answered with another key than the pinned one. */
   private mismatchedThisRound = 0;
+  /** The key of the last computer that answered in place of the paired one and proved it holds it. */
+  private answeredBy: Uint8Array | null = null;
+
+  /**
+   * Who answered in place of the paired computer, proven (it holds that key), since this client
+   * started; null when none did. The same key as another paired computer's: this pairing is an
+   * old one of a computer paired again.
+   */
+  get answeredByKey(): Uint8Array | null {
+    return this.answeredBy;
+  }
 
   private pane: number | null = null;
   /** Last `seq` applied for `pane`; null until a snapshot arrives. */
@@ -1132,7 +1143,7 @@ export class RiftClient {
       gatewayHello = JSON.parse(utf8Decode(payload));
     } catch (e) {
       if (e instanceof NoiseKeyMismatchError) {
-        this.keyMismatch(e.message);
+        this.keyMismatch(e.message, e.proven);
         return;
       }
       this.dropAttempt(e instanceof NoiseError ? `handshake failed: ${e.message}` : "bad gateway hello");
@@ -1443,8 +1454,9 @@ export class RiftClient {
    * that attempt and go on to the next path. The relay routes by the pinned key, so a
    * mismatch there, or on every path of the round, fails for good.
    */
-  private keyMismatch(error: string): void {
+  private keyMismatch(error: string, proven: Uint8Array | null): void {
     this.mismatchedThisRound++;
+    if (proven) this.answeredBy = proven;
     if (this.endpoints[this.current]!.kind === "relay" || this.mismatchedThisRound >= this.endpoints.length) {
       this.fail("key_mismatch", error);
       return;
@@ -1482,6 +1494,8 @@ export class RiftClient {
         this.setState({ status: "closed", retryInMs: UPDATE_RETRY_MS, retryAt: Date.now() + UPDATE_RETRY_MS });
         this.retryTimer = setTimeout(() => {
           this.retryTimer = null;
+          // stopped meanwhile (also from the state change just above: onState may stop it)
+          if (this.stopped) return;
           this.startRound();
         }, UPDATE_RETRY_MS);
         return;
@@ -1497,6 +1511,8 @@ export class RiftClient {
     this.setState({ status: "closed", retryInMs: delay, retryAt: Date.now() + delay });
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
+      // stopped meanwhile (also from the state change just above: onState may stop it)
+      if (this.stopped) return;
       this.setState({ attempt: this.state.attempt + 1 });
       this.startRound();
     }, delay);

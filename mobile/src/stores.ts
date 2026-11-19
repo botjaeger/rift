@@ -87,6 +87,26 @@ export interface HostRecord {
   version?: string;
   /** Epoch milliseconds of the last `welcome` ("last seen"). */
   seenAt?: number;
+  /**
+   * The key (base64url) of another paired computer that answered at this one's address, proving
+   * it holds that key: this is an old pairing of a computer paired again (`replacedPairing`).
+   */
+  replacedBy?: string;
+}
+
+/**
+ * `record` is an old pairing of a computer paired again: the computer that answered in its place
+ * is still paired on this phone, under the same name, paired after it. It connects only when the
+ * user asks (Try again): on its own each
+ * try is a failed handshake the computer counts against this phone's address, which then refuses
+ * the new pairing too.
+ */
+export function replacedPairing(record: HostRecord, records: readonly HostRecord[]): boolean {
+  const by = record.replacedBy;
+  if (by === undefined || by === record.key) return false;
+  // the same computer paired later (by its name): two Macs that swapped addresses are not this
+  const next = records.find((r) => r.key === by);
+  return !!next && next.name === record.name && Date.parse(next.pairedAt) > Date.parse(record.pairedAt);
 }
 
 const HOSTS_INDEX = "rift.hosts";
@@ -109,7 +129,8 @@ export function isHostRecord(v: unknown): v is HostRecord {
     (h.notifications === undefined || typeof h.notifications === "boolean") &&
     (h.os === undefined || (typeof h.os === "string" && h.os.length <= 64)) &&
     (h.version === undefined || (typeof h.version === "string" && h.version.length <= 64)) &&
-    (h.seenAt === undefined || (typeof h.seenAt === "number" && Number.isSafeInteger(h.seenAt) && h.seenAt >= 0))
+    (h.seenAt === undefined || (typeof h.seenAt === "number" && Number.isSafeInteger(h.seenAt) && h.seenAt >= 0)) &&
+    (h.replacedBy === undefined || (typeof h.replacedBy === "string" && fromBase64Url(h.replacedBy)?.length === 32))
   );
 }
 

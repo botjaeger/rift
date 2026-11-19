@@ -31,6 +31,7 @@ function harness(typing = false, props: Record<string, unknown> = {}) {
     useCallback: (fn: unknown) => fn,
     useMemo: (fn: () => unknown) => fn(),
     useEffect: (effect: () => void | (() => void)) => effects.push(effect),
+    useLayoutEffect: (effect: () => void | (() => void)) => effects.push(effect),
   };
   const dependencies: Record<string, unknown> = {
     react,

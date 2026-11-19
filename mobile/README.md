@@ -314,7 +314,8 @@ card cannot answer (a password, other input, a view-only device), and from an al
   the program's scrolling area and below it (a title, an input box, a status line) stay where they
   are; the rows between scroll as a native list with its momentum, and more rows are asked for as
   each batch comes in until eight screens (`PAGE_READ_AHEAD`) wait past the view toward an edge
-  whose end is not reached, so a flick finds them there. Half a second after scrolling stops the computer moves the program there, so
+  whose end is not reached, or, for a faster flick, what it covers in the 2.5 s a batch takes
+  (`PAGE_JOB_MS`), so a flick finds them there. Half a second after scrolling stops the computer moves the program there, so
   keys and its screen carry on where the view is. New output where the program is ends the page
   (the live screen comes back); a program whose screen does not scroll like a document (htop, a
   menu) answers `flat` and keeps the wheel. A page that stopped growing (`stopped`: a screen the
@@ -455,7 +456,14 @@ with Face ID** (the device's own name for it).
   (`<r>/connect?id=<routing id>`). Host status and the pane banner name the path
   ("LAN 192.168.1.29", "Relay relay.example.com"). A LAN address that answers with
   another key than the paired one is skipped; the host stops with "key mismatch" only when the
-  relay, or every path, does. A network change tries it again.
+  relay, or every path, does. A network change tries it again. When the key that answered is
+  another paired computer's of the same name, paired later, and proven (the rest of its
+  handshake message decrypts with it), this is an old pairing of a computer paired again
+  (`replacedPairing`): after a round without a welcome it stops for good, is remembered
+  (`replacedBy`), is not tried at launch or reopened by a cold start, and its card says "Paired
+  again · this is the old pairing" over Unpair. Each try would be a failed handshake the
+  computer counts against this phone's address (10 a minute, then a minute refused), which
+  shuts out the new pairing too.
 - The computer's addresses follow it: each `welcome` names where it can be reached now (it moves
   between networks, and the pairing code's addresses go stale), stored first with the host, the
   older ones after (4 in all). Over the relay, each new one is opened beside it; the first that

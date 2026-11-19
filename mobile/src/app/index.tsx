@@ -8,7 +8,7 @@ import { homeChoiceLabel, homeRows, homeSummary, idleSince, quickChoices, sameTa
 import { canOperate, type HostView } from "@/fleet";
 import { needsAuthBeforeRun } from "@/lock";
 import { authenticate, fleet, useApp } from "@/runtime";
-import { restoreTarget } from "@/stores";
+import { replacedPairing, restoreTarget } from "@/stores";
 import { Tile } from "@/ui/Avatar";
 import { Button } from "@/ui/Button";
 import { lineColor } from "@/ui/ConnectionSheet";
@@ -152,7 +152,7 @@ function TabRowBody({ row, host, last, answerHere }: TabRowProps) {
   );
 }
 
-function HostCard({ host, rows, now, answerHere, twin }: { host: HostView; rows: TabRow[]; now: number; answerHere: boolean; twin: boolean }) {
+function HostCard({ host, rows, now, answerHere, twin, replaced }: { host: HostView; rows: TabRow[]; now: number; answerHere: boolean; twin: boolean; replaced: boolean }) {
   const colors = useColors();
   const styles = useStyles();
   const router = useRouter();
@@ -162,14 +162,14 @@ function HostCard({ host, rows, now, answerHere, twin }: { host: HostView; rows:
   const online = host.conn.status === "open";
   const failed = host.conn.status === "failed";
   const tabs = host.windows.reduce((n, w) => n + w.tabs.length, 0);
-  const line = hostLine(host.conn, now, online ? tabs : null, lastSeenAt(host));
+  const line = hostLine(host.conn, now, online ? tabs : null, lastSeenAt(host), replaced);
   // the card's line stays grey when it cannot reach the computer: its fixes are the rows under it
   const lineTint = line.tone === "bad" ? colors.textMuted : lineColor(colors)[line.tone];
   // another pairing has the same name: each card says when it was paired, which tells them apart
   const paired = twin ? pairedText(host.record.pairedAt, now) : "";
   const lineText = paired ? `${line.text} · ${paired}` : line.text;
   // a computer that cannot be reached offers its fixes in place: Try again, and Unpair (an old pairing)
-  const unreachable = (failed || host.conn.status === "closed") && !updating(host.conn);
+  const unreachable = (failed || host.conn.status === "closed" || (replaced && !online && host.conn.status !== "connecting")) && !updating(host.conn);
   const shown = homeRows(rows);
   // the permission of this connection, else the one stored at pairing
   const viewOnly = !canOperate(host);
@@ -331,9 +331,11 @@ export default function PortalsScreen() {
     if (restored || !s.ready) return;
     restored = true;
     if (path !== "/") return;
+    // never to an old pairing of a computer paired again: it does not connect on its own
+    const all = s.hosts.map((h) => h.record);
     const target = restoreTarget(
       s.lastView,
-      s.hosts.map((h) => h.record),
+      all.filter((r) => !replacedPairing(r, all)),
     );
     if (!target || target.pane === null) return;
     router.push({ pathname: "/host/[key]/pane/[id]", params: { key: target.host, id: String(target.pane), restored: "1" } });
@@ -343,6 +345,7 @@ export default function PortalsScreen() {
 
   const rowsOf = (h: HostView) => all.find((c) => c.host.record.key === h.record.key)?.rows ?? [];
   const twin = (h: HostView) => s.hosts.some((o) => o !== h && o.record.name === h.record.name);
+  const records = s.hosts.map((h) => h.record);
   return (
     <View style={styles.page}>
       <View style={[styles.header, { paddingTop: headerTop(insets.top) }]}>
@@ -377,7 +380,7 @@ export default function PortalsScreen() {
           </View>
         ) : null}
         {s.hosts.map((h) => (
-          <HostCard key={h.record.key} host={h} rows={rowsOf(h)} now={now} answerHere={!multi} twin={twin(h)} />
+          <HostCard key={h.record.key} host={h} rows={rowsOf(h)} now={now} answerHere={!multi} twin={twin(h)} replaced={replacedPairing(h.record, records)} />
         ))}
       </ScrollView>
     </View>

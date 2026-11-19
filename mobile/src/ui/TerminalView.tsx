@@ -1,6 +1,6 @@
 import * as Clipboard from "expo-clipboard";
 import { useFocusEffect } from "expo-router";
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import {
   AccessibilityInfo,
   AppState,
@@ -50,7 +50,7 @@ import { RUN_BOLD, RUN_ITALIC, RUN_STRIKE, RUN_UNDERLINE, type ScreenRun } from 
 import { authenticate, fleet, useApp } from "@/runtime";
 import { useActionScope } from "./useActionScope";
 import { DRAG_SLOP, DragVelocity, dragLines, dragScrollsPane, Fling, ScrollCoalescer } from "@/scroll";
-import { aheadRows, edgeToAsk, liveMatches, mayAskPage, mergePage, PAGE_AUTO_RETRIES, PAGE_RETRY_MS, pageBody as stitchedBody, pageComplete, pageFixed, pageUsable, wheelInstead, type StitchPage } from "@/stitch";
+import { aheadRows, edgeToAsk, liveMatches, mergePage, nextSpeed, PAGE_FLOW, pageAsking, pageExpire, pageFlow, pageToShow, pageBody as stitchedBody, type PageEffect, type PageEvent, type PageFlow, type ScrollSpeed, pageComplete, pageFixed, pageUsable, wheelInstead, type StitchPage } from "@/stitch";
 import { composite, HISTORY_PAGE, missing, nextCache, withPage, type HistoryCache } from "@/history";
 import { draftKey } from "@/fleet";
 import { pending, PENDING_FULL, readClipboard, type AttachRules, type Attached } from "@/pending";
@@ -102,8 +102,6 @@ const MOUNT_STEP = 256;
 const MOUNT_MS = 60;
 /** After a stitched page's scrolling stops, how long before the program is moved there. */
 const SEEK_AFTER_MS = 500;
-/** A page_ahead unanswered this long was lost (the connection dropped): another may go out. */
-const PAGE_REPLY_MS = 8000;
 /** A stitched page's parts carry no links (a tap there neither opens one nor clicks). */
 const NO_SCREEN_LINKS: readonly ScreenLink[] = [];
 /** A `history` page that got no answer is asked for again after this long. */
@@ -254,12 +252,15 @@ const HistoryChunk = memo(
     bg: string;
   }) {
     const links = useMemo(() => linksByRow(screenLinks(rows, cols), rows.length), [rows, cols]);
+    // its own view, never flattened: rows added to a stitched page then add views beside ~90
+    // chunks instead of thousands of rows, so a batch is laid out in a constant time (a page of
+    // 4500 rows took 1.9 s a batch with the rows straight in the list, 0.7 s like this)
     return (
-      <>
+      <View collapsable={false}>
         {rows.map((runs, i) => (
           <Row key={i} runs={runs} cursorCol={null} fontSize={fontSize} width={width} rule={rules[i] ?? null} fg={fg} bg={bg} links={links[i] ?? NO_LINKS} light />
         ))}
-      </>
+      </View>
     );
   },
   (a, b) =>
@@ -901,31 +902,39 @@ export function TerminalView({
   const pageNow = useRef<{ shape: string; page: StitchPage | null }>(kept);
   const holdPage = (next: { shape: string; page: StitchPage | null }) => {
     pageNow.current = next;
-    setKept(next);
+    // rows still on their way: the view keeps the page it scrolls (pageToShow)
+    setKept((k) => {
+      const shown = k.shape === next.shape ? k.page : null;
+      const page = pageToShow(shown, next.page);
+      return page === shown && k.shape === next.shape ? k : { shape: next.shape, page };
+    });
   };
-  // when a page_ahead went out and is not answered yet (one at a time; the computer refuses a
-  // second); a reply lost with the connection counts as none after PAGE_REPLY_MS
-  const askedAt = useRef<number | null>(null);
-  // when a page_ahead was last refused (not for a job already running): the wheel takes over
-  const refusedAt = useRef(-Infinity);
-  const asking = () => askedAt.current !== null && Date.now() - askedAt.current < PAGE_REPLY_MS;
-  // when the last `stopped` came: stitching is asked to go on after a pause (mayAskPage)
-  const stoppedAt = useRef(0);
+  // where asking for rows stands (pageFlow): the request on its way, the last refusal and
+  // `stopped`, the asks made without the finger
+  const flow = useRef<PageFlow>(PAGE_FLOW);
+  const step = (ev: PageEvent): PageEffect => {
+    const [next, fx] = pageFlow(flow.current, ev);
+    flow.current = next;
+    return fx;
+  };
+  const asking = () => pageAsking(flow.current, Date.now());
   // a stopped page is asked to go on once the pause passed, without another drag (Android sends
   // no scroll at an edge, so the finger there asks nothing): PAGE_AUTO_RETRIES in a row at most,
   // counted again from the next drag
   const retryTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const autoRetries = useRef(0);
   const retryLater = useRef<() => void>(() => {});
   useEffect(() => () => clearTimeout(retryTimer.current), []);
   // a page that came in: the program sits at its far end, the view may be elsewhere
   const seekLater = useRef<() => void>(() => {});
-  useEffect(() => {
+  // before the scroller reports its new content size (a later effect left the page before it,
+  // and rows that came in above moved the view to the page's new top instead of keeping its row)
+  useLayoutEffect(() => {
     pageRef.current = page;
+    step({ e: "drawn" });
   });
   useEffect(() => {
     shapeRef.current = pageShape;
-    askedAt.current = null;
+    step({ e: "shape" });
   }, [pageShape]);
   useEffect(
     () =>
@@ -934,28 +943,20 @@ export function TerminalView({
         const held = pageNow.current;
         const next = mergePage(held.shape === shape ? held.page : null, msg);
         clearTimeout(retryTimer.current);
-        if (msg.state === "stopped") {
-          stoppedAt.current = Date.now();
-          // a little past the pause: a timer that fires a moment early is not refused
-          retryTimer.current = setTimeout(() => retryLater.current(), PAGE_RETRY_MS + 100);
-        } else if (msg.state === "ok") autoRetries.current = 0;
+        const now = Date.now();
+        const fx = step({ e: "page", state: msg.state, complete: pageComplete(next), now });
+        if (fx.retryAt !== undefined) retryTimer.current = setTimeout(() => retryLater.current(), fx.retryAt - now);
         holdPage({ shape, page: next });
-        if (pageComplete(next) && askedAt.current !== null) {
-          askedAt.current = null;
-          seekLater.current();
-        }
+        if (fx.seek) seekLater.current();
       }),
     [hostKey, paneId],
   );
   const paging = canStitch && pageUsable(page);
   const askPage = (dir: "up" | "down") => {
     const p = pageRef.current;
-    if (asking() || !mayAskPage(p, Date.now(), stoppedAt.current)) return;
-    askedAt.current = Date.now();
+    if (!step({ e: "ask", page: p, now: Date.now() }).send) return;
     void fleet.pageAhead(hostKey, paneId, p?.epoch ?? 0, dir, aheadRows(p, liveScreen?.rows ?? 24)).then((r) => {
-      if (r.ok) return;
-      askedAt.current = null;
-      if (r.code !== "busy") refusedAt.current = Date.now();
+      step({ e: "reply", ok: r.ok, busy: !r.ok && r.code === "busy", now: Date.now() });
     });
   };
   const pageScroller = useRef<ScrollView>(null);
@@ -975,18 +976,25 @@ export function TerminalView({
     const at = p.top + Math.round(pageView.current.y / rowHeight.current);
     return Math.max(p.top, Math.min(at, p.bottom - h));
   };
+  // how fast the page scrolls: a flick is asked ahead of by what it covers while rows come
+  const speed = useRef<ScrollSpeed | null>(null);
+  const liveSpeed = () => {
+    const s = speed.current;
+    return s && Date.now() - s.t <= 200 ? s.v : 0;
+  };
   const onPageScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, layoutMeasurement, contentSize } = e.nativeEvent;
     pageView.current = { ...pageView.current, y: contentOffset.y, viewH: layoutMeasurement.height, contentH: contentSize.height };
+    speed.current = nextSpeed(speed.current, contentOffset.y, Date.now());
     clearTimeout(seekTimer.current);
     const p = pageRef.current;
     if (!p) return;
-    const dir = edgeToAsk(p, contentOffset.y, layoutMeasurement.height, contentSize.height);
+    const dir = edgeToAsk(p, contentOffset.y, layoutMeasurement.height, contentSize.height, speed.current.v);
     if (dir) askPage(dir);
   };
   // a drag starts (at an edge too, where no scroll follows): the page is asked for there
   const onPageDrag = () => {
-    autoRetries.current = 0;
+    step({ e: "drag" });
     const p = pageRef.current;
     const v = pageView.current;
     const dir = p && edgeToAsk(p, v.y, v.viewH, v.contentH);
@@ -996,11 +1004,9 @@ export function TerminalView({
     retryLater.current = () => {
       const p = pageRef.current;
       const v = pageView.current;
-      if (!p || !pageUsable(p) || autoRetries.current >= PAGE_AUTO_RETRIES) return;
+      if (!p || !pageUsable(p)) return;
       const dir = edgeToAsk(p, v.y, v.viewH, v.contentH);
-      if (!dir) return;
-      autoRetries.current += 1;
-      askPage(dir);
+      if (dir && step({ e: "retry" }).ask) askPage(dir);
     };
   });
   // scrolling stopped: the program goes where the view is, so keys and its screen carry on there
@@ -1045,12 +1051,14 @@ export function TerminalView({
       const y = v.y + (v.top - p.top) * h;
       pageScroller.current?.scrollTo({ y, animated: false });
       pageView.current = { ...v, y, top: p.top };
+      // the jump is not the finger's: the speed carries on from the new position
+      if (speed.current) speed.current = { ...speed.current, y: speed.current.y + (y - v.y) };
     }
     // rows came in: more are asked for until PAGE_READ_AHEAD screens wait past the view (the
     // program is moved back to the view once they stop: the seek waits while one is asked)
     const now = pageView.current;
     if (p.state !== "ok" || !pageUsable(p) || now.viewH <= 0) return;
-    const dir = edgeToAsk(p, now.y, now.viewH, contentH);
+    const dir = edgeToAsk(p, now.y, now.viewH, contentH, liveSpeed());
     if (dir) askPage(dir);
   };
   // The program drew something else where it is (new output): the page no longer says what is
@@ -1281,8 +1289,9 @@ export function TerminalView({
     // request refused, or unanswered): a drag always moves something
     if (canStitch && page === null) {
       // a request that got no answer at all (the connection dropped) is asked again
-      if (askedAt.current !== null && !asking()) askedAt.current = null;
-      if (!wheelInstead(Date.now(), askedAt.current, refusedAt.current)) {
+      const now = Date.now();
+      flow.current = pageExpire(flow.current, now);
+      if (!wheelInstead(now, flow.current.asked, flow.current.refused)) {
         askPage(dy > 0 ? "up" : "down");
         return;
       }
