@@ -6,6 +6,18 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.9.0 · update 11 — 2026-11-19
+
+A container list with one container reads as a list, and a cut line says it goes on.
+
+### Fixed
+
+- **`docker ps` with one container is a list** — A table with a single row showed only its
+  header, cut short. It now shows as a list with the container's name and status, like a
+  longer one.
+- **A long first line says it continues** — When a command's first line is longer than the
+  card's two rows, "Line continues" shows under it. Tap the card to read the whole output.
+
 ## 0.9.0 · update 10 — 2026-11-18
 
 Scrolling a full-screen program always moves, and long conversations scroll back much further.
