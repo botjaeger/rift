@@ -8,6 +8,21 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.30.5 — 2026-11-19
+
+### Improved
+
+- **Scrolling a full-screen program from your phone loads older lines faster** — Your phone
+  gets its first lines of `less`, `man` or Claude Code in under half a second, and each
+  further batch of about a thousand lines in about two seconds instead of three. The first
+  swipe no longer waits a moment and tries again.
+
+### Fixed
+
+- **A long link that Claude Code wraps onto the next line is one link** — Only the first line
+  of the link was coloured and could be clicked, and clicking it opened a cut-off address.
+  Both lines are now the link, and a click opens the whole address.
+
 ## 0.30.4 — 2026-11-18
 
 ### Fixed

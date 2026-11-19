@@ -6,6 +6,24 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.9.0 · update 12 — 2026-11-19
+
+Older lines of a full-screen program are ready when you flick, and an old pairing no longer locks you out.
+
+### Improved
+
+- **Flicking up through a full-screen program keeps going** — In `less`, `man` or Claude Code,
+  the next lines are asked for sooner the faster you flick, so they are there when you get to
+  them instead of the scrolling stopping at the top to wait. Each new batch also appears faster
+  however long the page already is.
+
+### Fixed
+
+- **An old pairing no longer locks you out of your computer** — If you paired a computer again,
+  its old card kept trying to connect, and after a few app launches the computer refused this
+  phone for a minute, the new pairing too ("Can’t reach your computer"). The old card now
+  stops trying and says "Paired again · this is the old pairing", with Unpair under it.
+
 ## 0.9.0 · update 11 — 2026-11-19
 
 A container list with one container reads as a list, and a cut line says it goes on.
