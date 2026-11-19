@@ -1332,13 +1332,105 @@ fn urls_on_row(g: &CellGrid, scrolled: u64, abs: u64) -> Vec<(usize, usize, Stri
     let cols = g.columns();
     let (text, first) = wrapped_line(g, scrolled, abs);
     let start = (abs - first) as usize * cols;
-    urls_in(text.trim_end_matches(' '))
+    let soft: Vec<_> = urls_in(text.trim_end_matches(' '))
         .into_iter()
         .filter_map(|(col, len, url)| {
             let (s, e) = (col.max(start), (col + len).min(start + cols));
             (s < e).then(|| (s - start, e - s, url))
         })
-        .collect()
+        .collect();
+    let Some(mut hard) = hard_wrapped_urls(g, scrolled, abs) else {
+        return soft;
+    };
+    // the row's other links stay; its share of a joined one replaces the cut piece
+    for s in soft {
+        if !hard.iter().any(|h| s.0 < h.0 + h.1 && h.0 < s.0 + s.1) {
+            hard.push(s);
+        }
+    }
+    hard.sort_by_key(|h| h.0);
+    hard
+}
+
+/// Columns in from the right edge within which a row counts as filled to
+/// it: a program that wraps its own lines breaks a word too long for one
+/// there (Claude Code leaves a column or two).
+const HARD_WRAP_SLACK: usize = 4;
+
+/// One char per cell of absolute row `abs` (so string positions are
+/// columns); `None` off the grid.
+fn row_chars(g: &CellGrid, scrolled: u64, abs: u64) -> Option<String> {
+    let rel = abs as i64 - scrolled as i64;
+    if rel < -(g.history_size() as i64) || rel >= g.screen_lines() as i64 {
+        return None;
+    }
+    let row = &g[Line(rel as i32)];
+    Some((0..g.columns()).map(|c| row[Column(c)].c).collect())
+}
+
+/// What a program's own line wrap carried onto absolute row `abs` (it
+/// writes the rest of a long word on the next row, indented, instead of
+/// letting the terminal soft-wrap it: Claude Code does): (indent, token).
+/// The row above reaches the right edge with no blank at its end and does
+/// not soft-wrap; this one is indented, then a run of URL characters.
+fn hard_wrap_rest(g: &CellGrid, scrolled: u64, abs: u64) -> Option<(usize, String)> {
+    const STOP: &[char] = &[' ', '\t', '"', '\'', '<', '>', ')', ']', '}', '`'];
+    if abs == 0 || row_wraps(g, scrolled, abs - 1) != Some(false) {
+        return None;
+    }
+    let above = row_chars(g, scrolled, abs - 1)?;
+    if above.trim_end_matches(' ').chars().count() + HARD_WRAP_SLACK < g.columns() {
+        return None;
+    }
+    let here = row_chars(g, scrolled, abs)?;
+    let indent = here.chars().take_while(|c| *c == ' ').count();
+    let token: String = here
+        .chars()
+        .skip(indent)
+        .take_while(|c| !STOP.contains(c))
+        .collect();
+    (indent > 0 && !token.is_empty()).then_some((indent, token))
+}
+
+/// URLs on absolute row `abs` when it is part of a line the program wrapped
+/// itself ([`hard_wrap_rest`]): the URL whole, from its first row on, and
+/// this row's share of it (col, len, url). `None` when no such wrap touches
+/// the row. Looks at most 8 rows each way.
+fn hard_wrapped_urls(g: &CellGrid, scrolled: u64, abs: u64) -> Option<Vec<(usize, usize, String)>> {
+    const SPAN: u64 = 8;
+    let mut first = abs;
+    while abs - first < SPAN && hard_wrap_rest(g, scrolled, first).is_some() {
+        first -= 1;
+    }
+    let mut last = abs;
+    while last - abs < SPAN && hard_wrap_rest(g, scrolled, last + 1).is_some() {
+        last += 1;
+    }
+    if first == last {
+        return None;
+    }
+    // the joined line, and where each row's part is in it: (row, at, col, len)
+    let head = row_chars(g, scrolled, first)?
+        .trim_end_matches(' ')
+        .to_string();
+    let mut parts = vec![(first, 0usize, 0usize, head.chars().count())];
+    let mut joined = head;
+    for r in first + 1..=last {
+        let (indent, token) = hard_wrap_rest(g, scrolled, r)?;
+        let n = token.chars().count();
+        parts.push((r, joined.chars().count(), indent, n));
+        joined.push_str(&token);
+    }
+    let &(_, at, col, n) = parts.iter().find(|p| p.0 == abs)?;
+    Some(
+        urls_in(&joined)
+            .into_iter()
+            .filter_map(|(s, len, url)| {
+                let (a, b) = (s.max(at), (s + len).min(at + n));
+                (a < b).then(|| (col + a - at, b - a, url))
+            })
+            .collect(),
+    )
 }
 
 /// Path-like tokens ([`path_tokens`]) that start on absolute row `abs` of
@@ -4429,6 +4521,54 @@ mod tests {
             urls_on_row(t.grid(), 0, 3),
             vec![(2, 9, "https://b".to_string())]
         );
+    }
+
+    #[test]
+    fn a_url_the_program_wrapped_itself_onto_an_indented_row_is_one_link() {
+        use rift_pty::alacritty_terminal::term::{Config, test::TermSize};
+        let mut t = rift_pty::alacritty_terminal::term::Term::new(
+            Config::default(),
+            &TermSize::new(24, 7),
+            Noop,
+        );
+        let g = t.grid_mut();
+        // Claude Code: the message row ends at the edge, the rest of the
+        // link goes on the next row under the text, no soft wrap
+        for (r, text) in [
+            "❯ https://x.com/abcdefg",
+            "  -hij/edit to https://b",
+            "see https://c.io",
+            "  more words here",
+            "❯ https://y.com/abcdefg",
+            "-not-indented",
+            "",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            for (c, ch) in text.chars().enumerate() {
+                g[Line(r as i32)][Column(c)].c = ch;
+            }
+        }
+        let url = "https://x.com/abcdefg-hij/edit".to_string();
+        assert_eq!(urls_on_row(t.grid(), 0, 0), vec![(2, 21, url.clone())]);
+        // its share of the link, and the row's own link after it
+        assert_eq!(
+            urls_on_row(t.grid(), 0, 1),
+            vec![(2, 9, url), (15, 9, "https://b".to_string())]
+        );
+        // a row that ends short of the edge is not continued
+        assert_eq!(
+            urls_on_row(t.grid(), 0, 2),
+            vec![(4, 12, "https://c.io".to_string())]
+        );
+        assert_eq!(urls_on_row(t.grid(), 0, 3), vec![]);
+        // nor is one followed by a row that is not indented
+        assert_eq!(
+            urls_on_row(t.grid(), 0, 4),
+            vec![(2, 21, "https://y.com/abcdefg".to_string())]
+        );
+        assert_eq!(urls_on_row(t.grid(), 0, 5), vec![]);
     }
 
     #[test]

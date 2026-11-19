@@ -628,7 +628,9 @@ Each command becomes a block via shell-integration OSC 133 markers:
   `⏎` between lines.
 - **Links**: http(s) URLs and OSC 8 hyperlinks (`ls --hyperlink`, compilers,
   `delta`) draw in the accent color, as in Warp; under the pointer they turn
-  lighter and underlined. A URL soft-wrapped onto the next rows is one link.
+  lighter and underlined. A URL soft-wrapped onto the next rows is one link,
+  and so is one a program wrapped onto the next row itself, indented (Claude
+  Code).
   Links work on the alternate screen too (Claude Code, Codex, vim). The
   pointer turns into a hand over a link, and resting on one shows a tooltip
   with its target and `⌘ Click`. A plain click shows that tooltip at once

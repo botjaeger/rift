@@ -377,7 +377,9 @@ whole buffer.
   and show a hand and a tooltip with their target; a plain click shows it or
   opens the link (`link_click`), also over a program that tracks the mouse
   (Claude Code, Codex) and on the alternate screen. A URL soft-wrapped onto
-  the next rows is one link.
+  the next rows is one link, and so is one the program wrapped itself
+  (Claude Code): a row that reaches the right edge (within 4 columns) and an
+  indented next row that goes on with the URL's characters.
 - ⌘-click opens URLs, OSC 8 hyperlinks and existing file paths (see ui.md);
   files and folders open where `link_editor` says (default app, the viewer
   pane or an installed editor), and the explorer / review ↗ follow
