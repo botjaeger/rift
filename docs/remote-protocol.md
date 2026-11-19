@@ -994,6 +994,9 @@ scrolls natively.
   pane, `forbidden` from a `view` device, `rate` past 5 a second), then
   answered with `page` messages: the whole page when it is new, else the rows
   it added, at most 200 rows each (`from`, `lines`); a seek carries no rows.
+  Rows added at both ends (a held-tall screen also shows a few new rows on
+  the side not asked for) go as two runs of messages, never as one span over
+  the rows the phone already has.
 - `epoch` 0, or one the gateway no longer holds, or a screen that shows no
   part of the page (the program moved, or drew something else) starts a new
   page from the screen as it is, with a new `epoch`.
@@ -1012,7 +1015,11 @@ scrolls natively.
   From the first 8 screens it learns the area: the rows whose text moves
   from one screen to the next (a sticky header, a "jump to bottom" hint, a
   status line change in place and stay out) and the columns that change,
-  widened to the screen's edges or a pane border (`│`). A screen joins the
+  widened to the screen's edges or a pane border (`│`). Screens at the start
+  that join none after them are left out and the page starts at the first
+  that does (at least 3 left): a program may show its screen laid out for
+  the size before the phone's until the first wheel event redraws it (less).
+  A screen joins the
   page only past an overlap of at least 4 rows with the page's end, or is
   found inside the page; it never adds wrong rows. A screen too far to join
   (Claude Code jumps tens or hundreds of rows now and then, laying a long
@@ -1026,8 +1033,12 @@ scrolls natively.
   pane's window is not in use, else it goes on at the pane's own size): the
   program then draws up to 1000 rows of its document at once, a wheel step
   brings hundreds of rows, and a screen that jumped still has rows in common
-  with the page. Measured on Claude Code: about 1250 rows a job of 1.5 to 3 s
-  (at the pane's own size: about 90 rows a second). There it first takes two
+  with the page. A step there turns at most 333 wheel lines (`TALL_STEP_LINES`,
+  a third of the tall screen, in `scroll`s of 50), so a program that moves one
+  row a line brings a third of the screen a step too. Measured on Claude
+  Code: about 1250 rows a job of 1.5 to 3 s (at the pane's own size: about 90
+  rows a second); on less, about 1160 rows a job of 1.9 to 2.4 s (at 100
+  lines a step it was 3.2 s). There it first takes two
   small steps (1 line, then 2): a program that draws a taller screen's rows
   late shows them after the first (Claude Code), and the two screens tell
   which rows scroll at that height, which is not the short screen's area

@@ -141,6 +141,11 @@ pub const STITCH_LEARN_FRAMES: usize = 8;
 /// a second), so a step brings hundreds of rows and a program that jumps
 /// still overlaps the page.
 pub const TALL_ROWS: u16 = 1000;
+/// Most wheel lines one step of a tall stitch job turns: a third of
+/// [`TALL_ROWS`], the rows a step aims for, so a program that moves one row
+/// a line (less, man) brings a third of the screen a step too, not
+/// 2 × [`MAX_SCROLL_LINES`] (100 rows, 180 ms a step: 3 s a thousand rows).
+pub const TALL_STEP_LINES: i32 = TALL_ROWS as i32 / 3;
 /// How long a pane stays tall without [`Source::tall`] being called again
 /// (a gateway that stopped mid-job gives the pane back).
 pub const TALL_LEASE: Duration = Duration::from_secs(8);

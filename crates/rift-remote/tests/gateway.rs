@@ -68,6 +68,12 @@ struct State {
     tracking: Vec<u64>,
     /// What `scroll` was told: (pane, lines, operate).
     scrolls: Vec<(u64, i32, bool)>,
+    /// `screen_reads`' length at each `scroll`: scrolls with no read between
+    /// them are one step of a stitch job.
+    scroll_reads: Vec<usize>,
+    /// A program that shows its document laid out for another size until the
+    /// first wheel event redraws it (less after a resize).
+    stale_layout: bool,
     /// What `upload` received: (pane, device name, kind, bytes).
     uploads: Vec<(u64, String, ImageKind, Vec<u8>)>,
     /// The newest copy a program made: (number, text).
@@ -414,6 +420,13 @@ impl Source for Fake {
             let tick = reads / if st.ticking { 25 } else { 1000 };
             let rows = st.doc_rows(pane);
             let mut s = doc_screen(lines, *top, tick, rows);
+            if st.stale_layout {
+                // the document's rows, cut elsewhere (the panel beside them as ever)
+                for row in &mut s.lines[1..rows - 1] {
+                    let t = format!("~{}", row[0].text);
+                    row[0].text = t.chars().take(30).collect();
+                }
+            }
             // rows a late viewer has not drawn yet: the ones a taller screen added on top
             if let Some(&drawn) = st.drawn_rows.get(&pane).filter(|&&d| st.late && d < rows) {
                 for row in &mut s.lines[1..rows - drawn + 1] {
@@ -436,6 +449,9 @@ impl Source for Fake {
             return Err(InputError::ViewOnly);
         }
         st.scrolls.push((pane, lines, operate));
+        let reads = st.screen_reads.len();
+        st.scroll_reads.push(reads);
+        st.stale_layout = false;
         let mut moved = lines as i64;
         if st.accelerate {
             if lines.abs() == 1 {
@@ -5600,6 +5616,70 @@ fn a_page_grows_by_hundreds_of_rows_a_step_with_the_pane_held_tall() {
     // a thousand rows in a handful of steps (three lines a step would take hundreds)
     let steps = st.scrolls.len() - before;
     assert!(steps <= 60, "{steps} wheel steps");
+}
+
+#[test]
+fn a_first_screen_laid_out_for_another_size_still_starts_a_page() {
+    let env = start(|_| {});
+    let doc = doc_lines(3000);
+    {
+        let mut st = env.fake.0.lock().unwrap();
+        st.docs.insert(12, (doc.clone(), 2000));
+        st.stale_layout = true;
+    }
+    let (_, mut ch, _) = env.pair(Permission::Operate);
+    put(
+        &mut ch,
+        json!({"t":"page_ahead","id":"t1","pane":12,"epoch":0,"dir":"up","rows":12}),
+    );
+    assert_eq!(ack(&recv_t(&mut ch, "ack")), (true, ""));
+    let got = pages(&mut ch);
+    // a page at once, not `stopped` for the phone to ask again after a pause
+    assert_eq!(got[0]["state"], "ok", "{}", got[0]);
+    // and none of the old layout's rows in it
+    for m in &got {
+        for t in page_text(m) {
+            assert!(!t.starts_with('~'), "{t}");
+        }
+    }
+}
+
+#[test]
+fn a_program_that_moves_one_row_a_line_brings_a_third_of_the_tall_screen_a_step() {
+    let env = start(|_| {});
+    let doc = doc_lines(5000);
+    {
+        let mut st = env.fake.0.lock().unwrap();
+        st.docs.insert(12, (doc, 4000));
+        st.can_hold = true;
+    }
+    let (_, mut ch, _) = env.pair(Permission::Operate);
+    let before = env.fake.0.lock().unwrap().scrolls.len();
+    let (_, got) = first_page_then(
+        &env,
+        &mut ch,
+        json!({"t":"page_ahead","id":"t2","pane":12,"dir":"up","rows":36}),
+    );
+    assert_eq!(got[0]["state"], "ok", "{}", got[0]);
+    assert!(got[0]["top"].as_i64().unwrap() <= -1000, "{}", got[0]);
+    let st = env.fake.0.lock().unwrap();
+    // the scrolls of one step: no screen read between them
+    let mut steps: Vec<i32> = Vec::new();
+    let mut last = None;
+    for (&(_, lines, _), &reads) in st.scrolls[before..].iter().zip(&st.scroll_reads[before..]) {
+        // `scroll` takes at most MAX_SCROLL_LINES a call
+        assert!(lines.abs() <= rift_remote::MAX_SCROLL_LINES, "{lines}");
+        if last == Some(reads) {
+            *steps.last_mut().unwrap() += lines;
+        } else {
+            steps.push(lines);
+        }
+        last = Some(reads);
+    }
+    // up to a third of the tall screen a step, not two scrolls' worth (100 lines)
+    let most = steps.iter().copied().max().unwrap_or(0);
+    assert!(most > 2 * rift_remote::MAX_SCROLL_LINES, "steps {steps:?}");
+    assert!(most <= rift_remote::TALL_STEP_LINES, "steps {steps:?}");
 }
 
 #[test]

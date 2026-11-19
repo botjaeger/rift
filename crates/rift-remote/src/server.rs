@@ -2815,6 +2815,10 @@ fn stitch_loop<S: Source>(shared: &Shared<S>, jobs: std::sync::mpsc::Receiver<St
             continue;
         };
         let (pane, client) = (job.pane, job.client);
+        let what = match job.kind {
+            StitchKind::Ahead { .. } => "ahead",
+            StitchKind::Seek { .. } => "seek",
+        };
         let started = Instant::now();
         // a job that panics must not end the worker (every later page_ahead would wait
         // for a page that never comes): the pane's page is dropped, its size given back,
@@ -2841,7 +2845,7 @@ fn stitch_loop<S: Source>(shared: &Shared<S>, jobs: std::sync::mpsc::Receiver<St
         }) = msgs.first()
         {
             log::debug!(
-                "remote: pane {pane}: page {epoch} {top}..{bottom} at {at} area {area:?} ends {ends:?} {state:?} in {:?}",
+                "remote: pane {pane}: {what}: page {epoch} {top}..{bottom} at {at} area {area:?} ends {ends:?} {state:?} in {:?}",
                 started.elapsed()
             );
         }
@@ -2948,7 +2952,8 @@ fn clamp_tall(mut s: Screen) -> Screen {
     s
 }
 
-/// One wheel step of a stitch job: `lines` toward `dir`.
+/// One wheel step of a stitch job: `lines` toward `dir`, in as many `scroll`s
+/// of at most [`MAX_SCROLL_LINES`] as it takes.
 fn wheel<S: Source>(
     shared: &Shared<S>,
     pane: u64,
@@ -2956,17 +2961,20 @@ fn wheel<S: Source>(
     dir: crate::stitch::Dir,
     lines: i32,
 ) -> bool {
-    let lines = match dir {
-        crate::stitch::Dir::Up => lines,
-        crate::stitch::Dir::Down => -lines,
+    let sign = match dir {
+        crate::stitch::Dir::Up => 1,
+        crate::stitch::Dir::Down => -1,
     };
-    match shared.source.scroll(pane, lines, operate) {
-        Ok(()) => true,
-        Err(e) => {
+    let mut left = lines.max(0);
+    while left > 0 {
+        let n = left.min(MAX_SCROLL_LINES);
+        if let Err(e) = shared.source.scroll(pane, sign * n, operate) {
             log::debug!("remote: pane {pane}: stitching stopped, the wheel was refused: {e:?}");
-            false
+            return false;
         }
+        left -= n;
     }
+    true
 }
 
 /// Hold `pane` tall and its screen once the program drew it, or none when
@@ -3090,7 +3098,7 @@ fn ahead_tall<S: Source>(
     want: usize,
     live: &Screen,
     ends: &mut [bool; 2],
-    new_rows: &mut Option<(i64, i64)>,
+    new_rows: &mut NewRows,
 ) -> Option<PageState> {
     use crate::stitch::{Dir, Joined};
     if page.tall_failed() {
@@ -3114,9 +3122,7 @@ fn ahead_tall<S: Source>(
     let mut state = PageState::Ok;
     let mut note = |j: &Joined| {
         if let Joined::Added { from, count } = j {
-            let r = new_rows.get_or_insert((*from, *from + *count as i64));
-            r.0 = r.0.min(*from);
-            r.1 = r.1.max(*from + *count as i64);
+            new_rows.add(*from, *count);
         }
     };
     // the page's edge on the side asked for: what a step gained there (a tall
@@ -3181,12 +3187,8 @@ fn ahead_tall<S: Source>(
             state = PageState::Stopped;
             break;
         }
-        // a step may be more lines than one `scroll` takes
         let step = lines;
-        let rest = step - step.min(MAX_SCROLL_LINES);
-        if !wheel(shared, pane, operate, dir, step.min(MAX_SCROLL_LINES))
-            || (rest > 0 && !wheel(shared, pane, operate, dir, rest))
-        {
+        if !wheel(shared, pane, operate, dir, step) {
             state = PageState::Stopped;
             break;
         }
@@ -3225,7 +3227,8 @@ fn ahead_tall<S: Source>(
                 if let Some(aim) = (lines as usize * (h / 3).max(1)).checked_div(count) {
                     lines = aim
                         .min(lines as usize + (lines as usize / 2).max(1))
-                        .clamp(1, 2 * MAX_SCROLL_LINES as usize) as i32;
+                        .clamp(1, crate::TALL_STEP_LINES as usize)
+                        as i32;
                 }
             }
             // inside the rows the page holds: on toward its end in long steps
@@ -3234,7 +3237,7 @@ fn ahead_tall<S: Source>(
                     Dir::Up => page.at() - page.top(),
                     Dir::Down => page.bottom() - page.at() - h as i64,
                 };
-                lines = (left / 6).clamp(lines as i64, 2 * MAX_SCROLL_LINES as i64) as i32;
+                lines = (left / 6).clamp(lines as i64, crate::TALL_STEP_LINES as i64) as i32;
             }
             Joined::Unstitched => {
                 // too far for an overlap: back, and on in smaller steps
@@ -3325,6 +3328,43 @@ fn ahead_tall<S: Source>(
     Some(state)
 }
 
+/// A first page from `frames`, rested screens one step apart toward `dir`:
+/// the rows that scroll, and every screen joined. None when no rows scroll
+/// (the program does not move like a document). A program may show its
+/// first screen laid out for another size and draw it at the pane's only at
+/// the first wheel event (less after the phone fitted the pane): screens
+/// before that join none after it, so they are left out and the page starts
+/// at the first one that does (three screens at least). When none does, the
+/// page from all of them, stopped where they part.
+fn learn_page(
+    frames: &[crate::stitch::Frame],
+    dir: crate::stitch::Dir,
+) -> Option<(crate::stitch::Page, PageState)> {
+    use crate::stitch::{Joined, Page};
+    let area = crate::stitch::learn(frames)?;
+    let build = |frames: &[crate::stitch::Frame], area| {
+        let mut p = Page::new(area, &frames[0]);
+        let whole = frames[1..]
+            .iter()
+            .all(|f| p.extend(f, dir) != Joined::Unstitched);
+        (p, whole)
+    };
+    let (all, whole) = build(frames, area);
+    if whole {
+        return Some((all, PageState::Ok));
+    }
+    for start in 1..frames.len().saturating_sub(2) {
+        let rest = &frames[start..];
+        if let Some(area) = crate::stitch::learn(rest)
+            && let (p, true) = build(rest, area)
+        {
+            log::debug!("remote: stitching: the first {start} screens were drawn for another size");
+            return Some((p, PageState::Ok));
+        }
+    }
+    Some((all, PageState::Stopped))
+}
+
 fn frame_of(s: &Screen) -> crate::stitch::Frame {
     crate::stitch::Frame::new(&s.lines, s.rows, s.cols)
 }
@@ -3345,7 +3385,7 @@ fn run_stitch<S: Source>(shared: &Shared<S>, job: StitchJob) -> Vec<ServerMsg> {
         let page = p.page.take();
         page.filter(|_| keep)
     });
-    let mut new_rows: Option<(i64, i64)> = None;
+    let mut new_rows = NewRows::default();
     if let Some(page) = taken.as_mut() {
         match page.locate(&first_frame) {
             Some(i) => page.set_at(i),
@@ -3505,17 +3545,11 @@ fn run_stitch<S: Source>(shared: &Shared<S>, job: StitchJob) -> Vec<ServerMsg> {
                         if learning.len() < crate::STITCH_LEARN_FRAMES {
                             continue;
                         }
-                        let Some(area) = crate::stitch::learn(&learning) else {
+                        let Some((p, s)) = learn_page(&learning, dir) else {
                             state = PageState::Flat;
                             break;
                         };
-                        let mut p = Page::new(area, &learning[0]);
-                        for f in &learning[1..] {
-                            if p.extend(f, dir) == Joined::Unstitched {
-                                state = PageState::Stopped;
-                                break;
-                            }
-                        }
+                        state = s;
                         added = p.len() - p.height();
                         page = Some(p);
                         if state != PageState::Ok {
@@ -3593,9 +3627,7 @@ fn run_stitch<S: Source>(shared: &Shared<S>, job: StitchJob) -> Vec<ServerMsg> {
                                     ahead = (aim as i32).min(ahead + (ahead / 2).max(1));
                                 }
                                 added += count;
-                                let r = new_rows.get_or_insert((from, from + count as i64));
-                                r.0 = r.0.min(from);
-                                r.1 = r.1.max(from + count as i64);
+                                new_rows.add(from, count);
                             }
                             Joined::Same => {}
                             Joined::Unstitched => {
@@ -3608,15 +3640,9 @@ fn run_stitch<S: Source>(shared: &Shared<S>, job: StitchJob) -> Vec<ServerMsg> {
             }
             // the start reached before the area could be learned: learn from what there is
             if page.is_none() && learning.len() >= 3 && state == PageState::Ok {
-                match crate::stitch::learn(&learning) {
-                    Some(area) => {
-                        let mut p = Page::new(area, &learning[0]);
-                        for f in &learning[1..] {
-                            if p.extend(f, dir) == Joined::Unstitched {
-                                state = PageState::Stopped;
-                                break;
-                            }
-                        }
+                match learn_page(&learning, dir) {
+                    Some((p, s)) => {
+                        state = s;
                         page = Some(p);
                     }
                     None => state = PageState::Flat,
@@ -3635,13 +3661,39 @@ fn run_stitch<S: Source>(shared: &Shared<S>, job: StitchJob) -> Vec<ServerMsg> {
             }
         }
     }
-    let msgs = page_messages(pane, epoch, taken.as_ref(), fresh, new_rows, ends, state);
+    let msgs = page_messages(pane, epoch, taken.as_ref(), fresh, &new_rows, ends, state);
     let mut pages = shared.pages.lock().unwrap();
     if let Some(p) = pages.get_mut(&pane) {
         p.page = taken;
         p.ends = ends;
     }
     msgs
+}
+
+/// The rows a job added to a page, as separate spans (sorted, apart): a held-tall
+/// job adds rows at both ends of a page, and one span over both would send the
+/// whole page again.
+#[derive(Default, Debug, PartialEq)]
+struct NewRows(Vec<(i64, i64)>);
+
+impl NewRows {
+    /// `count` rows from `from` were added: joined with the spans they touch.
+    fn add(&mut self, from: i64, count: usize) {
+        if count == 0 {
+            return;
+        }
+        let (mut a, mut b) = (from, from + count as i64);
+        self.0.retain(|&(x, y)| {
+            let touches = x <= b && a <= y;
+            if touches {
+                a = a.min(x);
+                b = b.max(y);
+            }
+            !touches
+        });
+        self.0.push((a, b));
+        self.0.sort_unstable();
+    }
 }
 
 /// The `page` messages for a job's result: the whole page when it is new,
@@ -3652,7 +3704,7 @@ fn page_messages(
     epoch: u64,
     page: Option<&crate::stitch::Page>,
     fresh: bool,
-    new_rows: Option<(i64, i64)>,
+    new_rows: &NewRows,
     ends: [bool; 2],
     state: PageState,
 ) -> Vec<ServerMsg> {
@@ -3677,12 +3729,34 @@ fn page_messages(
         a.cols.start as u16,
         a.cols.end as u16,
     ];
-    let (from, to) = if fresh {
-        (p.top(), p.bottom())
+    let spans = if fresh {
+        vec![(p.top(), p.bottom())]
+    } else if new_rows.0.is_empty() {
+        vec![(p.at(), p.at())]
     } else {
-        new_rows.unwrap_or((p.at(), p.at()))
+        new_rows.0.clone()
     };
     let mut out = Vec::new();
+    for (from, to) in spans {
+        span_messages(&mut out, pane, epoch, p, area, from, to, ends, state);
+    }
+    out
+}
+
+/// The `page` messages carrying the page's rows `from..to` (one, without
+/// rows, for an empty span), appended to `out`.
+#[allow(clippy::too_many_arguments)]
+fn span_messages(
+    out: &mut Vec<ServerMsg>,
+    pane: u64,
+    epoch: u64,
+    p: &crate::stitch::Page,
+    area: [u16; 4],
+    from: i64,
+    to: i64,
+    ends: [bool; 2],
+    state: PageState,
+) {
     let mut at = from;
     loop {
         // at most PAGE_CHUNK rows, and at most PAGE_CHUNK_BYTES of them: a row of many
@@ -3715,7 +3789,6 @@ fn page_messages(
             break;
         }
     }
-    out
 }
 
 /// A `page` saying there is no page (`flat`, or the pane has no screen).
@@ -5032,7 +5105,15 @@ mod tests {
             },
             &Frame::new(&lines, 120, 300),
         );
-        let msgs = page_messages(12, 1, Some(&page), true, None, [false; 2], PageState::Ok);
+        let msgs = page_messages(
+            12,
+            1,
+            Some(&page),
+            true,
+            &NewRows::default(),
+            [false; 2],
+            PageState::Ok,
+        );
         assert!(msgs.len() > 1, "one {} byte message", frame(&msgs[0]).len());
         let mut next = 0i64;
         for m in &msgs {
@@ -5049,6 +5130,57 @@ mod tests {
             next += lines.len() as i64;
         }
         assert_eq!(next, 120);
+    }
+
+    #[test]
+    fn new_rows_keep_apart_spans_apart_and_join_the_ones_that_touch() {
+        let mut n = NewRows::default();
+        n.add(-40, 40);
+        n.add(100, 2);
+        assert_eq!(n.0, vec![(-40, 0), (100, 102)]);
+        // a run of rows added further up touches the first span
+        n.add(-90, 50);
+        assert_eq!(n.0, vec![(-90, 0), (100, 102)]);
+        // one that bridges both joins them
+        n.add(-5, 106);
+        assert_eq!(n.0, vec![(-90, 102)]);
+        n.add(7, 0);
+        assert_eq!(n.0, vec![(-90, 102)]);
+    }
+
+    #[test]
+    fn page_messages_send_only_the_rows_a_job_added_at_each_end() {
+        use crate::stitch::{Area, Frame, Page};
+        let lines: Vec<Vec<Run>> = (0..10)
+            .map(|r| {
+                vec![Run {
+                    text: format!("row {r}"),
+                    fg: None,
+                    bg: None,
+                    flags: 0,
+                }]
+            })
+            .collect();
+        let page = Page::new(
+            Area {
+                rows: 0..10,
+                cols: 0..20,
+            },
+            &Frame::new(&lines, 10, 20),
+        );
+        // rows 0..3 came in at the top and 8..10 at the bottom of a page the phone has
+        let mut added = NewRows::default();
+        added.add(0, 3);
+        added.add(8, 2);
+        let msgs = page_messages(12, 1, Some(&page), false, &added, [false; 2], PageState::Ok);
+        let sent: Vec<(i64, usize)> = msgs
+            .iter()
+            .map(|m| match m {
+                ServerMsg::Page { from, lines, .. } => (*from, lines.len()),
+                _ => panic!(),
+            })
+            .collect();
+        assert_eq!(sent, vec![(0, 3), (8, 2)]);
     }
 
     fn done_ids(msgs: &[ServerMsg]) -> Vec<u64> {
