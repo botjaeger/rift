@@ -1,6 +1,6 @@
 import { memo, useMemo, useState } from "react";
 import { ScrollView, Text, View, type LayoutChangeEvent } from "react-native";
-import { cardLine, moreLines, parseTable } from "@/paneView";
+import { cardLine, cardMore, moreLines, parseTable } from "@/paneView";
 import type { Block } from "@/protocol/types";
 import { CardFrame, CardHead } from "./BlockCards";
 import { Button } from "./Button";
@@ -98,7 +98,10 @@ export const BlockView = memo(function BlockView({ block, onActions, wrap, mark 
   const rows = useMemo(() => (block.dropped === 0 ? parseTable(block.output) : null), [block.dropped, block.output]);
   // searching: the line that matched, not one that only sits above it
   const line = cardLine(block.output, mark);
+  // the line runs past the card's two rows: the label says so
+  const [cut, setCut] = useState(false);
   const more = moreLines(block.output, block.dropped);
+  const below = cardMore(more, cut);
   const status = block.exit === null ? "done" : `✓ ${formatDuration(block.duration_ms)}`;
   const state = block.exit === null ? "finished" : "succeeded";
   return (
@@ -137,9 +140,20 @@ export const BlockView = memo(function BlockView({ block, onActions, wrap, mark 
         <Output text={block.output.trimEnd()} wrap={wrap} ground={colors.surface} size={11.5} lineHeight={17} mark={mark} />
       ) : line ? (
         <>
-          <SelectableText text={line} style={styles.line} lineHeight={17} lines={2} mark={mark} />
+          <View>
+            {/* the same line laid out unseen: more than two rows means the field cuts it */}
+            <Text
+              style={[styles.line, styles.probe]}
+              onTextLayout={(e) => setCut(e.nativeEvent.lines.length > 2)}
+              accessibilityElementsHidden
+              importantForAccessibility="no-hide-descendants"
+            >
+              {line}
+            </Text>
+            <SelectableText text={line} style={styles.line} lineHeight={17} lines={2} mark={mark} />
+          </View>
           {/* the rest is in the block sheet: the card says there is more to read there */}
-          {more ? <Text style={styles.more}>{more}</Text> : null}
+          {below ? <Text style={styles.more}>{below}</Text> : null}
         </>
       ) : null}
     </CardFrame>
@@ -155,6 +169,7 @@ const useStyles = makeStyles((colors) => ({
   thumb: { position: "absolute", top: 0, bottom: 0, borderRadius: 2, backgroundColor: colors.textMuted },
   // the first output line: JetBrains Mono 12/17 in the text colour (the New Blocks board)
   line: { fontFamily: mono, color: colors.text, fontSize: 12 },
+  probe: { position: "absolute", left: 0, right: 0, top: 0, opacity: 0, lineHeight: 17 },
   // "299 more lines": Inter 12 in the muted text colour, under the line
   more: { fontFamily: ui(400), color: colors.textMuted, fontSize: 12, lineHeight: 16, marginTop: 2 },
   // the list runs edge to edge in the card: its rows carry the card's 12 pt gutter

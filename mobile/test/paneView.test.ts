@@ -20,6 +20,7 @@ import {
   paneRows,
   paneState,
   parseTable,
+  cardMore,
   pinchZoom,
   sheetChip,
   liveBlock,
@@ -177,6 +178,17 @@ describe("parseTable", () => {
       { name: "web-7d9f", meta: "2/2 · 5h", state: "Running" },
     ]);
   });
+  it("reads a header and one row (docker ps -a with one container)", () => {
+    expect(parseTable(DOCKER.split("\n").slice(0, 2).join("\n"))).toEqual([{ name: "api-php", meta: "f96b9b3f · 9000", state: "Up 3 hours" }]);
+    // the one row misaligned is plain output
+    expect(parseTable("CONTAINER ID   IMAGE         PORTS   STATUS\nf96b9b3f4fcd   api-php      9000     Up")).toBeNull();
+  });
+  it("says a card line is cut, with or without more lines", () => {
+    expect(cardMore("1 more line", true)).toBe("Line continues · 1 more line");
+    expect(cardMore(null, true)).toBe("Line continues");
+    expect(cardMore("1 more line", false)).toBe("1 more line");
+    expect(cardMore(null, false)).toBeNull();
+  });
   it("keeps an empty middle column out of the meta", () => {
     const t = ["ID      NAME    PORTS   STATUS", "ab12    one             Up", "cd34    two     80      Up"].join("\n");
     expect(parseTable(t)?.map((r) => r.meta)).toEqual(["ab12", "cd34 · 80"]);
@@ -187,8 +199,8 @@ describe("parseTable", () => {
     // a header with two columns, or one lower-case
     expect(parseTable("NAME   AGE\na   1\nb   2")).toBeNull();
     expect(parseTable("Name   Ready   Status\na   1/1   Up\nb   1/1   Up")).toBeNull();
-    // a header and one row
-    expect(parseTable(DOCKER.split("\n").slice(0, 2).join("\n"))).toBeNull();
+    // a header alone
+    expect(parseTable(DOCKER.split("\n")[0]!)).toBeNull();
     expect(parseTable("")).toBeNull();
   });
   it("negative control: one misaligned row, or a stray line, makes it plain output", () => {

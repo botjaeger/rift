@@ -382,7 +382,7 @@ const HEADER_CELL = /^[A-Z][A-Z0-9_%/.-]*(?: [A-Z][A-Z0-9_%/.-]*)*$/;
 /**
  * Output that is a table (`docker ps`, `kubectl get pods`) as list rows, or null. Conservative:
  * the first line is a header of at least three upper-case column names set apart by two or more
- * spaces, at least two more lines follow, and on every one of them each column starts where the
+ * spaces, at least one more line follows (`docker ps -a` with one container), and on every one of them each column starts where the
  * header's does (the character before it is a space) with a non-empty first column. One line
  * that does not fit, a column that spills over its neighbour, or a right-aligned column makes
  * it plain output.
@@ -390,7 +390,7 @@ const HEADER_CELL = /^[A-Z][A-Z0-9_%/.-]*(?: [A-Z][A-Z0-9_%/.-]*)*$/;
 export function parseTable(output: string): ListRow[] | null {
   const lines = output.replace(/\r/g, "").split("\n");
   while (lines.length > 0 && lines.at(-1)!.trim() === "") lines.pop();
-  if (lines.length < 3 || lines.length - 1 > MAX_TABLE_ROWS) return null;
+  if (lines.length < 2 || lines.length - 1 > MAX_TABLE_ROWS) return null;
   const header = lines[0]!;
   const cells = [...header.matchAll(/\S+(?: \S+)*/g)];
   if (cells.length < 3 || cells.length > 12 || header.startsWith(" ")) return null;
@@ -464,6 +464,15 @@ export function moreLines(output: string, dropped: number): string | null {
   const n = nonEmpty(output).length + dropped - 1;
   if (n < 1) return null;
   return n === 1 ? "1 more line" : `${n.toLocaleString("en-US")} more lines`;
+}
+
+/**
+ * Under a card's first output line: `moreLines`, led by "Line continues" when that line is cut
+ * at the card's two rows (`cut`), so a clipped line never reads as whole. Null when nothing is hidden.
+ */
+export function cardMore(more: string | null, cut: boolean): string | null {
+  if (!cut) return more;
+  return more ? `Line continues · ${more}` : "Line continues";
 }
 
 /** The count under "Output ·": "1 line", "12 lines" (empty lines are not counted). */
