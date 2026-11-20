@@ -26743,7 +26743,12 @@ mod tests {
         let local = resolve_output_path(Some(d), false, "src/main.rs");
         assert_eq!(
             local,
-            Some(dir.join("src/main.rs").to_string_lossy().into_owned())
+            Some(
+                dir.join("src")
+                    .join("main.rs")
+                    .to_string_lossy()
+                    .into_owned()
+            )
         );
         // same names, output from another host: no local file
         assert_eq!(resolve_output_path(Some(d), true, "src/main.rs"), None);
