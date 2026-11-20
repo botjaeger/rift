@@ -8,6 +8,23 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.31.0 — 2026-11-20
+
+### New
+
+- **Click a file path to open it** — With *Clicking a link* set to *Open it*, a plain click on
+  a file path in a command's output opens the file in its default app, as a double-click in
+  Finder does. ⌘-click still opens it in Rift's file viewer. A path that Claude Code wraps
+  onto the next line is one path, and a click on either line opens it.
+- **CSV and TSV files as a table** — The file viewer shows `.csv` and `.tsv` files as a table:
+  the header stays at the top, columns line up, numbers align right and rows are numbered.
+  Switch between *Table* and *Raw* at the top of the viewer or from its ⋮ menu.
+
+### Fixed
+
+- **The file viewer's switch and scrollbar show in the light theme** — Both were white and
+  disappeared against a light background.
+
 ## 0.30.5 — 2026-11-19
 
 ### Improved
