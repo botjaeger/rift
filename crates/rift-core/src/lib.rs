@@ -44,6 +44,7 @@ pub mod ssh;
 pub mod sys;
 pub mod tab_clock;
 pub mod tab_color;
+pub mod table;
 pub mod theme;
 pub mod transcript;
 pub mod update;

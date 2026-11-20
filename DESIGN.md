@@ -364,8 +364,9 @@ No other animation. Motion never delays input.
   hand.
 - **File viewer header** (Warp's file pane): the same shaded bar with a file
   icon, the path centred in Inter 12, then a segmented **Rendered | Raw**
-  switch (Markdown only; 22 px tall, radius 4, 10 % white hairline; the
-  selected segment raised on 11 % white in `text_bright`, the other
+  switch (Markdown; **Table | Raw** for CSV / TSV; 22 px tall, radius 4,
+  10 % `fg` hairline; the selected segment raised on 11 % `fg` in
+  `text_bright`, the other
   `text_dim`), ⋮ and ×.
 - **Welcome list** (a fresh session): the 40 px app icon (`welcome::logo`,
   the *App icon* geometry), *New session* in Inter 17 semibold over

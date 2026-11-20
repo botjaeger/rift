@@ -1074,8 +1074,9 @@ struct WindowState {
     elapsed_minutes: Option<u64>,
     /// Where that tooltip's card and its button were drawn.
     tip_drawn: Option<crate::views::tooltip::Drawn>,
-    /// A plain press on a link, acted on at its release (`click_link`).
-    link_press: Option<(PaneId, String)>,
+    /// A plain press on a link or an existing file path, acted on at its
+    /// release (`click_link`).
+    link_press: Option<(PaneId, PressedLink)>,
     /// When a shown tooltip last went away (the next one shows at once).
     tip_hidden_at: Option<Instant>,
     /// A press, key or wheel hid it until the pointer moves to another control.
@@ -1187,6 +1188,14 @@ struct WindowState {
     /// windows have no real one, and a dragged tab's release is matched to
     /// the window under it (`tab_move`).
     headless_origin: (f64, f64),
+}
+
+/// What a plain press in output landed on (`App::press_link`).
+#[derive(Debug, Clone, PartialEq)]
+enum PressedLink {
+    Url(String),
+    /// An existing file or folder (resolved), printed in the output.
+    Path(String),
 }
 
 /// What a hint label acts on.
@@ -3479,7 +3488,7 @@ impl App {
 
     /// The file viewer's ⋮ menu.
     fn open_viewer_menu(&mut self, pos: (f32, f32)) {
-        let markdown = !self.win.viewer.markdown.is_empty();
+        let rendered_view = self.win.viewer.has_rendered();
         let mut items = vec![
             MenuItem::new("Insert path", MenuAction::ViewerInsertPath),
             MenuItem::new("Copy path", MenuAction::ViewerCopyPath),
@@ -3491,9 +3500,11 @@ impl App {
             MenuItem::new("Send to agent…", MenuAction::SendToAgent)
                 .enabled(self.win.send_source.is_some()),
         );
-        if markdown {
+        if rendered_view {
             items.push(if self.win.viewer.rendered {
                 MenuItem::new("Show raw", MenuAction::ViewerRendered(false))
+            } else if self.win.viewer.table.is_some() {
+                MenuItem::new("Show table", MenuAction::ViewerRendered(true))
             } else {
                 MenuItem::new("Show rendered", MenuAction::ViewerRendered(true))
             });
@@ -4035,8 +4046,22 @@ impl App {
     }
 
     /// A plain click (no drag) on a link: open it (`link_click = "open"`),
-    /// else show its tooltip at once, naming ⌘-click.
-    fn click_link(&mut self, pane_id: PaneId, url: &str) {
+    /// else show its tooltip at once, naming ⌘-click. On a file path
+    /// (`link_click = "open"` only): open it with the OS opener, the app
+    /// the system picks for the file (a folder in the file manager).
+    fn click_link(&mut self, pane_id: PaneId, pressed: &PressedLink) {
+        let url = match pressed {
+            PressedLink::Url(url) => url,
+            PressedLink::Path(path) => {
+                if self
+                    .path_under_mouse(pane_id)
+                    .is_some_and(|(p, _)| p == *path)
+                {
+                    self.open_target_external(path);
+                }
+                return;
+            }
+        };
         if self.url_under_mouse(pane_id).as_deref() != Some(url) {
             return;
         }
@@ -4053,11 +4078,22 @@ impl App {
         }
     }
 
-    /// A single plain press on a link: remembered until the release, which
-    /// acts on it unless the press became a drag (a selection).
+    /// A single plain press on a link (or, with `link_click = "open"`, an
+    /// existing file path): remembered until the release, which acts on it
+    /// unless the press became a drag (a selection).
     fn press_link(&mut self, pane_id: PaneId, clicks: u8) {
         self.win.link_press = (clicks == 1 && !self.win.modifiers.shift_key())
-            .then(|| self.url_under_mouse(pane_id).map(|u| (pane_id, u)))
+            .then(|| {
+                self.url_under_mouse(pane_id)
+                    .map(PressedLink::Url)
+                    .or_else(|| {
+                        (self.config.link_click.trim() == "open")
+                            .then(|| self.path_under_mouse(pane_id))
+                            .flatten()
+                            .map(|(p, _)| PressedLink::Path(p))
+                    })
+                    .map(|l| (pane_id, l))
+            })
             .flatten();
     }
 
@@ -4390,9 +4426,14 @@ impl App {
         if col < 0.0 {
             return None;
         }
-        let text = terminal::session_line_text(&pane.session, abs)?;
-        let link = crate::file_link::link_at(&text, col as usize)?;
-        Some((Self::resolve_path(pane, abs, &link.path)?, link.at()))
+        // a path the program wrapped onto an indented row (Claude Code), or
+        // the terminal soft-wrapped, is one path
+        terminal::session_path_lines(&pane.session, abs, col as usize)
+            .into_iter()
+            .find_map(|(text, i)| {
+                let link = crate::file_link::link_at(&text, i)?;
+                Some((Self::resolve_path(pane, abs, &link.path)?, link.at()))
+            })
     }
 
     /// Pointer shape: a hand over anything clickable (buttons, tabs, menu
@@ -4593,7 +4634,7 @@ impl App {
             }
         };
         // links show the hand without ⌘ (a click shows or opens them);
-        // file paths only with ⌘ held
+        // file paths too when a plain click opens them, else with ⌘ held
         let over_link = overlay.is_none()
             && self.win.tabs.get(self.win.active).is_some_and(|t| {
                 t.panes.iter().any(|p| {
@@ -4604,7 +4645,8 @@ impl App {
             });
         let over_path = overlay.is_none()
             && !over_link
-            && self.win.modifiers.super_key()
+            && (self.win.modifiers.super_key()
+                || (self.config.link_click.trim() == "open" && !self.win.modifiers.shift_key()))
             && self
                 .pane_under_mouse()
                 .is_some_and(|id| self.path_under_mouse(id).is_some());
@@ -15917,6 +15959,8 @@ fn resolve_output_path(dir: Option<&str>, remote: bool, path: &str) -> Option<St
     } else {
         std::path::Path::new(dir?).join(path)
     };
+    // `dir/./x` reads `dir/x` (in toasts, the viewer's title, the opener)
+    let resolved: std::path::PathBuf = resolved.components().collect();
     resolved
         .exists()
         .then(|| resolved.to_string_lossy().into_owned())
@@ -17110,8 +17154,8 @@ impl App {
             let pending = self.win.pending_sel.take();
             let selecting = pending.as_ref().is_some_and(|p| p.started);
             let link = self.win.link_press.take().filter(|_| !selecting);
-            if let Some((pane, url)) = link {
-                self.click_link(pane, &url);
+            if let Some((pane, pressed)) = link {
+                self.click_link(pane, &pressed);
                 window.request_redraw();
             } else if let Some(p) = pending.filter(|p| !p.started) {
                 // Warp: a click (no drag) on a command's output selects its block
@@ -18876,8 +18920,13 @@ impl App {
         };
         // a link takes the left click over a program that tracks the mouse
         // too (Claude Code, Codex), as in Warp: it shows or opens the link
-        // (Shift still reports nothing and selects)
-        if button == crate::mouse::LEFT && self.url_under_mouse(pane).is_some() {
+        // (Shift still reports nothing and selects); so does an existing
+        // file path when a click opens it (⌘, or `link_click = "open"`)
+        if button == crate::mouse::LEFT
+            && (self.url_under_mouse(pane).is_some()
+                || ((self.win.modifiers.super_key() || self.config.link_click.trim() == "open")
+                    && self.path_under_mouse(pane).is_some()))
+        {
             return false;
         }
         let Some(cell) = self.mouse_cell(pane) else {
@@ -21720,7 +21769,12 @@ impl App {
                     ViewerHit::Close => control("Close viewer".into(), Role::Button, false, *r),
                     ViewerHit::Menu => control("Viewer menu".into(), Role::Button, false, *r),
                     ViewerHit::Mode(m) => control(
-                        if *m { "Rendered" } else { "Raw" }.into(),
+                        if *m {
+                            self.win.viewer.rendered_label()
+                        } else {
+                            "Raw"
+                        }
+                        .into(),
                         Role::RadioButton,
                         self.win.viewer.rendered == *m,
                         *r,
@@ -22638,12 +22692,18 @@ impl App {
         );
         let _ = writeln!(
             out,
-            "viewer={:?} lines={} error={:?} scroll={:.0} find={:?}",
+            "viewer={:?} lines={} error={:?} scroll={:.0} find={:?} table={:?} rendered={}",
             self.win.viewer.path,
             self.win.viewer.lines.len(),
             self.win.viewer.error,
             self.win.viewer.scroll,
-            self.win.viewer.find.as_ref().map(|f| f.counter())
+            self.win.viewer.find.as_ref().map(|f| f.counter()),
+            self.win
+                .viewer
+                .table
+                .as_ref()
+                .map(|t| (t.rows.len(), t.widths.len())),
+            self.win.viewer.rendered,
         );
         // the config.toml pane's editing state (`edit=false`: read-only)
         match &self.win.viewer.edit {

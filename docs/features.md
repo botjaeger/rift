@@ -379,7 +379,14 @@ whole buffer.
   (Claude Code, Codex) and on the alternate screen. A URL soft-wrapped onto
   the next rows is one link, and so is one the program wrapped itself
   (Claude Code): a row that reaches the right edge (within 4 columns) and an
-  indented next row that goes on with the URL's characters.
+  indented next row that goes on with the URL's characters. File paths join
+  across the same wraps; a carried word with more text after it ends the
+  line there, so the next row's words never glue onto a path.
+- An existing file path takes a plain click too (`link_click = "open"`, the
+  default): it opens with the OS opener (`open` / `xdg-open`), so the system
+  picks the app (a folder opens in the file manager, a program is revealed,
+  never run); the pointer shows a hand over it, and over a program that
+  tracks the mouse the click is Rift's. ⇧ and a drag still select.
 - ⌘-click opens URLs, OSC 8 hyperlinks and existing file paths (see ui.md);
   files and folders open where `link_editor` says (default app, the viewer
   pane or an installed editor), and the explorer / review ↗ follow
@@ -2276,8 +2283,12 @@ arrows then ⏎) that adds the next 2,000 in the same order, so every entry is
 reachable (a folder is read no further than 100,000 entries, ignored ones
 included; past that a notice says so). A file opens in a read-only viewer pane (or the editor `file_editor` names), the leftmost column of the tab
 (line numbers, keyword/string/comment highlighting, 4 MB limit, binary
-detection, ⌘F finds in the file; Markdown opens rendered, with a Rendered |
-Raw switch, `sh` / `bash` / `zsh` / `fish` / `console` code blocks with a
+detection, ⌘F finds in the file; CSV and TSV files open as a table, with a
+Table | Raw switch: the header row pinned, records numbered and striped,
+columns as wide as their widest cell up to 48 characters, numbers aligned
+right, quoted fields with commas and line breaks read as one cell, a `;`
+delimiter when the first line has semicolons and no commas; Markdown
+opens rendered, with a Rendered | Raw switch, `sh` / `bash` / `zsh` / `fish` / `console` code blocks with a
 Run… button that asks first and runs the block's text in the tab's terminal
 pane, only at a prompt and never in a read-only one, and
 `mermaid` blocks as labelled source); ⌥-click inserts its path into the

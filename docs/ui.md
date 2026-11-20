@@ -334,8 +334,17 @@ counts it). Opening another file reuses that pane. It takes focus like any
 pane (click, ⌥⌘arrows) and ⌘W, Esc or ✕ closes it. Its header is the
 pane's title bar (same height, drags the pane): the path centred (it moves
 to the left edge when the pane is too narrow to centre it), then, for
-Markdown files, a **Rendered | Raw** switch, ⋮ (Insert path, Copy path, Find
-in file, Send to agent…, Show raw/rendered, Close) and ✕.
+Markdown files, a **Rendered | Raw** switch (CSV and TSV files: **Table |
+Raw**), ⋮ (Insert path, Copy path, Find in file, Send to agent…, Show
+raw/rendered/table, Close) and ✕.
+
+CSV and TSV files open as a **Table**: the header row pinned under the title
+bar in bold `text_bright` on a 5 % `fg` wash with a `border` hairline, the
+records under it numbered from 1 in the gutter and striped (3.5 % `fg` on
+every other row), cells padded to their column (at most 48 characters, cut
+with `…`; a line break in a quoted field shows as `⏎`), numbers aligned
+right, ` │ ` separators in `text_muted`. A wide table scrolls sideways under
+the row numbers. **Raw** shows the file's text; ⌘F switches to it.
 
 In the source view a click selects a line and ⇧-click or ⇧↑ ⇧↓ extend the
 selection (an `accent` wash with a 2 px bar at the left edge); Esc clears it
@@ -638,6 +647,11 @@ Each command becomes a block via shell-integration OSC 133 markers:
   or opens the link (`"open"`, *Open it*); a drag across it selects text. Over
   a program that tracks the mouse, a left click on a link is Rift's, not the
   program's (⇧ still selects).
+  An existing file path is clickable as well: with `link_click = "open"` a
+  plain click opens it with the OS opener (the app the system picks; a
+  folder in the file manager), the hand shows over it without ⌘, and over a
+  program that tracks the mouse the click is Rift's. A path the terminal
+  soft-wrapped, or the program wrapped onto an indented row, is one path.
   Hold ⌘ and the hand also shows over an existing file path (absolute, `~/…`,
   or relative to the directory the command that printed it ran in, the
   pane's for unattributed output; the line and column printed with it are
@@ -1516,8 +1530,8 @@ description) left, control right; it runs to the bottom edge.
   - Mouse: `Mouse reporting to programs (Shift selects)` toggle,
     `Middle-click to paste` toggle (*Pastes the clipboard into the pane under
     the pointer*; `middle_click_paste`), `Clicking a link` segmented
-    `Show it | Open it` (*Show where it goes first, or open it at once
-    (⌘-click always opens)*; `link_click`), `Lines per wheel notch` stepper
+    `Show it | Open it` (*Show where it goes first, or open it at once, file
+    paths in their default app (⌘-click always opens)*; `link_click`), `Lines per wheel notch` stepper
     (1–20, ±1; `wheel_scroll_lines`), `⌘-scroll zooms the font` (Linux:
     `Ctrl-scroll`; `wheel_zoom`) toggle, `Word characters` and `Word
     delimiters` text fields (`word_chars`, `word_delimiters`; kept as typed).

@@ -155,7 +155,7 @@ fn rich(
                 marks.push(if meta == META_CODE {
                     Draw::Rect {
                         r: [x0 - 3.0, run.line_top + 1.0, x1 - x0 + 6.0, line - 2.0],
-                        color: Color::WHITE.with_alpha(0.08),
+                        color: theme.fg.with_alpha(0.08),
                         radius: 4.0,
                     }
                 } else {
@@ -403,7 +403,7 @@ pub fn layout(
                     0,
                     Draw::Rect {
                         r: [PAD_X, 0.0, w, h],
-                        color: Color::WHITE.with_alpha(0.045),
+                        color: theme.fg.with_alpha(0.045),
                         radius: 4.0,
                     },
                 );
@@ -578,7 +578,7 @@ fn table(
         if r == 0 {
             draws.push(Draw::Rect {
                 r: [PAD_X, y, table_w, row_h],
-                color: Color::WHITE.with_alpha(0.045),
+                color: theme.fg.with_alpha(0.045),
                 radius: 0.0,
             });
         }

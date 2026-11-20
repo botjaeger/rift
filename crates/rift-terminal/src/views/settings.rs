@@ -5474,7 +5474,7 @@ fn terminal_page(form: &mut Form, config: &Config) {
     form.segment_desc(
         y,
         "Clicking a link",
-        "Show where it goes first, or open it at once (⌘-click always opens)",
+        "Show where it goes first, or open it at once, file paths in their default app (⌘-click always opens)",
         &["Show it", "Open it"],
         usize::from(config.link_click.trim() == "open"),
         "link_click",

@@ -1309,16 +1309,9 @@ fn copy_line(g: &CellGrid, scrolled: u64, abs: u64) -> Option<(String, bool)> {
     Some((text, wrapped))
 }
 
-/// Text of absolute line `abs` of `session` (trailing spaces trimmed).
-pub fn session_line_text(session: &Session, abs: u64) -> Option<String> {
-    let scrolled = session.scrolled.load(std::sync::atomic::Ordering::Acquire);
-    let term = session.term.lock();
-    line_text(&term, scrolled, abs)
-}
-
 /// Readable text of absolute line `abs` (combining marks kept, wide-glyph
 /// spacers and trailing spaces dropped) — for screen readers, unlike the
-/// column-indexed [`session_line_text`].
+/// column-indexed [`line_text`].
 pub fn session_read_text(session: &Session, abs: u64) -> Option<String> {
     let scrolled = session.scrolled.load(std::sync::atomic::Ordering::Acquire);
     let term = session.term.lock();
@@ -1392,11 +1385,17 @@ fn hard_wrap_rest(g: &CellGrid, scrolled: u64, abs: u64) -> Option<(usize, Strin
     (indent > 0 && !token.is_empty()).then_some((indent, token))
 }
 
-/// URLs on absolute row `abs` when it is part of a line the program wrapped
-/// itself ([`hard_wrap_rest`]): the URL whole, from its first row on, and
-/// this row's share of it (col, len, url). `None` when no such wrap touches
-/// the row. Looks at most 8 rows each way.
-fn hard_wrapped_urls(g: &CellGrid, scrolled: u64, abs: u64) -> Option<Vec<(usize, usize, String)>> {
+/// Where each row's part is in a [`hard_wrap_join`]ed line: (absolute row,
+/// index in the joined text, column on the row, chars).
+type JoinPart = (u64, usize, usize, usize);
+
+/// The line around absolute row `abs` that the program wrapped itself
+/// ([`hard_wrap_rest`]): its first row whole (trailing blanks dropped),
+/// then the word each later row carries on. A carried word with more text
+/// after it on its row ends the line there; when the next row goes on from
+/// that row's end, that row starts a new line. `None` when no such wrap
+/// touches the row. Looks at most 8 rows each way.
+fn hard_wrap_join(g: &CellGrid, scrolled: u64, abs: u64) -> Option<(String, Vec<JoinPart>)> {
     const SPAN: u64 = 8;
     let mut first = abs;
     while abs - first < SPAN && hard_wrap_rest(g, scrolled, first).is_some() {
@@ -1409,18 +1408,37 @@ fn hard_wrapped_urls(g: &CellGrid, scrolled: u64, abs: u64) -> Option<Vec<(usize
     if first == last {
         return None;
     }
-    // the joined line, and where each row's part is in it: (row, at, col, len)
-    let head = row_chars(g, scrolled, first)?
-        .trim_end_matches(' ')
-        .to_string();
-    let mut parts = vec![(first, 0usize, 0usize, head.chars().count())];
-    let mut joined = head;
+    let filled = |r: u64| -> Option<String> {
+        Some(row_chars(g, scrolled, r)?.trim_end_matches(' ').to_string())
+    };
+    let head = |r: u64| -> Option<(String, Vec<JoinPart>)> {
+        let text = filled(r)?;
+        let n = text.chars().count();
+        Some((text, vec![(r, 0, 0, n)]))
+    };
+    let (mut joined, mut parts) = head(first)?;
     for r in first + 1..=last {
         let (indent, token) = hard_wrap_rest(g, scrolled, r)?;
+        let &(prev, _, prev_col, prev_n) = parts.last()?;
+        if prev_col + prev_n < filled(prev)?.chars().count() {
+            if parts.iter().any(|p| p.0 == abs) {
+                break;
+            }
+            (joined, parts) = head(prev)?;
+        }
         let n = token.chars().count();
         parts.push((r, joined.chars().count(), indent, n));
         joined.push_str(&token);
     }
+    (parts.len() > 1 && parts.iter().any(|p| p.0 == abs)).then_some((joined, parts))
+}
+
+/// URLs on absolute row `abs` when it is part of a line the program wrapped
+/// itself ([`hard_wrap_join`]): the URL whole, from its first row on, and
+/// this row's share of it (col, len, url). `None` when no such wrap touches
+/// the row.
+fn hard_wrapped_urls(g: &CellGrid, scrolled: u64, abs: u64) -> Option<Vec<(usize, usize, String)>> {
+    let (joined, parts) = hard_wrap_join(g, scrolled, abs)?;
     let &(_, at, col, n) = parts.iter().find(|p| p.0 == abs)?;
     Some(
         urls_in(&joined)
@@ -1436,21 +1454,72 @@ fn hard_wrapped_urls(g: &CellGrid, scrolled: u64, abs: u64) -> Option<Vec<(usize
 /// Path-like tokens ([`path_tokens`]) that start on absolute row `abs` of
 /// `session`, one soft-wrapped onto the rows below included whole: (col,
 /// cells on this row, token).
+/// A path the program wrapped itself onto indented rows
+/// ([`hard_wrap_join`]) counts as starting on its first row, whole.
 pub fn session_path_tokens(session: &Session, abs: u64) -> Vec<(usize, usize, String)> {
     let scrolled = session.scrolled.load(std::sync::atomic::Ordering::Acquire);
     let term = session.term.lock();
-    let g = term.grid();
+    path_tokens_on_row(term.grid(), scrolled, abs)
+}
+
+fn path_tokens_on_row(g: &CellGrid, scrolled: u64, abs: u64) -> Vec<(usize, usize, String)> {
     let cols = g.columns();
     if cols == 0 {
         return Vec::new();
     }
     let (text, first) = wrapped_line(g, scrolled, abs);
     let start = (abs - first) as usize * cols;
-    path_tokens(text.trim_end_matches(' '))
+    let mut out: Vec<_> = path_tokens(text.trim_end_matches(' '))
         .into_iter()
         .filter(|(col, _, _)| (start..start + cols).contains(col))
         .map(|(col, len, token)| (col - start, len.min(start + cols - col), token))
-        .collect()
+        .collect();
+    if let Some((joined, parts)) = hard_wrap_join(g, scrolled, abs)
+        && let Some(&(_, at, col, n)) = parts.iter().find(|p| p.0 == abs)
+    {
+        // a token that starts on this row, whole, in place of its cut piece;
+        // the pieces of one that started above are no tokens of their own
+        let whole: Vec<_> = path_tokens(&joined)
+            .into_iter()
+            .filter(|(s, len, _)| *s < at + n && s + len > at)
+            .collect();
+        out.retain(|(c, len, _)| {
+            !whole.iter().any(|(s, wl, _)| {
+                col + s.saturating_sub(at) < c + len && *c < col + (s + wl - at).min(n)
+            })
+        });
+        for (s, len, token) in whole {
+            if s >= at {
+                out.push((col + s - at, len.min(at + n - s), token));
+            }
+        }
+        out.sort_by_key(|t| t.0);
+    }
+    out
+}
+
+/// The texts to look for a path under column `col` of absolute row `abs`
+/// in, each with that column's index in it: the line the program wrapped
+/// itself onto indented rows ([`hard_wrap_join`]) when the column is in
+/// its part of it, then the soft-wrapped line ([`wrapped_line`]). One char
+/// per cell, as [`crate::file_link::link_at`] takes it.
+pub fn session_path_lines(session: &Session, abs: u64, col: usize) -> Vec<(String, usize)> {
+    let scrolled = session.scrolled.load(std::sync::atomic::Ordering::Acquire);
+    let term = session.term.lock();
+    path_lines(term.grid(), scrolled, abs, col)
+}
+
+fn path_lines(g: &CellGrid, scrolled: u64, abs: u64, col: usize) -> Vec<(String, usize)> {
+    let mut out = Vec::new();
+    if let Some((joined, parts)) = hard_wrap_join(g, scrolled, abs)
+        && let Some(&(_, at, c0, n)) = parts.iter().find(|p| p.0 == abs)
+        && (c0..c0 + n).contains(&col)
+    {
+        out.push((joined, at + col - c0));
+    }
+    let (text, first) = wrapped_line(g, scrolled, abs);
+    out.push((text, (abs - first) as usize * g.columns() + col));
+    out
 }
 
 /// The soft-wrapped line around absolute row `abs`, one char per cell (so
@@ -4520,6 +4589,56 @@ mod tests {
         assert_eq!(
             urls_on_row(t.grid(), 0, 3),
             vec![(2, 9, "https://b".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_path_the_program_wrapped_itself_onto_an_indented_row_is_one_path() {
+        use rift_pty::alacritty_terminal::term::{Config, test::TermSize};
+        let mut t = rift_pty::alacritty_terminal::term::Term::new(
+            Config::default(),
+            &TermSize::new(32, 5),
+            Noop,
+        );
+        let g = t.grid_mut();
+        // Claude Code: the path breaks at the edge and goes on indented; the
+        // sentence then wraps at a blank onto another indented row
+        for (r, text) in [
+            "● I saved it to /a/b/missing_dd",
+            "  _prod.csv. It has one row per",
+            "  columns, see ./c.md and more.",
+            "",
+            "",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            for (c, ch) in text.chars().enumerate() {
+                g[Line(r as i32)][Column(c)].c = ch;
+            }
+        }
+        let path_at = |abs: u64, col: usize| {
+            path_lines(t.grid(), 0, abs, col)
+                .into_iter()
+                .find_map(|(text, i)| crate::file_link::link_at(&text, i))
+                .map(|l| l.path)
+        };
+        let whole = Some("/a/b/missing_dd_prod.csv".to_string());
+        // either row's piece is the whole path
+        assert_eq!(path_at(0, 20), whole);
+        assert_eq!(path_at(1, 4), whole);
+        // the next row's word is not glued onto the path
+        assert_eq!(path_at(2, 15), Some("./c.md".to_string()));
+        assert_eq!(path_at(1, 16), None);
+        // hint mode: one token where the path starts, none for its piece
+        assert_eq!(
+            path_tokens_on_row(t.grid(), 0, 0),
+            vec![(16, 15, "/a/b/missing_dd_prod.csv".to_string())]
+        );
+        assert_eq!(path_tokens_on_row(t.grid(), 0, 1), vec![]);
+        assert_eq!(
+            path_tokens_on_row(t.grid(), 0, 2),
+            vec![(15, 6, "./c.md".to_string())]
         );
     }
 

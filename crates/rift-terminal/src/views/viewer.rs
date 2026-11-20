@@ -2,7 +2,8 @@
 //! pane of the active tab's split. Line numbers, lightweight highlighting
 //! (`rift_core::code_highlight`), only the lines on screen are shaped.
 //! Markdown files open rendered (`markdown_view`), with a Rendered | Raw
-//! switch in the header.
+//! switch in the header; CSV and TSV files open as a table
+//! (`rift_core::table`), with a Table | Raw switch.
 //! Esc or ✕ closes it; the terminal underneath keeps running. ⌘F opens a
 //! find bar scoped to the open file (case-insensitive plain text).
 //!
@@ -43,6 +44,8 @@ pub const SAVED_SHOWN: Duration = Duration::from_millis(1500);
 const LINT_GUTTER: f32 = 10.0;
 /// Spaces Tab inserts.
 const TAB: &str = "  ";
+/// The table view's padding above and below its header row and records.
+const TABLE_PAD: f32 = 6.0;
 
 /// The config.toml pane's editing state. Its buffer is the command line's
 /// `EditorState`: the same undo stack, selection, grapheme-aware moves and
@@ -402,8 +405,13 @@ pub struct ViewerState {
     pub find: Option<ViewerFind>,
     /// Markdown blocks (empty for other files): the *Rendered* view.
     pub markdown: Vec<rift_core::markdown::Block>,
-    /// Showing the rendered Markdown rather than the source (Warp's
-    /// Rendered | Raw toggle); on when a Markdown file loads.
+    /// A CSV / TSV file's records (`rift_core::table`): the *Table* view.
+    pub table: Option<rift_core::table::Table>,
+    /// Each record of `table` as one aligned line, with its separators'
+    /// byte ranges (the header first).
+    table_lines: Vec<(String, Vec<std::ops::Range<usize>>)>,
+    /// Showing the rendered Markdown or the table rather than the source
+    /// (Warp's Rendered | Raw toggle); on when such a file loads.
     pub rendered: bool,
     md_layout: super::markdown_view::MdLayout,
     /// Horizontal scroll of the source view (px).
@@ -572,13 +580,24 @@ impl ViewerState {
                         self.markdown = rift_core::markdown::parse(&self.lines);
                         self.rendered = true;
                     }
+                    if let Some(table) = rift_core::table::delimiter(path, &text)
+                        .and_then(|d| rift_core::table::Table::parse(&text, d))
+                    {
+                        self.table_lines = (0..table.rows.len()).map(|i| table.line(i)).collect();
+                        self.table = Some(table);
+                        self.rendered = true;
+                    }
                 }
             },
         }
     }
 
     pub fn content_h(&self) -> f32 {
-        if self.showing_rendered() && self.md_layout.height > 0.0 {
+        if self.showing_table() {
+            // the records under the pinned header
+            return self.table_lines.len().saturating_sub(1) as f32 * LINE + TABLE_PAD * 2.0;
+        }
+        if self.showing_markdown() && self.md_layout.height > 0.0 {
             return self.md_layout.height;
         }
         self.lines.len() as f32 * LINE + 24.0
@@ -587,7 +606,7 @@ impl ViewerState {
     /// Scroll sideways by `px` with the pointer at window `y`: the source
     /// view as a whole, or (rendered) the code block under the pointer.
     pub fn scroll_x_by(&mut self, px: f32, y: f32) {
-        if self.showing_rendered() {
+        if self.showing_markdown() {
             let at = y - self.body_top + self.scroll;
             if let Some((i, max)) = self.md_layout.code_at(at) {
                 let s = self.code_scroll.entry(i).or_insert(0.0);
@@ -599,9 +618,34 @@ impl ViewerState {
         self.scroll_x = (self.scroll_x + px).clamp(0.0, max);
     }
 
-    /// A Markdown file shown rendered.
+    /// A Markdown file shown rendered, or a CSV / TSV file as a table: no
+    /// source lines on screen.
     pub fn showing_rendered(&self) -> bool {
+        self.showing_markdown() || self.showing_table()
+    }
+
+    /// A Markdown file shown rendered.
+    pub fn showing_markdown(&self) -> bool {
         self.rendered && !self.markdown.is_empty()
+    }
+
+    /// A CSV / TSV file shown as a table.
+    pub fn showing_table(&self) -> bool {
+        self.rendered && self.table.is_some()
+    }
+
+    /// The file has a rendered view (Markdown, or a table).
+    pub fn has_rendered(&self) -> bool {
+        !self.markdown.is_empty() || self.table.is_some()
+    }
+
+    /// The rendered view's name in the header switch and the ⋮ menu.
+    pub fn rendered_label(&self) -> &'static str {
+        if self.table.is_some() {
+            "Table"
+        } else {
+            "Rendered"
+        }
     }
 
     /// Switch between the rendered page and the source (top of the file).
@@ -609,6 +653,9 @@ impl ViewerState {
         if self.rendered != on {
             self.rendered = on;
             self.scroll = 0.0;
+            // the table and the source are measured apart
+            self.scroll_x = 0.0;
+            self.max_line_w = None;
         }
     }
 
@@ -1251,9 +1298,9 @@ pub fn render(
             &mut hits,
         );
     }
-    if !state.markdown.is_empty() {
+    if state.has_rendered() {
         // segmented control: the selected segment raised, the other dim
-        let labels = [("Rendered", true), ("Raw", false)];
+        let labels = [(state.rendered_label(), true), ("Raw", false)];
         let seg_w: Vec<f32> = labels
             .iter()
             .map(|(l, _)| engine.measure(l, 11.5, FONT_SANS, Weight::MEDIUM) + 22.0)
@@ -1264,8 +1311,8 @@ pub fn render(
             layer.bordered(
                 [bx, cy - 11.0],
                 [total, 22.0],
-                Color::WHITE.with_alpha(0.03),
-                Color::WHITE.with_alpha(0.10),
+                theme.fg.with_alpha(0.03),
+                theme.fg.with_alpha(0.10),
                 4.0,
                 1.0,
             );
@@ -1273,12 +1320,7 @@ pub fn render(
             for ((label, mode), sw) in labels.iter().zip(&seg_w) {
                 let on = state.rendered == *mode;
                 if on {
-                    layer.rect(
-                        [sx, cy - 9.0],
-                        [*sw, 18.0],
-                        Color::WHITE.with_alpha(0.11),
-                        4.5,
-                    );
+                    layer.rect([sx, cy - 9.0], [*sw, 18.0], theme.fg.with_alpha(0.11), 4.5);
                 }
                 let tw = engine.measure(label, 11.5, FONT_SANS, Weight::MEDIUM);
                 layer.text(
@@ -1364,7 +1406,11 @@ pub fn render(
         );
         return hits;
     }
-    if state.showing_rendered() {
+    if state.showing_table() {
+        render_table(layer, engine, theme, state, [x, body_top, w, y + h]);
+        return hits;
+    }
+    if state.showing_markdown() {
         let bounds = TextBounds {
             left: x as i32,
             top: body_top as i32,
@@ -1383,7 +1429,7 @@ pub fn render(
             &state.code_scroll,
         );
         hits.extend(runs.into_iter().map(|(r, i)| (r, ViewerHit::RunCode(i))));
-        scrollbar(layer, state, x, w, body_top);
+        scrollbar(layer, theme, state, x, w, body_top);
         return hits;
     }
 
@@ -1607,12 +1653,143 @@ pub fn render(
         );
         layer.text_clipped(buf, x + gutter - sx, ly, theme.fg, text_bounds);
     }
-    scrollbar(layer, state, x, w, body_top);
+    scrollbar(layer, theme, state, x, w, body_top);
     hits
 }
 
+/// One table line as monospace rich text: the separators dim, the rest in
+/// `color` (`bold`: the header).
+fn table_row(
+    engine: &mut TextEngine,
+    theme: &Theme,
+    (line, seps): &(String, Vec<std::ops::Range<usize>>),
+    color: Color,
+    bold: bool,
+) -> Buffer {
+    let mut base = Attrs::new()
+        .family(Family::Name(mono_family()))
+        .color(text_color(color));
+    if bold {
+        base = base.weight(Weight::BOLD);
+    }
+    let dim = base.clone().color(text_color(theme.text_muted));
+    let mut rich: Vec<(&str, Attrs)> = Vec::new();
+    let mut at = 0;
+    for s in seps.iter().filter(|s| s.end <= line.len()) {
+        rich.push((&line[at..s.start], base.clone()));
+        rich.push((&line[s.clone()], dim.clone()));
+        at = s.end;
+    }
+    rich.push((&line[at.min(line.len())..], base.clone()));
+    let mut buf = Buffer::new(&mut engine.font_system, Metrics::new(FONT, LINE));
+    buf.set_rich_text(
+        &mut engine.font_system,
+        rich,
+        &base,
+        Shaping::Advanced,
+        None,
+    );
+    buf
+}
+
+/// The *Table* view of a CSV / TSV file over `[x, top, w, bottom]`: the
+/// header row pinned at the top, the records under it numbered from 1 and
+/// striped, columns aligned (numbers to the right); wide tables scroll
+/// sideways under the row numbers.
+fn render_table(
+    layer: &mut Layer,
+    engine: &mut TextEngine,
+    theme: &Theme,
+    state: &mut ViewerState,
+    [x, top, w, bottom]: [f32; 4],
+) {
+    let mono = mono_family();
+    let records = state.table_lines.len().saturating_sub(1);
+    let digits = records.max(1).to_string().len();
+    let gutter = engine.measure(&"0".repeat(digits), 12.0, mono, Weight::NORMAL) + 28.0;
+    let char_w = engine.measure("0", FONT, mono, Weight::NORMAL);
+    let head_h = LINE + TABLE_PAD * 2.0;
+    let data_top = top + head_h;
+    state.body_top = data_top;
+    state.view_h = (bottom - data_top).max(0.0);
+    state.scroll_by(0.0);
+    if state.max_line_w.is_none() {
+        let longest = state
+            .table_lines
+            .iter()
+            .map(|(l, _)| l.chars().count())
+            .max()
+            .unwrap_or(0);
+        state.max_line_w = Some(longest as f32 * char_w);
+    }
+    state.content_w = gutter + state.max_line_w.unwrap_or(0.0) + 24.0;
+    state.scroll_x_by(0.0, data_top);
+    state.gutter = gutter;
+    state.char_w = char_w;
+    let sx = state.scroll_x;
+    let rows_bounds = TextBounds {
+        left: x as i32,
+        top: data_top as i32,
+        right: (x + w) as i32,
+        bottom: bottom as i32,
+    };
+    let cells_bounds = TextBounds {
+        left: (x + gutter - 2.0) as i32,
+        ..rows_bounds
+    };
+    let first = ((state.scroll - TABLE_PAD) / LINE).floor().max(0.0) as usize;
+    let count = (state.view_h / LINE).ceil() as usize + 2;
+    for k in first..(first + count).min(records) {
+        let ly = data_top + TABLE_PAD + k as f32 * LINE - state.scroll;
+        if k % 2 == 1 {
+            let (t, b) = (ly.max(data_top), (ly + LINE).min(bottom));
+            if b > t {
+                layer.rect([x, t], [w, b - t], theme.fg.with_alpha(0.035), 0.0);
+            }
+        }
+        let no = (k + 1).to_string();
+        let nw = engine.measure(&no, 12.0, mono, Weight::NORMAL);
+        let mut nb = Buffer::new(&mut engine.font_system, Metrics::new(12.0, LINE));
+        nb.set_text(
+            &mut engine.font_system,
+            &no,
+            &Attrs::new().family(Family::Name(mono)),
+            Shaping::Advanced,
+            None,
+        );
+        layer.text_clipped(
+            nb,
+            x + gutter - 14.0 - nw,
+            ly + 1.0,
+            theme.text_muted,
+            rows_bounds,
+        );
+        let buf = table_row(engine, theme, &state.table_lines[k + 1], theme.fg, false);
+        layer.text_clipped(buf, x + gutter - sx, ly, theme.fg, cells_bounds);
+    }
+    // the header, pinned: the records scroll under it
+    layer.rect([x, top], [w, head_h], theme.fg.with_alpha(0.05), 0.0);
+    layer.hline(x, data_top - 1.0, w, 1.0, theme.border);
+    if let Some(header) = state.table_lines.first() {
+        let buf = table_row(engine, theme, header, theme.text_bright, true);
+        let head_bounds = TextBounds {
+            top: top as i32,
+            bottom: data_top as i32,
+            ..cells_bounds
+        };
+        layer.text_clipped(
+            buf,
+            x + gutter - sx,
+            top + TABLE_PAD,
+            theme.text_bright,
+            head_bounds,
+        );
+    }
+    scrollbar(layer, theme, state, x, w, data_top);
+}
+
 /// Scroll thumb at the right edge while the content overflows.
-fn scrollbar(layer: &mut Layer, state: &ViewerState, x: f32, w: f32, body_top: f32) {
+fn scrollbar(layer: &mut Layer, theme: &Theme, state: &ViewerState, x: f32, w: f32, body_top: f32) {
     let content = state.content_h();
     if content > state.view_h {
         let track = state.view_h - 12.0;
@@ -1622,7 +1799,7 @@ fn scrollbar(layer: &mut Layer, state: &ViewerState, x: f32, w: f32, body_top: f
         layer.rect(
             [x + w - 7.0, ty],
             [3.0, thumb],
-            Color::WHITE.with_alpha(0.18),
+            theme.fg.with_alpha(0.18),
             1.5,
         );
     }
@@ -1658,8 +1835,8 @@ fn header_button(
         layer.bordered(
             [r[0], r[1]],
             [r[2], r[3]],
-            Color::WHITE.with_alpha(0.03),
-            Color::WHITE.with_alpha(0.10),
+            theme.fg.with_alpha(0.03),
+            theme.fg.with_alpha(0.10),
             4.0,
             1.0,
         );
@@ -2363,6 +2540,40 @@ mod tests {
         viewer.rendered = true;
         viewer.open_find();
         assert!(!viewer.rendered && viewer.find.is_some());
+        // a CSV opens as a table: no source line to pick or send on it, a
+        // wide one scrolls sideways (not as a Markdown code block)
+        let csv = dir.join("days.csv");
+        std::fs::write(&csv, "period,days\n2026-01,3\n2026-02,12\n").unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        viewer.open(&csv, move |loaded| {
+            tx.send(loaded).unwrap();
+        });
+        assert!(viewer.accept(rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap()));
+        assert!(viewer.showing_table() && viewer.showing_rendered());
+        assert!(!viewer.showing_markdown());
+        assert_eq!(viewer.rendered_label(), "Table");
+        assert_eq!(viewer.table.as_ref().map(|t| t.rows.len()), Some(3));
+        assert_eq!(viewer.content_h(), 2.0 * LINE + TABLE_PAD * 2.0);
+        viewer.view_h = 100.0;
+        viewer.body_top = 0.0;
+        assert_eq!(viewer.line_at(30.0), None);
+        assert_eq!(viewer.send_range(), None);
+        viewer.content_w = 900.0;
+        viewer.view_w = 600.0;
+        viewer.scroll_x_by(250.0, 0.0);
+        assert_eq!(viewer.scroll_x, 250.0);
+        // Raw: its source lines again, measured anew from the left
+        viewer.set_rendered(false);
+        assert_eq!(viewer.scroll_x, 0.0);
+        assert_eq!(viewer.send_range(), Some((0, 0)));
+        // a CSV line opened from a link (`f.csv:3`) shows its source
+        let (tx, rx) = std::sync::mpsc::channel();
+        viewer.open(&csv, move |loaded| {
+            tx.send(loaded).unwrap();
+        });
+        viewer.reveal_line = Some(2);
+        assert!(viewer.accept(rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap()));
+        assert!(!viewer.showing_table());
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

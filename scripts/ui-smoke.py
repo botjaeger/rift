@@ -3190,6 +3190,67 @@ assert "selection=true" in drag and opened == 0, (drag, opened)
 assert "Headless: not opening https://example.com/x" in click and opened == 1, (click, opened)
 assert "selection=true" in drag, drag
 
+# a file path takes a plain click too (link_click = "open"): the OS opener,
+# the whole path when the program wrapped it onto an indented row (Claude
+# Code), and not the next row's words; ⌘-click opens it where link_editor
+# says: the viewer shows a CSV as a table, find switches it to the source
+fp = scratch / "file-path-click"
+for sub in ("cfg/rift", "data", "work/data"):
+    (fp / sub).mkdir(parents=True, exist_ok=True)
+(fp / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
+    'sync_os_theme = false\nlink_click = "open"\nlink_editor = "rift"\n'
+    + f'working_directory = {json.dumps(str(fp / "work"))}\n')
+fp_head = "https://e.io saved to ./data/"
+fp_name = "m" * (85 - len(fp_head))  # fills the row: 85 columns at 700 px
+(fp / "work/data" / (fp_name + "_prod.csv")).write_text(
+    'period,days,"note, quoted"\n2026-01,3,"a ""b"""\n2026-02,12,x\n')
+(fp / "work/emit.sh").write_text(
+    f"printf '%s\\n' '{fp_head}{fp_name}' '  _prod.csv. It has one row' '  per period.'\n")
+def run_fp(name, steps):
+    (fp / f"{name}.rift").write_text("\n".join(
+        ["resize 700 400", "wait_prompt", "type sh emit.sh\\n", "wait 800"] + steps
+        + ["quit"]) + "\n")
+    with (fp / f"{name}.log").open("w") as log:
+        rc = subprocess.run([str(binary), "--script", str(fp / f"{name}.rift"), "--headless"],
+                            env=dict(env, XDG_CONFIG_HOME=str(fp / "cfg"),
+                                     XDG_DATA_HOME=str(fp / "data"),
+                                     BASH_SILENCE_DEPRECATION_WARNING="1"),
+                            stdout=log, stderr=log, timeout=60).returncode
+    assert rc == 0, died(f"file-path-click {name} run failed", fp / f"{name}.log")
+    return (fp / f"{name}.log").read_text()
+run_fp("at", [f"dump {fp}/at.txt"])
+fp_at = (fp / "at.txt").read_text()
+x, y, w, h = map(int, re.search(r'"https://e\.io@(\d+),(\d+),(\d+),(\d+)"', fp_at).groups())
+cell_w = float(re.search(r"cell_w=([\d.]+)", fp_at)[1])
+line_h = float(re.search(r"line_h=([\d.]+)", fp_at)[1])
+fp_row = [f"{int(x + col * cell_w)} {int(y + h // 2 + r * line_h)}"
+          for r, col in ((0, 40), (1, 6), (2, 4))]
+# the shell's directory is canonical (/tmp → /private/tmp on macOS)
+fp_whole = str((fp / "work").resolve() / "data" / (fp_name + "_prod.csv"))
+fp_log = run_fp("click", [f"move {fp_row[0]}", "wait 100", f"dump {fp}/hover.txt",
+                          f"click {fp_row[0]}", "wait 200", f"click {fp_row[1]}", "wait 200",
+                          f"click {fp_row[2]}", "wait 200"])
+assert "mouse_cursor=Pointer" in (fp / "hover.txt").read_text()
+assert fp_log.count(f"headless: not opening {fp_whole}\n") == 2, fp_log[-3000:]
+assert fp_log.count("headless: not opening") == 2, fp_log[-3000:]
+run_fp("cmd", ["mods cmd", f"click {fp_row[1]}", "mods none", "wait 800",
+               f"dump {fp}/viewer.txt", "key cmd+f", "wait 200", f"dump {fp}/find.txt"])
+fp_viewer = (fp / "viewer.txt").read_text()
+assert f'viewer=Some("{fp_whole}")' in fp_viewer, fp_viewer[:2000]
+assert "table=Some((3, 3)) rendered=true" in fp_viewer, fp_viewer[:2000]
+assert 'RadioButton "Table"' in fp_viewer, fp_viewer
+assert "table=Some((3, 3)) rendered=false" in (fp / "find.txt").read_text()
+# over a program that tracks the mouse the left click on a path is Rift's
+(fp / "work/emit.sh").write_text(
+    "printf '\\033[?1049h\\033[?1000h\\033[?1006h\\033[2J\\033[3;1Hhttps://e.io "
+    f"./data/{fp_name}_prod.csv ok'; sleep 60\n")
+run_fp("alt-at", [f"dump {fp}/alt-at.txt"])
+x, y, w, h = map(int, re.search(r'"https://e\.io@(\d+),(\d+),(\d+),(\d+)"',
+                                (fp / "alt-at.txt").read_text()).groups())
+fp_log = run_fp("alt", [f"click {int(x + 30 * cell_w)} {y + h // 2}", "wait 200"])
+assert fp_log.count(f"headless: not opening {fp_whole}\n") == 1, fp_log[-3000:]
+
 # a link on the alternate screen of a program that tracks the mouse (Claude
 # Code, Codex) is a link too: the hand, the tooltip after the rest time, and
 # the left click is Rift's ("prompt" shows, "open" opens) instead of the

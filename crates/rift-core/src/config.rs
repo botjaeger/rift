@@ -1043,8 +1043,8 @@ pub struct Config {
     /// from `editors::EDITORS` (`"vscode"`, `"zed"`, …).
     pub link_editor: String,
     /// What a plain click on a link does: `"prompt"` shows the link and
-    /// that ⌘-click opens it, `"open"` opens it at once. ⌘-click always
-    /// opens.
+    /// that ⌘-click opens it, `"open"` opens it at once (an existing file
+    /// path too, with the OS opener). ⌘-click always opens.
     pub link_click: String,
     /// Where files from the explorer and code review (↗) open: `"rift"`
     /// (the viewer pane), `"system"` or an editor id.

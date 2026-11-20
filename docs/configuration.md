@@ -401,8 +401,9 @@ launch_at_login = false           # macOS: Rift opens at login (its login item);
                                   # Items can remove it) and only Settings changes it
 link_editor   = "rift"            # ⌘-clicked file paths / file links: system (default
                                   # app) | rift (viewer pane) | an editor id below
-link_click    = "open"            # plain click on a link: open (open it at once)
-                                  # | prompt (show it and ⌘ Click); ⌘-click always opens
+link_click    = "open"            # plain click on a link: open (open it at once;
+                                  # a file path in its default app) | prompt (show
+                                  # it and ⌘ Click); ⌘-click always opens
 file_editor   = "rift"            # explorer and code review ↗: rift | system | editor id
                                   # editors: vscode cursor windsurf zed sublime intellij
                                   # phpstorm webstorm rustrover (macOS: the .app in
