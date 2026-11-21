@@ -682,6 +682,10 @@ struct PendingSelection {
     block: bool,
 }
 
+/// A press on a link held back from a mouse-tracking program
+/// (`WindowState::link_drag`): pane, press cell, press position.
+type LinkDrag = (PaneId, (usize, usize), (f32, f32));
+
 const DOUBLE_CLICK_MS: u128 = 400;
 const DRAG_THRESHOLD: f32 = 3.0;
 
@@ -1077,6 +1081,11 @@ struct WindowState {
     /// A plain press on a link or an existing file path, acted on at its
     /// release (`click_link`).
     link_press: Option<(PaneId, PressedLink)>,
+    /// A left press on a link over a mouse-tracking program, held back from
+    /// it: (pane, press cell, press position). A drag past the threshold
+    /// hands the gesture to the program from that cell (`hand_link_drag`);
+    /// a release without one is a click on the link.
+    link_drag: Option<LinkDrag>,
     /// When a shown tooltip last went away (the next one shows at once).
     tip_hidden_at: Option<Instant>,
     /// A press, key or wheel hid it until the pointer moves to another control.
@@ -2196,6 +2205,7 @@ impl WindowState {
             tip_drawn: None,
             elapsed_minutes: None,
             link_press: None,
+            link_drag: None,
             tip_hidden_at: None,
             tip_suppressed: false,
             pointer_in: true,
@@ -16731,7 +16741,7 @@ impl App {
         {
             window.request_redraw();
         }
-        if self.win.mouse_report.is_some() {
+        if self.hand_link_drag() || self.win.mouse_report.is_some() {
             self.report_motion();
             return;
         }
@@ -17112,6 +17122,7 @@ impl App {
                 window.request_redraw();
                 return;
             }
+            self.win.link_drag = None;
             if self.report_button(crate::mouse::LEFT, false) {
                 window.request_redraw();
                 return;
@@ -18927,6 +18938,10 @@ impl App {
                 || ((self.win.modifiers.super_key() || self.config.link_click.trim() == "open")
                     && self.path_under_mouse(pane).is_some()))
         {
+            // a drag from it still belongs to the program (`hand_link_drag`)
+            self.win.link_drag = self
+                .mouse_cell(pane)
+                .map(|cell| (pane, cell, self.win.mouse));
             return false;
         }
         let Some(cell) = self.mouse_cell(pane) else {
@@ -18946,6 +18961,28 @@ impl App {
         }
         self.send_mouse(pane, mode, button, true, false, cell);
         self.win.mouse_report = Some((pane, button, cell));
+        true
+    }
+
+    /// A press held back on a link (`link_drag`) that moved past the drag
+    /// threshold: the program gets the press at its cell, then the drag, as
+    /// though the link were not there (Claude Code selects from it); the
+    /// release no longer clicks the link. Returns true once handed over.
+    fn hand_link_drag(&mut self) -> bool {
+        let Some((pane, cell, (ox, oy))) = self.win.link_drag else {
+            return false;
+        };
+        let (mx, my) = self.win.mouse;
+        if (mx - ox).abs() < DRAG_THRESHOLD && (my - oy).abs() < DRAG_THRESHOLD {
+            return false;
+        }
+        self.win.link_drag = None;
+        let Some(mode) = self.mouse_tracking(pane) else {
+            return false;
+        };
+        self.win.link_press = None;
+        self.send_mouse(pane, mode, crate::mouse::LEFT, true, false, cell);
+        self.win.mouse_report = Some((pane, crate::mouse::LEFT, cell));
         true
     }
 

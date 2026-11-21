@@ -421,6 +421,7 @@ impl App {
         w.copied = w.copied.filter(|(p, ..)| !gone(*p));
         w.editor_drag = w.editor_drag.filter(|p| !gone(*p));
         w.mouse_report = w.mouse_report.filter(|(p, ..)| !gone(*p));
+        w.link_drag = w.link_drag.filter(|(p, ..)| !gone(*p));
         w.mouse_hover_cell = w.mouse_hover_cell.filter(|(p, _)| !gone(*p));
         if w.pipe_target.as_ref().is_some_and(|(p, ..)| gone(*p)) {
             w.pipe_target = None;

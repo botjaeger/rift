@@ -3287,6 +3287,13 @@ beside = (lk / "alt-beside.txt").read_text()
 echo = re.search(r"^ +\| link https://example\.com/alt ok(.*)$", beside, re.M)[1]
 assert echo.count("[<0;") == 2 and opened == 0, (echo, opened)
 assert run_alt_link("open", [f"click {at}", "wait 300"]) == 1
+# a drag that starts on the link's first letter is the program's (Claude Code
+# selects from there): its press lands on that cell, the link does not open
+opened = run_alt_link("open", [f"drag {x + 2} {y + h // 2} {x + w // 2} {y + h // 2}",
+                               "wait 400", f"dump {lk}/alt-drag.txt"])
+echo = re.search(r"^ +\| link https://example\.com/alt ok(.*)$",
+                 (lk / "alt-drag.txt").read_text(), re.M)[1]
+assert "[<0;6;3M" in echo and "m" in echo.split("[<0;6;3M", 1)[1] and opened == 0, (echo, opened)
 
 # tooltips: none before the rest time, then the control's action and
 # shortcut; a neighbour shows at once; a key hides it. On a fresh session the

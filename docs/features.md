@@ -376,7 +376,9 @@ whole buffer.
 - Links draw in the accent color, lighter and underlined under the pointer,
   and show a hand and a tooltip with their target; a plain click shows it or
   opens the link (`link_click`), also over a program that tracks the mouse
-  (Claude Code, Codex) and on the alternate screen. A URL soft-wrapped onto
+  (Claude Code, Codex) and on the alternate screen; a drag that starts on a
+  link there still reaches the program from that cell (Claude Code selects
+  from the link's first letter) and opens nothing. A URL soft-wrapped onto
   the next rows is one link, and so is one the program wrapped itself
   (Claude Code): a row that reaches the right edge (within 4 columns) and an
   indented next row that goes on with the URL's characters. File paths join
