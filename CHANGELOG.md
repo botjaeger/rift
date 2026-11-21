@@ -8,6 +8,27 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.32.0 — 2026-11-21
+
+A cleaner window: less repeated information, and the things that matter stand out.
+
+### Improved
+
+- **Quieter command blocks** — A command that succeeds no longer shows a `✓ 0` badge (its green edge says it), so a failure's badge stands out. The folder and branch show on a block only when they differ from the block before.
+- **Change counts in one place** — The Review changes button at the top right is now a `±` (brighter while there are changes); the counts stay in the prompt's chip and the review panel. In the vertical tab list only the current tab shows them, and code review leaves out a zero side (`+4`, not `+4 −0`).
+- **Safer code review** — Reverting a whole file moved from a button beside Stage into the file's ⋮ menu (also on right-click), next to Open file and Stage file. It still asks first.
+- **Completions read across** — Each description now sits in a column just after the names, not at the far edge of the panel.
+- **Settings text is never cut off** — A description too long for its row wraps onto a second line instead of ending in "…".
+- **Keybindings by name** — Settings › Keybindings lists actions by the names the command palette uses, with the config name muted after it. Filtering matches both.
+- **Pane titles you can tell apart** — A split pane's title bar names the command that runs or ran last, then its folder.
+- **Fewer unread notifications** — A command that succeeds faster than the long-command threshold is still listed, but no longer counts as unread or lights the bell's dot.
+- **Less clutter at the start** — The New session card hides while the completion panel or command history is open, and the command explainer (⇧⌘I) opens above the prompt chips instead of covering them.
+- **Clearer wording** — The theme picker's list is headed Themes, history rows no longer all say "imported", and ⌘W on the last tab asks "Close the last tab and quit?".
+
+### Fixed
+
+- **Command history from zsh** — A history file that mixes timestamped and plain lines no longer shows the plain lines glued into one long entry.
+
 ## 0.31.1 — 2026-11-21
 
 ### Fixed
