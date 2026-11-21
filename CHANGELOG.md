@@ -8,6 +8,14 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.31.1 — 2026-11-21
+
+### Fixed
+
+- **Select text starting on a link in Claude Code** — A drag that starts on a link's first
+  letter in Claude Code or Codex selects from there again, instead of doing nothing (or opening
+  the link). A plain click on the link still shows or opens it.
+
 ## 0.31.0 — 2026-11-20
 
 ### New
