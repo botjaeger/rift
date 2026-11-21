@@ -69,15 +69,18 @@ pub fn parse_zsh_history(raw: &[u8]) -> Vec<String> {
                 .unwrap_or_default()
                 .to_string();
             current = Some(cmd);
-        } else if let Some(c) = &mut current {
+        } else if let Some(c) = current.as_mut().filter(|c| c.ends_with('\\')) {
             // continuation of a multiline entry: zsh wrote `\` + newline
-            if c.ends_with('\\') {
-                c.pop();
-            }
+            c.pop();
             c.push('\n');
             c.push_str(line);
         } else {
-            // plain (non-EXTENDED_HISTORY) format: one command per line
+            // plain (non-EXTENDED_HISTORY) format: one command per line,
+            // also after extended entries (EXTENDED_HISTORY switched off, or
+            // another shell appending to the same file)
+            if let Some(c) = current.take() {
+                push_entry(&mut out, c);
+            }
             push_entry(&mut out, line.to_string());
         }
     }
@@ -326,6 +329,21 @@ mod tests {
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0], "for f in *; do\n  echo $f\ndone");
         assert_eq!(parsed[1], "pwd");
+    }
+
+    #[test]
+    fn plain_lines_after_extended_entries_are_their_own_commands() {
+        let raw = b": 1719400000:0;make lint\ngit status\nls src\n: 1719400001:0;for f in *; do\\\ndone\npwd\n";
+        assert_eq!(
+            parse_zsh_history(raw),
+            vec![
+                "make lint".to_string(),
+                "git status".into(),
+                "ls src".into(),
+                "for f in *; do\ndone".into(),
+                "pwd".into(),
+            ]
+        );
     }
 
     #[test]
