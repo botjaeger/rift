@@ -12,8 +12,9 @@ constant.
 - **Content first.** Terminal output is the product. Chrome is quiet: one
   hairline, muted labels, color only where it carries state.
 - **State lives on edges and badges.** A block's result is its 2 px left
-  border and its badge (`✓ 0`, `✕ 1`, `running`). Failed blocks are not
-  tinted; only the selected block gets a wash.
+  border, plus a badge where it needs one (`✕ 1`, `running`; a success has
+  none, so a failure stands out). Failed blocks are not tinted; only the
+  selected block gets a wash.
 - **Everything is reachable by keyboard** and has a palette entry. The mouse
   is a shortcut, never the only path.
 - **One look across themes.** Views read colors from the active `Theme`, so a
@@ -200,7 +201,8 @@ No other animation. Motion never delays input.
 ## Components
 
 - **Block header**: chevron, command (`text_bright`), prompt-time
-  `~/path git:(branch)` (`text_dim`), then right-aligned badge pill, duration,
+  `~/path git:(branch)` (`text_dim`; only where it changed from the block
+  before), then right-aligned badge pill (none for a success), duration,
   copy button and ⋮ menu button (both `text_muted`, on hover; the copy
   button a `success` check after a copy). A long command is cut with `…` before the badge group; the
   context shows only when it fits.

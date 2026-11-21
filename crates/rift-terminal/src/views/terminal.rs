@@ -2781,7 +2781,9 @@ fn styled_rows(
                 }
                 grid_row(*abs)
             }
-            DisplayLine::Header(bi) => header_runs(&blocks[*bi], theme, cols),
+            DisplayLine::Header(bi) => {
+                header_runs(&blocks[*bi], theme, cols, shows_context(blocks, *bi))
+            }
             DisplayLine::Pad | DisplayLine::Sep => Vec::new(),
         });
     }
@@ -2800,16 +2802,54 @@ struct StyledRows {
     rules: Vec<(u16, String)>,
 }
 
+/// A block header's `~/path git:(branch)`, when the block knows either.
+fn header_context(block: &Block) -> Option<String> {
+    if block.cwd.is_none() && block.branch.is_none() {
+        return None;
+    }
+    let mut ctx = block
+        .cwd
+        .as_deref()
+        .map(super::editor::shorten_home)
+        .unwrap_or_default();
+    if let Some(br) = &block.branch {
+        if !ctx.is_empty() {
+            ctx.push(' ');
+        }
+        ctx.push_str(&format!("git:({br})"));
+    }
+    Some(ctx)
+}
+
+/// Whether `blocks[i]`'s header shows its folder and branch: only where they
+/// differ from the block before it (the first block always), so a run of
+/// commands in one place does not repeat them on every header.
+fn shows_context(blocks: &[Block], i: usize) -> bool {
+    let here = &blocks[i];
+    !blocks[..i]
+        .iter()
+        .rev()
+        .find(|b| !matches!(b.state, BlockState::Prompt))
+        .is_some_and(|prev| prev.cwd == here.cwd && prev.branch == here.branch)
+}
+
 /// A block's header as one `cols`-wide row, as the desktop draws it
 /// (`render_header`): chevron, the command (bold, bright), `cwd git:(branch)`
-/// or the hidden-lines note of a collapsed block, and at the right the state
-/// badge (`running`, `✓ 0`, `✕ n`) with the duration of a finished block. The command gives way
-/// first (cut with `…`); the context is left out when it does not fit whole.
-fn header_runs(block: &Block, theme: &Theme, cols: usize) -> Vec<rift_remote::protocol::Run> {
+/// or the hidden-lines note of a collapsed block (the context only where it
+/// changed, `show_context`), and at the right the state badge (`running`,
+/// `✕ n`; none for success) with the duration of a finished block. The
+/// command gives way first (cut with `…`); the context is left out when it
+/// does not fit whole.
+fn header_runs(
+    block: &Block,
+    theme: &Theme,
+    cols: usize,
+    show_context: bool,
+) -> Vec<rift_remote::protocol::Run> {
     use rift_remote::protocol::Run;
     let (badge_color, badge) = match block.state {
         BlockState::Running { .. } => (theme.warning, "running".to_string()),
-        BlockState::Done { exit: Some(0), .. } => (theme.success, "✓ 0".to_string()),
+        BlockState::Done { exit: Some(0), .. } => (theme.success, String::new()),
         BlockState::Done { exit: Some(n), .. } => (theme.error, format!("✕ {n}")),
         BlockState::Done { exit: None, .. } => (theme.text_muted, "—".to_string()),
         BlockState::Prompt => return Vec::new(),
@@ -2822,10 +2862,10 @@ fn header_runs(block: &Block, theme: &Theme, cols: usize) -> Vec<rift_remote::pr
         // no clock: the row would change every second the command runs
         BlockState::Running { .. } | BlockState::Prompt => String::new(),
     };
-    let right = if duration.is_empty() {
-        badge.clone()
-    } else {
-        format!("{badge} {duration}")
+    let right = match (badge.is_empty(), duration.is_empty()) {
+        (_, true) => badge.clone(),
+        (true, false) => duration.clone(),
+        (false, false) => format!("{badge} {duration}"),
     };
     let n = |s: &str| s.chars().count();
     // the badge needs room beside at least a chevron and a few command
@@ -2850,18 +2890,7 @@ fn header_runs(block: &Block, theme: &Theme, cols: usize) -> Vec<rift_remote::pr
             format!("{lines} line{} hidden", if lines == 1 { "" } else { "s" }),
             theme.text_muted,
         ))
-    } else if block.cwd.is_some() || block.branch.is_some() {
-        let mut ctx = block
-            .cwd
-            .as_deref()
-            .map(super::editor::shorten_home)
-            .unwrap_or_default();
-        if let Some(br) = &block.branch {
-            if !ctx.is_empty() {
-                ctx.push(' ');
-            }
-            ctx.push_str(&format!("git:({br})"));
-        }
+    } else if show_context && let Some(ctx) = header_context(block) {
         Some((ctx, theme.text_dim))
     } else {
         None
@@ -2893,12 +2922,15 @@ fn header_runs(block: &Block, theme: &Theme, cols: usize) -> Vec<rift_remote::pr
             bg: None,
             flags: 0,
         });
-        runs.push(Run {
-            bg: Some(hex8(rgb8(pill))),
-            ..style(badge.clone(), badge_color, 0)
-        });
+        if !badge.is_empty() {
+            runs.push(Run {
+                bg: Some(hex8(rgb8(pill))),
+                ..style(badge.clone(), badge_color, 0)
+            });
+        }
         if !duration.is_empty() {
-            runs.push(style(format!(" {duration}"), theme.text_muted, 0));
+            let gap = if badge.is_empty() { "" } else { " " };
+            runs.push(style(format!("{gap}{duration}"), theme.text_muted, 0));
         }
     }
     runs
@@ -3333,8 +3365,9 @@ pub fn render(
                     .find(|(id, _)| *id == block.id)
                     .map(|(_, n)| n.as_str());
                 let bh = border_h(r);
+                let context = shows_context(&blocks, *bi);
                 render_header(
-                    layer, engine, theme, grid, block, y, bh, sel, note, &mut out,
+                    layer, engine, theme, grid, block, y, bh, sel, note, context, &mut out,
                 );
             }
         }
@@ -3450,6 +3483,9 @@ pub fn render_sticky_header(
         grid.line_h + 0.5,
         selected,
         None,
+        // the sticky header stands for the blocks scrolled under it: always
+        // its folder and branch
+        true,
         &mut sink,
     );
     Some(StickyHits {
@@ -4105,11 +4141,14 @@ fn render_header(
     border_h: f32,
     selected: bool,
     filter_note: Option<&str>,
+    show_context: bool,
     out: &mut RenderOutput,
 ) {
     let (border, badge_fg, badge_text) = match block.state {
         BlockState::Running { .. } => (theme.accent, theme.warning, "running".to_string()),
-        BlockState::Done { exit: Some(0), .. } => (theme.success, theme.success, "✓ 0".into()),
+        // success needs no badge: the green rail says it, and a failure's
+        // badge then stands out
+        BlockState::Done { exit: Some(0), .. } => (theme.success, theme.success, String::new()),
         BlockState::Done { exit: Some(n), .. } => (theme.error, theme.error, format!("✕ {n}")),
         BlockState::Done { exit: None, .. } => (theme.text_muted, theme.text_muted, "—".into()),
         BlockState::Prompt => return,
@@ -4167,7 +4206,11 @@ fn render_header(
     let running = matches!(block.state, BlockState::Running { .. });
     // running: a 9px spinner + 6px gap lead the label (design 02)
     let spin_w = if running { 15.0 } else { 0.0 };
-    let badge_w = badge_text.chars().count() as f32 * 6.8 + 16.0 + spin_w;
+    let badge_w = if badge_text.is_empty() {
+        0.0
+    } else {
+        badge_text.chars().count() as f32 * 6.8 + 16.0 + spin_w
+    };
     // right side, from the edge: menu (⋮), copy icon, duration, badge pill
     let right = grid.right;
     let icon_w = 13.0;
@@ -4263,18 +4306,7 @@ fn render_header(
             );
             layer.text(nbuf, after_cmd_x, y, theme.text_muted);
         }
-    } else if block.cwd.is_some() || block.branch.is_some() {
-        let mut ctx = block
-            .cwd
-            .as_deref()
-            .map(super::editor::shorten_home)
-            .unwrap_or_default();
-        if let Some(br) = &block.branch {
-            if !ctx.is_empty() {
-                ctx.push(' ');
-            }
-            ctx.push_str(&format!("git:({br})"));
-        }
+    } else if show_context && let Some(mut ctx) = header_context(block) {
         // context only where it fits whole (it is secondary to the command)
         let ctx_w = engine.measure(&ctx, 11.5, mono_family(), Weight::NORMAL);
         if after_cmd_x + 3.0 + ctx_w > left_limit {
@@ -4354,36 +4386,38 @@ fn render_header(
     // the row, so the pills of back-to-back headers do not overlap
     let badge_x = cursor_x - badge_w;
     let pill_h = 17.0f32.min(grid.line_h - 1.0);
-    layer.rect(
-        [badge_x, y + (grid.line_h - pill_h) / 2.0],
-        [badge_w, pill_h],
-        badge_fg.with_alpha(0.13),
-        5.0,
-    );
-    if running {
-        // 9px ring with its top quarter open, one turn per 0.8 s
-        let (cx, cy) = (badge_x + 8.0 + 4.5, y + grid.line_h / 2.0);
-        let phase =
-            (block_spin_epoch().elapsed().as_secs_f32() / 0.8).fract() * std::f32::consts::TAU;
-        for i in 0..9 {
-            let a = phase + i as f32 * std::f32::consts::TAU / 12.0;
-            layer.circle([cx + 3.7 * a.cos(), cy + 3.7 * a.sin()], 1.7, badge_fg);
+    if !badge_text.is_empty() {
+        layer.rect(
+            [badge_x, y + (grid.line_h - pill_h) / 2.0],
+            [badge_w, pill_h],
+            badge_fg.with_alpha(0.13),
+            5.0,
+        );
+        if running {
+            // 9px ring with its top quarter open, one turn per 0.8 s
+            let (cx, cy) = (badge_x + 8.0 + 4.5, y + grid.line_h / 2.0);
+            let phase =
+                (block_spin_epoch().elapsed().as_secs_f32() / 0.8).fract() * std::f32::consts::TAU;
+            for i in 0..9 {
+                let a = phase + i as f32 * std::f32::consts::TAU / 12.0;
+                layer.circle([cx + 3.7 * a.cos(), cy + 3.7 * a.sin()], 1.7, badge_fg);
+            }
         }
+        let bbuf = make_text(
+            engine,
+            &badge_text,
+            11.0,
+            pill_h,
+            mono_family(),
+            Weight::SEMIBOLD,
+        );
+        layer.text(
+            bbuf,
+            badge_x + 8.0 + spin_w,
+            y + (grid.line_h - pill_h) / 2.0 + 1.0,
+            badge_fg,
+        );
     }
-    let bbuf = make_text(
-        engine,
-        &badge_text,
-        11.0,
-        pill_h,
-        mono_family(),
-        Weight::SEMIBOLD,
-    );
-    layer.text(
-        bbuf,
-        badge_x + 8.0 + spin_w,
-        y + (grid.line_h - pill_h) / 2.0 + 1.0,
-        badge_fg,
-    );
 
     // clickable regions: chevron collapses, the rest of the header selects
     let chevron_w = BLOCK_INDENT + 22.0;
@@ -5840,22 +5874,51 @@ mod tests {
             header.starts_with("▾ ls  /work/rift git:(main)"),
             "{header:?}"
         );
-        assert!(header.ends_with("✓ 0 1ms"), "{header:?}");
+        // a success has no badge, only its duration
+        assert!(
+            header.ends_with(" 1ms") && !header.contains('✓'),
+            "{header:?}"
+        );
         assert_eq!(header.chars().count(), 40, "{header:?}");
         assert!(!text.iter().any(|t| t.contains("user@host")), "{text:?}");
-        // the command is bold in the bright colour; the badge takes the
-        // exit colour
+        // the command is bold in the bright colour
         let theme = Theme::default();
         let cmd = &rows[3][1];
         assert_eq!(
             (cmd.text.as_str(), cmd.flags, cmd.fg.as_deref()),
             ("ls", 1, Some(hex8(rgb8(theme.text_bright)).as_str()))
         );
-        let badge = rows[3].iter().find(|r| r.text == "✓ 0").unwrap();
-        assert_eq!(
-            badge.fg.as_deref(),
-            Some(hex8(rgb8(theme.success)).as_str())
-        );
+        assert!(rows[3].iter().all(|r| r.bg.is_none()), "{:?}", rows[3]);
+    }
+
+    #[test]
+    fn a_header_shows_folder_and_branch_only_where_they_change() {
+        let at = |id: BlockId, cwd: &str, branch: &str| {
+            let base = id * 10;
+            let mut b = block(id, base, Some(base + 1), Some(base + 2), done(), false);
+            b.cwd = Some(cwd.into());
+            b.branch = Some(branch.into());
+            b
+        };
+        let blocks = vec![
+            at(1, "/w/a", "main"),
+            at(2, "/w/a", "main"),
+            at(3, "/w/b", "main"),
+            at(4, "/w/b", "dev"),
+            at(5, "/w/b", "dev"),
+        ];
+        let shown: Vec<bool> = (0..blocks.len())
+            .map(|i| shows_context(&blocks, i))
+            .collect();
+        assert_eq!(shown, [true, false, true, true, false]);
+        // a prompt between blocks does not count as the block before
+        let mut with_prompt = blocks[..2].to_vec();
+        with_prompt.insert(1, block(9, 15, None, None, BlockState::Prompt, false));
+        assert!(!shows_context(&with_prompt, 2));
+        // the phone's copy of the header follows the same rule
+        let theme = Theme::default();
+        assert!(row_text(&header_runs(&blocks[0], &theme, 60, true)).contains("/w/a git:(main)"));
+        assert!(!row_text(&header_runs(&blocks[1], &theme, 60, false)).contains("git:("));
     }
 
     #[test]
@@ -5900,7 +5963,7 @@ mod tests {
         );
         b.command = "cargo test --workspace -- --nocapture".into();
         let cols = 30;
-        let h = header_runs(&b, &theme, cols);
+        let h = header_runs(&b, &theme, cols, true);
         let text = row_text(&h);
         assert_eq!(text.chars().count(), cols, "{text:?}");
         assert!(text.starts_with("▸ cargo test"), "{text:?}");
@@ -5910,10 +5973,10 @@ mod tests {
         );
         // the hidden-lines note shows where there is room
         b.command = "ls".into();
-        let text = row_text(&header_runs(&b, &theme, 60));
+        let text = row_text(&header_runs(&b, &theme, 60, true));
         assert!(text.contains("  4 lines hidden"), "{text:?}");
         // a screen too narrow for the badge keeps the command alone
-        let text = row_text(&header_runs(&b, &theme, 6));
+        let text = row_text(&header_runs(&b, &theme, 6, true));
         assert_eq!(text, "▸ ls");
     }
 
@@ -6016,14 +6079,20 @@ mod tests {
         let theme = Theme::default();
         let badge_bg = |state: BlockState| {
             let b = block(1, 0, Some(1), Some(3), state, false);
-            let runs = header_runs(&b, &theme, 60);
+            let runs = header_runs(&b, &theme, 60, true);
             // only the badge has a background
             let tinted: Vec<_> = runs.iter().filter(|r| r.bg.is_some()).collect();
             assert_eq!(tinted.len(), 1, "{runs:?}");
             (tinted[0].text.clone(), tinted[0].bg.clone().unwrap())
         };
         let tint = |c: Color| hex(theme.bg.mix(c, 0.13));
-        assert_eq!(badge_bg(done()), ("✓ 0".to_string(), tint(theme.success)));
+        // a success has no badge at all
+        let ok = block(1, 0, Some(1), Some(3), done(), false);
+        assert!(
+            header_runs(&ok, &theme, 60, true)
+                .iter()
+                .all(|r| r.bg.is_none())
+        );
         assert_eq!(
             badge_bg(BlockState::Done {
                 exit: Some(3),

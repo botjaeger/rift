@@ -99,6 +99,11 @@ pub enum MenuAction {
     ViewerFind,
     ViewerRendered(bool),
     ViewerClose,
+    // a code review file row's ⋮ (`WindowState::review_menu`: its path);
+    // ReviewDiscard is its "Revert changes…"
+    ReviewOpen,
+    ReviewStage,
+    ReviewDiscard,
     /// "Send to agent…" for the code picked when the menu opened (a review
     /// hunk or file, the viewer's lines).
     SendToAgent,
@@ -251,8 +256,11 @@ fn icon(action: MenuAction) -> Option<Icon> {
         | CopyMarkdown
         | ExplorerCopyPath
         | ExplorerCopyRelativePath => Icon::Copy,
-        LinkOpen | LinkReveal | ExplorerOpen | ExplorerReveal | OpenInViewer => Icon::Open,
-        ExplorerNewFile => Icon::Plus,
+        LinkOpen | LinkReveal | ExplorerOpen | ExplorerReveal | OpenInViewer | ReviewOpen => {
+            Icon::Open
+        }
+        ExplorerNewFile | ReviewStage => Icon::Plus,
+        ReviewDiscard => Icon::Revert,
         CustomTabColor(_) => Icon::Themes,
         ToggleStickyHeader => Icon::ChevronUp,
         SaveOutput | ExportBuffer => Icon::File,
@@ -344,6 +352,7 @@ fn destructive(action: MenuAction) -> bool {
             | MenuAction::CloseOtherTabs(_)
             | MenuAction::CloseTabsRight(_)
             | MenuAction::CloseGroup(_)
+            | MenuAction::ReviewDiscard
     )
 }
 

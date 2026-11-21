@@ -251,7 +251,7 @@ pipes or devices. RTF is not offered.
   asked again every 3 s for git status and every 10 s for Docker Compose state, so files
   an agent or an editor changes while a pane is busy show without a command
   ending. Each pane reads its own directory's repository; the review panel and
-  the top bar's `+added −removed` button follow the focused pane, reload when
+  the top bar's `±` button (brighter while it has changes) follow the focused pane, reload when
   its status changes, and never show another repository's changes while the
   focused one's load. Settings › Input › Prompt
   chips previews them and opens the editor: click a chip to add it, drag
@@ -738,7 +738,7 @@ saved, is shown as unavailable, saved transcripts are not read while
 `save_transcripts` is off, and restored blocks are not searched then either;
 "Clear saved block transcripts" removes them from search at once (and they
 are not saved again). Imported shell history has no output and stays in the
-other scopes, labelled `imported`.
+other scopes (with no time or folder on its rows).
 
 **Shell widgets** (Warp): where your shell config binds ⌃R, ⌃T or ⌥C to a
 widget of its own (fzf, atuin, fzf.fish: a zsh user widget, a bash
@@ -1075,7 +1075,8 @@ Each becomes a `rift://action/new_tab` link (`new_window` with
   that last had focus. Closing a window (its close button, ⇧⌘W, or its last
   tab) ends its shells and leaves the others open, after the running-job
   warning (`confirm_close_running`) names its running commands; closing the
-  last window quits, and ⌘Q quits every window ("Quit Rift?").
+  last window quits, and ⌘Q quits every window ("Quit Rift?"; closing the
+  last tab or pane asks "Close the last tab and quit?").
 - **Window size and launch mode**: a window opened without a saved frame
   (first launch, `restore_session = false`) is `window_width` ×
   `window_height` (default 1180 × 760 logical px, at least 320 × 200); ⌘N
@@ -2243,7 +2244,10 @@ Chips filter to all, unread or errors. A click or ⏎ jumps to the pane and
 selects the block. The list keeps the newest 200.
 
 - **Read state**: an entry is unread until you open it, look at its pane, or
-  press `Mark all as read`. Unread entries put an accent dot on the inbox
+  press `Mark all as read`. A command that succeeds faster than the
+  long-command threshold (`notify_threshold_secs`) is listed without counting
+  as unread (no dot, not under *Unread*, no dot on the inbox button):
+  nothing to come back to; its tab still shows it as done until you look. Unread entries put an accent dot on the inbox
   button and a kind-colored dot on their tab.
 - **Alerts** (Settings → Notifications, `[notifications]`): for a pane out
   of view, an enabled event also raises a toast (Rift focused) or a desktop

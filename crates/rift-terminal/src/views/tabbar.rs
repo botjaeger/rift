@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use rift_core::{Color, TabCloseButton, TabStyle, Theme, ToolbarItem};
 use rift_renderer::glyphon::Weight;
-use rift_renderer::{FONT_SANS, Layer, TextEngine, mono_family};
+use rift_renderer::{FONT_SANS, Layer, TextEngine};
 
 use crate::state::{ClickTarget, Hit};
 use crate::tab_status::{Status, TabStatus};
@@ -546,29 +546,11 @@ fn inside(r: [f32; 4], p: Option<(f32, f32)>) -> bool {
     p.is_some_and(|(x, y)| x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3])
 }
 
-/// The review button's `+added` / `−removed` labels; `None` for a clean
-/// tree (or no repository): then it is a plain ± icon button.
-fn review_counts(panels: &PanelButtons) -> Option<(String, String)> {
-    panels
-        .diff
-        .filter(|(a, d)| a + d > 0)
-        .map(|(a, d)| (format!("+{a}"), format!("−{d}")))
-}
+/// Width of a toolbar button, the review button's ± included: the
+/// `+added −removed` counts live in the prompt's chip, not here too.
+const TOOLBAR_ITEM_W: f32 = 26.0;
 
-/// Width of a toolbar button: 26 px, the review button as wide as its
-/// counts.
-fn toolbar_item_width(engine: &mut TextEngine, panels: &PanelButtons, item: ToolbarItem) -> f32 {
-    match (item, review_counts(panels)) {
-        (ToolbarItem::Review, Some((a, d))) => {
-            16.0 + engine.measure(&a, 12.0, mono_family(), Weight::MEDIUM)
-                + 6.0
-                + engine.measure(&d, 12.0, mono_family(), Weight::MEDIUM)
-        }
-        _ => 26.0,
-    }
-}
-
-/// A toolbar button's icon (`None` for code review: its counts, or ±).
+/// A toolbar button's icon (`None` for code review: its ± is drawn).
 pub fn toolbar_icon(item: ToolbarItem) -> Option<Icon> {
     match item {
         ToolbarItem::Explorer => Some(Icon::Sidebar),
@@ -592,7 +574,6 @@ pub fn draw_plus_minus(layer: &mut Layer, c: [f32; 2], color: Color) {
 #[allow(clippy::too_many_arguments)]
 fn toolbar_item(
     layer: &mut Layer,
-    engine: &mut TextEngine,
     theme: &Theme,
     panels: &PanelButtons,
     item: ToolbarItem,
@@ -602,8 +583,7 @@ fn toolbar_item(
     hits: &mut Vec<Hit>,
 ) -> [f32; 4] {
     let size = 26.0;
-    let width = toolbar_item_width(engine, panels, item);
-    let rect = [x, by, width, size];
+    let rect = [x, by, TOOLBAR_ITEM_W, size];
     let hover = inside(rect, mouse);
     let (icon, on, target) = match item {
         ToolbarItem::Explorer => (
@@ -628,7 +608,7 @@ fn toolbar_item(
         ),
         ToolbarItem::Review => {
             let unavailable = panels.review_unavailable;
-            review_button(layer, engine, theme, panels, rect, hover && !unavailable);
+            review_button(layer, theme, panels, rect, hover && !unavailable);
             hits.push(Hit {
                 rect,
                 target: if unavailable {
@@ -650,11 +630,10 @@ fn toolbar_item(
     rect
 }
 
-/// The code review button: the working tree's `+added −removed`, or ± when
-/// it is clean.
+/// The code review button: a ±, brighter while the working tree has
+/// changes (their counts show in the prompt's chip and the panel).
 fn review_button(
     layer: &mut Layer,
-    engine: &mut TextEngine,
     theme: &Theme,
     panels: &PanelButtons,
     review: [f32; 4],
@@ -671,27 +650,18 @@ fn review_button(
     } else if hover {
         layer.rect([rx, by], [review_w, size], lift(theme, 0.08), 4.0);
     }
-    match review_counts(panels) {
-        Some((a, d)) => {
-            let mut tx = rx + 8.0;
-            for (s, c) in [(a, theme.success), (d, theme.error)] {
-                let b = make_text(engine, &s, 12.0, mono_family(), Weight::MEDIUM);
-                layer.text(b, tx, (bar_h() - 15.6) / 2.0, c);
-                tx += engine.measure(&s, 12.0, mono_family(), Weight::MEDIUM) + 6.0;
-            }
-        }
-        None => {
-            // ± as quads (crisp at any scale) when the tree is clean
-            let color = if panels.review_unavailable {
-                theme.text_muted.with_alpha(0.45)
-            } else if panels.review_open {
-                theme.accent
-            } else {
-                theme.text_dim
-            };
-            draw_plus_minus(layer, [rx + size / 2.0, by + 13.0], color);
-        }
-    }
+    let dirty = panels.diff.is_some_and(|(a, d)| a + d > 0);
+    let color = if panels.review_unavailable {
+        theme.text_muted.with_alpha(0.45)
+    } else if panels.review_open {
+        theme.accent
+    } else if dirty {
+        theme.text_ui
+    } else {
+        theme.text_dim
+    };
+    // ± as quads (crisp at any scale)
+    draw_plus_minus(layer, [rx + size / 2.0, by + 13.0], color);
 }
 
 /// The tab being dragged: its index and the pointer-following left edge.
@@ -735,10 +705,10 @@ pub fn render(
     let mut lx = TABS_X + 2.0;
     for item in &panels.left {
         // a narrow window keeps room for a tab and + (later buttons go)
-        if lx + toolbar_item_width(engine, &panels, *item) > w - MIN_TAB_W - 40.0 {
+        if lx + TOOLBAR_ITEM_W > w - MIN_TAB_W - 40.0 {
             break;
         }
-        let rect = toolbar_item(layer, engine, theme, &panels, *item, lx, by, mouse, hits);
+        let rect = toolbar_item(layer, theme, &panels, *item, lx, by, mouse, hits);
         lx = rect[0] + rect[2] + 4.0;
     }
     let tabs_x = if panels.left.is_empty() {
@@ -749,14 +719,13 @@ pub fn render(
     // right to left from the strip's end
     let mut right_x = w - 10.0;
     for item in panels.right.iter().rev() {
-        let width = toolbar_item_width(engine, &panels, *item);
+        let width = TOOLBAR_ITEM_W;
         // never over the tabs: the leftmost ones go first in a narrow window
         if right_x - width < tabs_x + MIN_TAB_W + 40.0 {
             break;
         }
         let rect = toolbar_item(
             layer,
-            engine,
             theme,
             &panels,
             *item,

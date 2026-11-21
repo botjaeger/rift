@@ -616,6 +616,9 @@ pub enum ReviewHit {
     Stage(String, Option<HunkId>),
     Unstage(String, Option<HunkId>),
     Revert(String, Option<HunkId>),
+    /// An unstaged file row's ⋮: open, stage, discard (out of Stage's
+    /// reach: the destructive one is never a click beside it).
+    Menu(String),
     StageAll,
     UnstageAll,
     /// Cover the panes / back beside them.
@@ -1669,22 +1672,32 @@ pub fn render(
                             ReviewHit::Stage(f.path.clone(), None),
                             theme.text_ui,
                         );
-                        add(
-                            Icon::Revert,
-                            ReviewHit::Revert(f.path.clone(), None),
-                            theme.error,
-                        );
+                        // discard lives in this menu, not as a button
+                        // beside Stage
+                        add(Icon::More, ReviewHit::Menu(f.path.clone()), theme.text_dim);
                     }
                     if f.status != 'D' {
                         add(Icon::Open, ReviewHit::Open(f.path.clone()), theme.text_dim);
                     }
                 }
                 // +added −removed in a pill, colored per side
-                let add_s = format!("+{}", f.added);
-                let del_s = format!("−{}", f.removed);
-                let add_w = engine.measure(&add_s, 11.0, mono, Weight::NORMAL);
-                let del_w = engine.measure(&del_s, 11.0, mono, Weight::NORMAL);
-                let pill_w = add_w + del_w + 6.0 + 12.0;
+                // a zero side is left out (`+4`, not `+4 −0`); a file with
+                // neither (a mode change) shows `±0`
+                let mut sides: Vec<(String, Color)> = Vec::new();
+                if f.added > 0 {
+                    sides.push((format!("+{}", f.added), theme.success));
+                }
+                if f.removed > 0 {
+                    sides.push((format!("−{}", f.removed), theme.error));
+                }
+                if sides.is_empty() {
+                    sides.push(("±0".into(), theme.text_muted));
+                }
+                let widths: Vec<f32> = sides
+                    .iter()
+                    .map(|(s, _)| engine.measure(s, 11.0, mono, Weight::NORMAL))
+                    .collect();
+                let pill_w = widths.iter().sum::<f32>() + 6.0 * (sides.len() - 1) as f32 + 12.0;
                 let pill_x = right - 6.0 - pill_w;
                 layer.rect(
                     [pill_x, ry + (rh - 18.0) / 2.0],
@@ -1692,20 +1705,17 @@ pub fn render(
                     theme.bg_chrome,
                     4.0,
                 );
-                layer.text_clipped(
-                    text(engine, &add_s, 11.0, mono, Weight::NORMAL),
-                    pill_x + 6.0,
-                    ry + 9.0,
-                    theme.success,
-                    card_bounds,
-                );
-                layer.text_clipped(
-                    text(engine, &del_s, 11.0, mono, Weight::NORMAL),
-                    pill_x + 6.0 + add_w + 6.0,
-                    ry + 9.0,
-                    theme.error,
-                    card_bounds,
-                );
+                let mut sx = pill_x + 6.0;
+                for ((s, c), w) in sides.iter().zip(&widths) {
+                    layer.text_clipped(
+                        text(engine, s, 11.0, mono, Weight::NORMAL),
+                        sx,
+                        ry + 9.0,
+                        *c,
+                        card_bounds,
+                    );
+                    sx += w + 6.0;
+                }
                 // a long name stops before the counts, ending in `…`
                 let name_room = (pill_x - 8.0 - name_x).max(10.0);
                 let name_shown = if name_w > name_room {

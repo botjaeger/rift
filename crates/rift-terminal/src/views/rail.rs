@@ -444,7 +444,10 @@ fn pane_row(
         icons::draw(layer, Icon::Lock, [cx + 5.0, mid], 11.0, ink);
         cx += 16.0;
     }
-    let stats_x = draw_stats(layer, engine, theme, p.diff, p.pr, row[2] - 10.0, mid - 7.0);
+    // the change counts on the current row only: every row of one
+    // repository would repeat them
+    let diff = p.diff.filter(|_| p.active);
+    let stats_x = draw_stats(layer, engine, theme, diff, p.pr, row[2] - 10.0, mid - 7.0);
     let title = elide(engine, &p.title, 11.5, stats_x - 6.0 - cx);
     let b = make_text(engine, &title, 11.5, FONT_SANS, Weight::NORMAL);
     layer.text(b, cx, mid - 7.5, ink);
@@ -596,7 +599,8 @@ fn tab_row(
             layer,
             engine,
             theme,
-            tab.marks.diff,
+            // the current tab's row only (see `pane_row`)
+            tab.marks.diff.filter(|_| is_active),
             tab.marks.pr,
             row[0] + row[2] - 12.0,
             line2,

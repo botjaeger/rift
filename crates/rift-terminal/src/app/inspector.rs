@@ -50,8 +50,19 @@ impl App {
             Some(t) => t,
             None => self.manual_text(&found.title),
         };
+        // the card opens above the whole input zone (the prompt's chips
+        // included), never over the chips themselves
+        let top = self
+            .win
+            .hits
+            .iter()
+            .filter(|h| h.target == ClickTarget::Editor(pane_id))
+            .map(|h| h.rect)
+            .find(|r| r[0] <= rect[0] && r[1] <= rect[1] && rect[1] < r[1] + r[3])
+            .map_or(rect[1], |r| r[1]);
+        let anchor = [rect[0], top, rect[2], rect[1] + rect[3] - top];
         Some(Tip::card(
-            rect,
+            anchor,
             found.title,
             format!("{} · {text}", found.role.label()),
         ))

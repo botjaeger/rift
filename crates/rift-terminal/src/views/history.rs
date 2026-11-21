@@ -589,10 +589,11 @@ pub fn render(
             );
             layer.text(cb, right + 16.0, rcy - 8.0, theme.text_muted);
         }
-        let when = match (e.finished, e.cwd.is_none()) {
-            (Some(t), _) => age(t, now),
-            (None, true) => "imported".into(),
-            (None, false) => String::new(),
+        // an imported line (no time, no folder) shows nothing here: every
+        // such row would repeat the same word
+        let when = match e.finished {
+            Some(t) => age(t, now),
+            None => String::new(),
         };
         if !when.is_empty() {
             let aw = engine.measure(&when, 12.0, FONT_SANS, Weight::NORMAL);

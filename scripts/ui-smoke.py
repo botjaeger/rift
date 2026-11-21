@@ -9306,8 +9306,9 @@ with (sr / "log.txt").open("w") as log:
 assert rc == 0, died("settings-review run failed", sr / "log.txt")
 sr_dump = lambda name: (sr / f"{name}.txt").read_text()
 sr_review = lambda name: re.search(r"^review=.*$", sr_dump(name), re.M)[0]
-# the shell tab: counts widen the button, the panel is on screen
-assert re.search(r'"Review changes@\d+,4,(\d+),26"', sr_dump("a"))[1] != "26", sr_dump("a")[:600]
+# the shell tab: a 26 px ± with changes too (the counts are the prompt
+# chip's), the panel is on screen
+assert re.search(r'"Review changes@\d+,4,(\d+),26"', sr_dump("a"))[1] == "26", sr_dump("a")[:600]
 assert sr_review("a").startswith("review=true load=ready") and " shown=true " in sr_review("a"), sr_review("a")
 # the Settings tab: a 26 px ± that explains itself, the panel hidden
 b = sr_dump("b")
@@ -9845,6 +9846,68 @@ if sys.platform == "darwin":
         f"dump {sp}/search.txt"])
     sp_search = (sp / "search.txt").read_text()
     assert 'Button "Open Settings, Full Disk Access"' in sp_search, sp_search[-2500:]
+
+# UI review fixes: the welcome list hides under the history pane and the
+# completion panel; a quick success out of view is listed but not unread (a
+# failure is); an unstaged review file's discard is in its ⋮ menu (asking
+# first), not a button beside Stage; Keybindings rows read the palette's
+# names; ⌘W on the last tab says it quits
+ux = scratch / "ux-review"
+for sub in ("cfg/rift", "data", "repo"):
+    (ux / sub).mkdir(parents=True, exist_ok=True)
+ux_repo = ux / "repo"
+for args in (["init", "-q"], ["config", "user.email", "t@example.com"], ["config", "user.name", "t"]):
+    subprocess.run(["git", *args], cwd=ux_repo, check=True)
+(ux_repo / "a.txt").write_text("one\n")
+(ux_repo / "a2.txt").write_text("two\n")
+subprocess.run(["git", "add", "-A"], cwd=ux_repo, check=True)
+subprocess.run(["git", "commit", "-qm", "init"], cwd=ux_repo, check=True)
+(ux_repo / "a.txt").write_text("one\ntwo\n")
+(ux / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
+    f'sync_os_theme = false\nworking_directory = {json.dumps(str(ux_repo))}\n')
+
+
+def ux_run(name, steps):
+    (ux / f"{name}.rift").write_text("\n".join(["resize 1280 800", "wait_prompt", "wait 300", *steps, "quit"]) + "\n")
+    with (ux / f"{name}.log").open("w") as log:
+        rc = subprocess.run([str(binary), "--script", str(ux / f"{name}.rift"), "--headless"],
+                            env=dict(env, XDG_CONFIG_HOME=str(ux / "cfg"), XDG_DATA_HOME=str(ux / "data"),
+                                     BASH_SILENCE_DEPRECATION_WARNING="1"),
+                            stdout=log, stderr=log, timeout=90).returncode
+    assert rc == 0, died(f"ux-review {name} run failed", ux / f"{name}.log")
+
+
+ux_run("welcome", [f"dump {ux}/w0.txt", "key ctrl+r", "wait 400", f"dump {ux}/w1.txt",
+                   "key escape", "wait 200", "type cat a", "key tab", "wait 600", f"dump {ux}/w2.txt"])
+assert "welcome_rows=0" not in (ux / "w0.txt").read_text()
+assert "welcome_rows=0" in (ux / "w1.txt").read_text(), (ux / "w1.txt").read_text()[-2000:]
+w2 = (ux / "w2.txt").read_text()
+assert re.search(r'^completion_items=\S', w2, re.M) and "welcome_rows=0" in w2, w2[-2000:]
+ux_run("unread", ["focus false", "wait 200", "type true\\n", "wait 600", "type false\\n", "wait 600",
+                  f"dump {ux}/u.txt"])
+u = (ux / "u.txt").read_text()
+# (quiet: out of the inbox's unread count; still unread for its tab's status)
+assert re.search(r'^attention id=\d+ .*kind=Finished .*read=false quiet=true .*title="true"', u, re.M), u[-2000:]
+assert re.search(r'^attention id=\d+ .*kind=Failed .*read=false quiet=false .*title="false"', u, re.M), u[-2000:]
+assert "unread=1 " in u, u[-2000:]
+ux_run("review", ["key shift+cmd+g", "wait 1500", f"dump {ux}/r0.txt",
+                  "a11y click More actions for a.txt", "wait 300", f"dump {ux}/r1.txt",
+                  "a11y click Revert changes…", "wait 300", f"dump {ux}/r2.txt", "key escape", "wait 200"])
+r0 = (ux / "r0.txt").read_text()
+assert '"More actions for a.txt"' in r0 and '"Revert a.txt"' not in r0, r0[-3000:]
+r1 = (ux / "r1.txt").read_text()
+assert all(f'MenuItem "{m}"' in r1 for m in ("Open file", "Stage file", "Revert changes…")), r1[-3000:]
+assert 'AlertDialog "Revert changes?"' in (ux / "r2.txt").read_text(), (ux / "r2.txt").read_text()[-3000:]
+assert (ux_repo / "a.txt").read_text() == "one\ntwo\n", "the menu reverted without asking"
+ux_run("keys", ["key cmd+,", "wait 500", "a11y click Keybindings", "wait 500", f"dump {ux}/k.txt"])
+k = (ux / "k.txt").read_text()
+assert 'Button "Accept autosuggestion: unbound"' in k, k[-3000:]
+assert 'Button "Notifications: finished commands and alerts:' in k, k[-3000:]
+ux_run("quit", ["type sleep 100\\n", "wait 700", "key cmd+w", "wait 400", f"dump {ux}/q.txt",
+                "key escape", "wait 200", "key ctrl+c", "wait 300"])
+q = (ux / "q.txt").read_text()
+assert 'AlertDialog "Close the last tab and quit?"' in q, q[-3000:]
 
 # settings-collections: the four structured editors save real TOML, validate
 # on their UI, and feed actual action, masking and tab-color consumers.

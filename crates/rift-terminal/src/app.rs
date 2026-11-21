@@ -516,6 +516,10 @@ struct Attention {
     /// Status, duration or notification body.
     detail: String,
     read: bool,
+    /// Listed without counting as unread in the inbox (its Unread filter,
+    /// the bell's dot): a quick success. Its tab still shows it as done
+    /// until the pane is seen (`read`).
+    quiet: bool,
     /// The pane's input count when it was raised (`Session::inputs`): a
     /// request is still open while nothing was typed since.
     inputs: u64,
@@ -535,6 +539,7 @@ impl Attention {
             title,
             detail,
             read: false,
+            quiet: false,
             inputs: 0,
         }
     }
@@ -1106,6 +1111,8 @@ struct WindowState {
     /// resolved path, the line and column printed with a path, and whether
     /// it is a path.
     link_menu: Option<(String, crate::file_link::At, bool)>,
+    /// The code review file a row menu was opened on (`open_review_menu`).
+    review_menu: Option<String>,
     /// Last git status poll of the active tab's panes (changes made while a
     /// pane is busy, by an agent or an editor, show without a command
     /// ending), and of its Docker Compose state.
@@ -1342,6 +1349,15 @@ fn press_key(key: &winit::keyboard::Key) -> bool {
 
 /// Shortest time a confirmation dialog is on screen before Enter accepts it.
 const CONFIRM_ARM: Duration = Duration::from_millis(300);
+
+/// The quit warning's title: closing the last pane or tab quits, and says
+/// both (the person pressed close, not quit).
+fn quit_title(scope: CloseScope) -> &'static str {
+    match scope {
+        CloseScope::Pane(_) | CloseScope::Tab(_) => "Close the last tab and quit?",
+        _ => "Quit Rift?",
+    }
+}
 
 /// The close/quit warning's description: the connected phones (a quit
 /// only), then the running processes.
@@ -2214,6 +2230,7 @@ impl WindowState {
             review_cwd: None,
             send_source: None,
             link_menu: None,
+            review_menu: None,
             git_polled: None,
             docker_polled: None,
             status_pane: None,
@@ -3496,6 +3513,21 @@ impl App {
         *menu = items;
     }
 
+    /// An unstaged file row's ⋮ in code review (also its right-click): open,
+    /// stage, and discard, which asks first (`ReviewHit::Revert`).
+    fn open_review_menu(&mut self, path: String, pos: (f32, f32)) {
+        let items = Self::review_file_items();
+        self.win.review_menu = Some(path);
+        self.win.context_menu = ContextMenuState {
+            open: true,
+            pane: VIEWER_PANE,
+            block: 0,
+            pos,
+            items,
+            selected: None,
+        };
+    }
+
     /// The file viewer's ⋮ menu.
     fn open_viewer_menu(&mut self, pos: (f32, f32)) {
         let rendered_view = self.win.viewer.has_rendered();
@@ -3727,6 +3759,16 @@ impl App {
                 return;
             }
             MenuAction::SendToAgent => return self.pick_send_target(),
+            MenuAction::ReviewOpen | MenuAction::ReviewStage | MenuAction::ReviewDiscard => {
+                if let Some(path) = self.win.review_menu.take() {
+                    self.review_action(match action {
+                        MenuAction::ReviewOpen => ReviewHit::Open(path),
+                        MenuAction::ReviewStage => ReviewHit::Stage(path, None),
+                        _ => ReviewHit::Revert(path, None),
+                    });
+                }
+                return;
+            }
             MenuAction::RearrangeToolbar => self.open_toolbar_editor(),
             MenuAction::RenameTab(i) => {
                 self.start_rename(i);
@@ -6582,6 +6624,10 @@ impl App {
             };
             let mut a = Attention::new(pane, kind, command, detail);
             a.block = Some(id);
+            // a quick success is listed but not unread in the inbox: under
+            // the long-command threshold it is nothing to come back to, and
+            // the bell's dot would hardly ever go out (its tab still says done)
+            a.quiet = !failed && duration < long;
             // the command itself is the agent that just exited, if any
             a.agent = rift_core::notifications::Agent::from_command(&a.title);
             self.raise(a, event);
@@ -6607,7 +6653,7 @@ impl App {
             title: a.title.clone(),
             detail: a.detail.clone(),
             age_secs: now.duration_since(a.at).map(|d| d.as_secs()).unwrap_or(0),
-            unread: !a.read,
+            unread: !a.read && !a.quiet,
         }
     }
 
@@ -6673,7 +6719,10 @@ impl App {
     }
 
     fn unread_attention(&self) -> usize {
-        self.attention.iter().filter(|a| !a.read).count()
+        self.attention
+            .iter()
+            .filter(|a| !a.read && !a.quiet)
+            .count()
     }
 
     /// Palette rows for detached session-service shells.
@@ -9746,6 +9795,10 @@ impl App {
         }
         let root = model.root.clone();
         let ops: ReviewOps = match hit {
+            ReviewHit::Menu(path) => {
+                self.open_review_menu(path, self.win.mouse);
+                return;
+            }
             ReviewHit::Refresh => {
                 self.win.review.notice = None;
                 self.win.explorer.refresh();
@@ -10444,6 +10497,8 @@ impl App {
             keymap: keymap_ref,
             ..
         } = self;
+        // the history pane docks over the welcome list: the list hides
+        let history_open = self.win.history.open;
         let scene = &mut self.win.scene;
         let tabs = &mut self.win.tabs;
         let completion = &mut self.win.completion;
@@ -10859,17 +10914,34 @@ impl App {
                     theme.ground(theme.bg),
                     0.0,
                 );
-                // title bar: the program's title, else the directory
-                let title = if pane.program_title().is_empty() {
-                    pane.session
-                        .cwd
-                        .lock()
-                        .unwrap()
-                        .as_deref()
-                        .map(editor::shorten_home)
-                        .unwrap_or_else(|| profiles::program_name(pane, &shell_label))
+                // title bar: the program's title, else the command that runs
+                // or ran last with its directory after it (muted), else the
+                // directory: split panes in one folder tell apart
+                let folder = pane
+                    .session
+                    .cwd
+                    .lock()
+                    .unwrap()
+                    .as_deref()
+                    .map(editor::shorten_home);
+                let last_command = pane
+                    .session
+                    .blocks
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .rev()
+                    .find(|b| !matches!(b.state, BlockState::Prompt) && !b.command.is_empty())
+                    .map(|b| rift_core::secrets::mask(&b.command).replace('\n', " ⏎ "));
+                let (title, detail) = if !pane.program_title().is_empty() {
+                    (pane.program_title().to_string(), String::new())
+                } else if let Some(cmd) = last_command {
+                    (cmd, folder.unwrap_or_default())
                 } else {
-                    pane.program_title().to_string()
+                    (
+                        folder.unwrap_or_else(|| profiles::program_name(pane, &shell_label)),
+                        String::new(),
+                    )
                 };
                 crate::views::pane_header::render(
                     scene.layer(1),
@@ -10877,6 +10949,7 @@ impl App {
                     &theme,
                     [pr.rect[0], pr.rect[1], pr.rect[2], PANE_HEADER_H],
                     &title,
+                    &detail,
                     is_active_pane,
                     pane.running(),
                     pane.session.read_only(),
@@ -11199,8 +11272,12 @@ impl App {
                     [pr.rect[0], pr.rect[1], pr.rect[2], area[1] - pr.rect[1]]
                 };
                 let entries = welcome_entries(keymap_ref);
+                // not under the completion panel or the history pane: two
+                // lists of commands at once
                 if fresh
                     && !split
+                    && !completion.open
+                    && !history_open
                     && above[3] >= crate::views::welcome::height(entries.len()) + 40.0
                     && above[2] >= 420.0
                 {
@@ -11967,7 +12044,7 @@ impl App {
                 ConfirmAction::Close(scope) => {
                     let quit = quits;
                     let (title, label) = match scope {
-                        _ if quit => ("Quit Rift?", "Quit"),
+                        _ if quit => (quit_title(*scope), "Quit"),
                         CloseScope::Pane(_) => ("Close pane?", "Close pane"),
                         CloseScope::Tab(_) => ("Close tab?", "Close tab"),
                         CloseScope::OtherTabs(_) => ("Close other tabs?", "Close tabs"),
@@ -20953,13 +21030,15 @@ impl App {
                     .trim()
                     .to_string(),
                 ),
-                ConfirmAction::Close(scope) if self.quits(*scope) => ("Quit Rift?".to_string(), {
-                    let mut d = close_description(c.commands.len(), &self.connected_phones());
-                    if !c.commands.is_empty() {
-                        d.push_str(&format!(" Running: {}", c.commands.join(", ")));
-                    }
-                    d
-                }),
+                ConfirmAction::Close(scope) if self.quits(*scope) => {
+                    (quit_title(*scope).to_string(), {
+                        let mut d = close_description(c.commands.len(), &self.connected_phones());
+                        if !c.commands.is_empty() {
+                            d.push_str(&format!(" Running: {}", c.commands.join(", ")));
+                        }
+                        d
+                    })
+                }
                 ConfirmAction::Close(_) => (
                     "Close with running commands?".to_string(),
                     format!("Running: {}", c.commands.join(", ")),
@@ -21748,6 +21827,7 @@ impl App {
                         ReviewHit::Stage(p, h) => format!("Stage {p}{}", hunk_label(h)),
                         ReviewHit::Unstage(p, h) => format!("Unstage {p}{}", hunk_label(h)),
                         ReviewHit::Revert(p, h) => format!("Revert {p}{}", hunk_label(h)),
+                        ReviewHit::Menu(p) => format!("More actions for {p}"),
                         ReviewHit::StageAll => "Stage all".into(),
                         ReviewHit::UnstageAll => "Unstage all".into(),
                         ReviewHit::Maximize if self.win.review.maximized => "Restore".into(),
@@ -22869,12 +22949,13 @@ impl App {
                 .position(|w| w.tabs.iter().any(|t| t.pane(a.pane).is_some()));
             let _ = writeln!(
                 out,
-                "attention id={} pane={} kind={:?} agent={:?} read={} branch={:?} title={:?} detail={:?} window={window:?}",
+                "attention id={} pane={} kind={:?} agent={:?} read={} quiet={} branch={:?} title={:?} detail={:?} window={window:?}",
                 a.id,
                 a.pane,
                 a.kind,
                 a.agent.map(|g| g.name()),
                 a.read,
+                a.quiet,
                 a.branch,
                 a.title,
                 a.detail

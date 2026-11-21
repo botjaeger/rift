@@ -200,10 +200,11 @@ removes both within a moment.
   active one behind `‹ N` / `N ›` chips.
 - Panel buttons (Warp layout), accent while their panel is open: a sidebar
   icon right after the traffic lights toggles the file explorer; at the far
-  right, `+added −removed` for the active pane's repository (reloaded on
-  `cd`, tab or pane switch and after each command) toggles code review — a
-  bare `±` outside a repository or with no changes. The Settings tab has no
-  repository: there the button is a dimmed `±` with no counts that does
+  right, a `±` toggles code review, brighter while the active pane's
+  repository has changes (reloaded on `cd`, tab or pane switch and after each
+  command; the `+added −removed` counts show in the prompt's chip and the
+  panel, not here too). The Settings tab has no
+  repository: there the button is a dimmed `±` that does
   nothing (tooltip `No repository on the Settings tab`), and an open review
   panel hides until a shell tab is shown again, as it was. Left of it, an inbox
   (bell) icon opens the notifications popover; an accent dot marks unread
@@ -286,8 +287,9 @@ the focused one). Pinned tabs come first under a *PINNED* label as 32 px
 one-line rows (bookmark mark), the rest under *TABS*. A group's 28 px header
 row shows a chevron (open / folded), a 3 px bar in its color, its name and
 tab count; its tabs sit indented with a 2 px bar in that color. Rows end
-their second line with the repository's `+added` (success) `−removed`
-(error) and `#PR` (accent) in mono 11 px.
+their second line with `#PR` (accent) in mono 11 px, and the current row
+also with its repository's `+added` (success) `−removed` (error): on every
+row of one repository they would repeat.
 
 ## File explorer (⇧⌘E)
 
@@ -478,8 +480,12 @@ nothing to list the body says `Loading changes…`, `Not a git repository`,
   file count (`STAGED  3`, `CHANGES  5`), with **Unstage all** / **Stage
   all**.
 - Each file is a solid card (radius 6, hairline border): a `surface` header
-  with status letter, name and folder, a `+a −d` pill, then icon buttons: ↗
-  open in the viewer, ↺ revert (unstaged only) and + stage / − unstage.
+  with status letter, name and folder, a `+a −d` pill (a zero side left out:
+  `+4`, not `+4 −0`; `±0` when neither), then icon buttons: ↗ open in the
+  viewer, ⋮ (unstaged only) and + stage / − unstage. The ⋮ — and a
+  right-click on an unstaged file's header, which adds *Send to agent…* —
+  opens *Open file*, *Stage file* and *Revert changes…* (in the error color):
+  reverting a whole file is never a button beside Stage.
   Click the header to expand its diff on a darker `bg_chrome` reading pane.
 - The diff reads like Warp's: one column of new-side line numbers (removed
   lines have none), syntax-colored code, added lines on a green wash and
@@ -545,15 +551,17 @@ Each command becomes a block via shell-integration OSC 133 markers:
   - command text (bright), cut with `…` at the cells it is drawn in (a CJK
     char takes two) so it never reaches the note or the right side; copy and
     re-input still use the whole command
-  - context: `~/path git:(branch)` — cwd and branch *at the time the command ran*
-    (dim; collapsed blocks show an italic `N lines hidden` here instead —
+  - context: `~/path git:(branch)` — cwd and branch *at the time the command ran*,
+    only where they differ from the block before (the first block always; the
+    sticky header always), so a run of commands in one place does not repeat
+    them (dim; collapsed blocks show an italic `N lines hidden` here instead —
     the command gives way to it, and it is cut short before the badge; a
     block with an output filter active shows a warning-tinted pill `filter "q"
     · shown/total lines` instead; a regex reads `/q/`, and `Aa`, `not` and
     `±N` follow for match case, invert and context lines)
-  - right side: status badge pill (`✓ 0` green / `✕ N` red / amber `running`
-    with a spinning ring /
-    `—` unknown), duration (live elapsed while running), copy-output button.
+  - right side: status badge pill (`✕ N` red / amber `running` with a
+    spinning ring / `—` unknown; a success has none — its green border says
+    it, and a failure's badge stands out), duration (live elapsed while running), copy-output button.
     The duration is a right-aligned column (at least six cells), so pills
     and times line up from header to header; a pill is never taller than
     the row. A block restored from a saved transcript shows `restored · 1.2s`
@@ -836,7 +844,9 @@ integration). Sits at the bottom of the pane, or at the top with
   count (`COMPLETIONS 7`, an `accent` underline; the ↑ menu's reads
   `HISTORY`). Rows show an icon (folder, file, branch, terminal), the name
   with its matched characters bold in the accent (the typed prefix, or each
-  character of a fuzzy match), and the description at the right; ⇥ / ⇧⇥
+  character of a fuzzy match), and the description in a column just past the
+  longest shown name (at most 40 cells in; a description too long for that
+  ends at the panel's edge); ⇥ / ⇧⇥
   (wrapping) or ↑ / ↓ select, ⏎ or a click accepts a row. Your shell's own
   completions join the rows (as you type: within 300 ms of Rift's, keeping
   the picked row picked; a Tab waits for them). A pane on another host that
@@ -851,7 +861,9 @@ integration). Sits at the bottom of the pane, or at the top with
   File explorer, Settings. Clicking a row does it; the list goes away after
   the first command or background output and stays hidden after clearing blocks;
   a shell reattached after a restart or update never shows it, and it is not
-  shown while the pane shows any text (a shell's startup output).
+  shown while the pane shows any text (a shell's startup output), nor while
+  the completion panel or the history pane is open (one list of commands at
+  a time).
 - **Boot placeholder**: `Starting zsh…` (shell name from config) shown on the
   chip row of the input zone (bottom, or top with `input_position = "top"`;
   the input line in shell-prompt mode), as in Warp, under the input divider
@@ -874,8 +886,10 @@ integration). Sits at the bottom of the pane, or at the top with
   <name>*) draws its body, blocks and command line in that theme; its title
   bar, the dividers and the inactive wash stay in the window theme.
 - Each pane has a 28 px title bar (Warp pane header): a terminal icon, the
-  program's title (OSC 0/2), else the pane's directory, centered (after a
-  spinner while a command runs); while the
+  program's title (OSC 0/2), else the command that runs or ran last with the
+  pane's directory after it (muted; left out when it does not fit), else the
+  directory alone, centered (after a spinner while a command runs), so split
+  panes in one folder tell apart; while the
   pane is focused or hovered, split (a new pane to its right), ⋮ (the pane
   menu) and × (close) show at the right. Clicking the bar focuses the pane.
 - Pane menu (⋮, or right-click in the pane outside a block): Copy, Paste,
@@ -1007,8 +1021,8 @@ click on a chip switches mode. Modes:
 - **Theme picker** (*Theme picker (live preview)*) and **Set tab color…**
   (the tab menu's *Custom color…* too) — text modes with no mode chips:
   `Search themes: ↑ ↓ preview, ⏎ keeps, esc reverts…` and `Tab color: a name
-  or #rrggbb…`. The theme rows are every theme, the one in use tagged *in
-  use*.
+  or #rrggbb…`. The theme rows, under `THEMES`, are every theme, the one in
+  use tagged *in use*.
 
 Other Actions rows: `SSH: <name>` and `Install Rift shell integration on
 <name>` per SSH profile, `Toggle vertical tabs`, `Clear saved block
@@ -1132,7 +1146,8 @@ Nothing else changes on screen.
   on Linux the drawn traffic lights ("Close window", "Minimize", "Zoom"), the
   toolbar's palette and Settings buttons, and the jump-to-bottom button. A
   part of the command line shows the **command inspector**'s card (its text
-  as the title, then *Role · what it does*; ⇧⌘I pins it at the cursor). A
+  as the title, then *Role · what it does*; ⇧⌘I pins it at the cursor; it
+  opens above the whole input zone, never over the prompt's chips). A
   prompt chip shows its hover card; the **Time on this tab** card is
   interactive: it stays open while the pointer moves from the chip into it, and
   its **Reset** button (pointer cursor; also in the accessibility tree and as
@@ -1291,7 +1306,9 @@ in the icon-only sidebar). When the settings area is
 under 700 px wide the sidebar shrinks to 56 px of icons, with no search
 field or labels. The body (at most 720 px wide, centred right of the sidebar like Warp's)
 has the page title and description, group labels, and flat rows: label (and
-description) left, control right; it runs to the bottom edge.
+description) left, control right; it runs to the bottom edge. A description
+too long beside its control wraps onto more lines, evened out (never cut
+with `…`); the row grows to fit.
 
 - **Search**: typing anywhere outside Keybindings fills the search field and
   lists the matching settings of General, Profiles (its two settings, not
@@ -1591,10 +1608,12 @@ description) left, control right; it runs to the bottom edge.
     whatever the sounds above say); `Try the bell` → `Ring` rings it as set.
 - **Keybindings** — *Click a shortcut to record a new one · type to filter*:
   a filter row (placeholder `Type to filter actions or shortcuts`; `No matching
-  actions` when nothing matches), then every bindable action (including ones that ship unbound)
-  with its first chord as chips; overridden rows get accent-edged chips and a
-  ↺ reset button, unbound rows say `unbound`. Typing filters by action name or
-  shortcut (⌫ edits, Esc clears). Clicking a row records: the next chord with
+  actions` when nothing matches), then every bindable action (including ones that ship unbound),
+  by the palette's name for it (an action the palette does not list reads as
+  its words, *Add cursor above*) with the action name muted after it where it
+  fits (what `[keybindings]` takes), and its first chord as chips; overridden rows get accent-edged chips and a
+  ↺ reset button, unbound rows say `unbound`. Typing filters by name, action
+  name or shortcut (⌫ edits, Esc clears). Clicking a row records: the next chord with
   ⌘/⌃/⌥ (or a function/navigation key) becomes the shortcut, Esc cancels,
   ⌫ unbinds; a chord taken by another action moves over with a toast naming
   it. While recording, the row reads `Press a shortcut · Esc cancels · ⌫

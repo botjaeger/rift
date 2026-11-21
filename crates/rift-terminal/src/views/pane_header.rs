@@ -47,6 +47,7 @@ pub fn render(
     theme: &Theme,
     rect: [f32; 4],
     title: &str,
+    detail: &str,
     active: bool,
     running: bool,
     read_only: bool,
@@ -115,21 +116,43 @@ pub fn render(
     let label = super::editor::elide_head(title, room, |s| measure(engine, s));
     if room > 0.0 && !label.is_empty() {
         let tw = measure(engine, &label);
+        // the muted detail (the folder) follows when it fits whole
+        let gap = 10.0;
+        let dw = if detail.is_empty() || label != title {
+            0.0
+        } else {
+            measure(engine, detail)
+        };
+        let dw = if tw + gap + dw <= room && dw > 0.0 {
+            dw
+        } else {
+            0.0
+        };
+        let whole = tw + if dw > 0.0 { gap + dw } else { 0.0 };
         let color = if active {
             theme.text_bright
         } else {
             theme.text_dim
         };
-        let lx = (x + (w - tw - spin_w) / 2.0).round();
+        let lx = (x + (w - whole - spin_w) / 2.0).round();
         if running {
             glyphs::draw_spinner(layer, [lx + 6.5, cy], 13.0, color);
         }
+        let ty = (cy - TITLE_SIZE * 1.3 / 2.0).round();
         layer.text(
             sans(engine, &label, TITLE_SIZE, Weight::NORMAL),
             lx + spin_w,
-            (cy - TITLE_SIZE * 1.3 / 2.0).round(),
+            ty,
             color,
         );
+        if dw > 0.0 {
+            layer.text(
+                sans(engine, detail, TITLE_SIZE, Weight::NORMAL),
+                lx + spin_w + tw + gap,
+                ty,
+                theme.text_muted,
+            );
+        }
     }
     hits.push(Hit {
         rect,

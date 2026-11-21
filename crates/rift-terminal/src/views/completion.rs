@@ -232,6 +232,9 @@ const ROW_H: f32 = 28.0;
 const FOOTER_H: f32 = 30.0;
 const MAX_ROWS: usize = 8;
 const PAD_X: f32 = 16.0;
+/// The description column starts after at most this many name cells: a
+/// longer name (a deep path) is cut rather than push the column away.
+const DESC_COL_MAX: usize = 40;
 
 fn sans(engine: &mut TextEngine, text: &str, size: f32, weight: Weight) -> Buffer {
     let mut b = Buffer::new(&mut engine.font_system, Metrics::new(size, size * 1.35));
@@ -447,6 +450,20 @@ pub fn render(
     let menu = ui.history_menu.as_ref();
     let line_len = menu.map_or(0, |(typed, _)| typed.len());
     let bottom_up = menu.is_some() && at_bottom;
+    // descriptions form a column just past the longest shown name (at most
+    // DESC_COL_MAX cells in), so each sits beside its name rather than at
+    // the panel's far edge
+    let longest = ui
+        .items
+        .iter()
+        .skip(scroll)
+        .take(shown)
+        .filter(|i| i.source != "hint")
+        .map(|i| i.insert.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(DESC_COL_MAX);
+    let desc_col = x + PAD_X + 14.0 + 12.0 + longest as f32 * cell + 28.0;
     for (row, item) in ui.items.iter().skip(scroll).take(shown).enumerate() {
         let idx = row + scroll;
         let slot = if bottom_up { shown - 1 - row } else { row };
@@ -473,8 +490,9 @@ pub fn render(
             theme.text_dim,
         );
 
-        // description on the right (muted), the name left of it; a hint
-        // row is its text alone
+        // the name, then its description (muted) in the column after the
+        // names, or ending at the panel's edge when it is too long for
+        // that; a hint row is its text alone
         let hint = item.source == "hint";
         let desc_w = if item.description.is_empty() || hint {
             0.0
@@ -482,7 +500,11 @@ pub fn render(
             engine.measure(&item.description, 12.0, FONT_SANS, Weight::NORMAL)
         };
         let name_x = x + PAD_X + 14.0 + 12.0;
-        let desc_x = x + w - PAD_X - desc_w;
+        let desc_x = if desc_w > 0.0 {
+            desc_col.min(x + w - PAD_X - desc_w)
+        } else {
+            x + w - PAD_X
+        };
         let name_room = (desc_x - 16.0 - name_x).max(cell * 4.0);
         let fits = (name_room / cell).floor().max(1.0) as usize;
         // a history line is drawn like ⌃R draws it: on one line, secrets

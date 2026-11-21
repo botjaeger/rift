@@ -205,6 +205,8 @@ pub enum Section {
     Branches,
     /// Send target picker: panes running a coding agent.
     Agents,
+    /// Theme picker: the themes.
+    Themes,
 }
 
 #[derive(Clone)]
@@ -251,6 +253,31 @@ impl PaletteState {
             crate::state::pop_grapheme(&mut self.query);
         }
     }
+}
+
+/// Each action's name as people read it (the palette's titles), by action
+/// name; an action the palette does not list reads as its words
+/// (`add_cursor_above` → "Add cursor above"), see [`action_title`].
+pub fn action_titles(keymap: &rift_core::Keymap) -> std::collections::HashMap<String, String> {
+    let mut titles = std::collections::HashMap::new();
+    for item in base_items(&[], &[], keymap) {
+        if !item.id.is_empty() {
+            titles.entry(item.id).or_insert(item.title);
+        }
+    }
+    titles
+}
+
+/// `action`'s title from [`action_titles`], else its words.
+pub fn action_title(titles: &std::collections::HashMap<String, String>, action: &str) -> String {
+    titles.get(action).cloned().unwrap_or_else(|| {
+        let words = action.replace('_', " ");
+        let mut chars = words.chars();
+        chars
+            .next()
+            .map(|c| c.to_uppercase().collect::<String>() + chars.as_str())
+            .unwrap_or_default()
+    })
 }
 
 /// App actions, settings and dynamic launch/theme entries.
@@ -815,7 +842,7 @@ pub fn theme_items(
                 String::new()
             },
             shortcut: Vec::new(),
-            section: Section::Settings,
+            section: Section::Themes,
             action: PaletteAction::PickTheme(name.clone()),
             mono_title: false,
         })
@@ -1326,6 +1353,7 @@ pub fn render(
                 Section::Base => "COMPARE AGAINST",
                 Section::Branches => "BRANCHES",
                 Section::Agents => "AGENTS",
+                Section::Themes => "THEMES",
             };
             let mut lb = Buffer::new(&mut engine.font_system, Metrics::new(11.0, 14.0));
             lb.set_text(

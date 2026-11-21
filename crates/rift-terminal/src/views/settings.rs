@@ -1788,16 +1788,35 @@ impl Form<'_> {
             return;
         }
         self.rows += 1;
-        self.y = y + ROW_H + extra;
         let desc = if self.filter.is_empty() {
             desc.to_string()
         } else {
             self.crumb.clone()
         };
+        // keep room for the control on the right
+        let max_w = (self.card_w - reserve - 8.0).max(60.0);
+        // a description too long beside the control wraps (never cut with
+        // `…`, which hid the part that matters): the row grows by its
+        // extra lines (a caller's own `extra_h` already counts its wrap)
+        let desc_lines = if extra == 0.0
+            && !desc.trim().is_empty()
+            && self.engine.measure(&desc, 12.0, FONT_SANS, Weight::NORMAL) > max_w
+        {
+            balanced_lines(self.engine, &desc, 12.0, FONT_SANS, max_w)
+        } else {
+            // a row whose caller lays out lines below it keeps one line
+            vec![super::palette::elide_to(
+                self.engine,
+                &desc,
+                12.0,
+                FONT_SANS,
+                max_w,
+            )]
+        };
+        let extra = extra + desc_lines.len().saturating_sub(1) as f32 * NOTE_LH;
+        self.y = y + ROW_H + extra;
         if self.visible(y, ROW_H + extra) {
             let ly = if desc.is_empty() { y + 17.0 } else { y + 9.0 };
-            // keep room for the control on the right
-            let max_w = (self.card_w - reserve - 8.0).max(60.0);
             let shown = super::palette::elide_to(self.engine, text, 13.0, FONT_SANS, max_w);
             self.label_end = self.x + self.engine.measure(&shown, 13.0, FONT_SANS, Weight::NORMAL);
             self.label_mid = ly + 8.8;
@@ -1808,13 +1827,14 @@ impl Form<'_> {
                 self.theme.text_ui,
             );
             if !desc.is_empty() {
-                let desc = super::palette::elide_to(self.engine, &desc, 12.0, FONT_SANS, max_w);
-                self.layer.text(
-                    sans(self.engine, &desc, 12.0, Weight::NORMAL),
-                    self.x,
-                    y + 28.0,
-                    self.theme.text_muted,
-                );
+                for (k, line) in desc_lines.iter().enumerate() {
+                    self.layer.text(
+                        sans(self.engine, line, 12.0, Weight::NORMAL),
+                        self.x,
+                        y + 28.0 + k as f32 * NOTE_LH,
+                        self.theme.text_muted,
+                    );
+                }
             }
             self.layer.hline(
                 self.x,
@@ -3001,7 +3021,7 @@ impl Form<'_> {
         let lines = if self.filter.is_empty()
             && self.engine.measure(t.desc, 12.0, FONT_SANS, Weight::NORMAL) > beside
         {
-            wrap_lines(self.engine, t.desc, 12.0, FONT_SANS, beside)
+            balanced_lines(self.engine, t.desc, 12.0, FONT_SANS, beside)
         } else {
             Vec::new()
         };
@@ -3968,6 +3988,31 @@ const BADGE_GAP: f32 = 12.0;
 /// Line heights of the note (12 px) and the error block (11.5 px mono).
 const NOTE_LH: f32 = 12.0 * 1.35;
 const DETAIL_LH: f32 = 11.5 * 1.35;
+
+/// [`wrap_lines`] with the lines evened out: the narrowest width that still
+/// gives as few lines, so a last line is not one stray word.
+fn balanced_lines(
+    engine: &mut TextEngine,
+    text: &str,
+    size: f32,
+    family: &'static str,
+    max_w: f32,
+) -> Vec<String> {
+    let lines = wrap_lines(engine, text, size, family, max_w);
+    if lines.len() < 2 {
+        return lines;
+    }
+    let (mut lo, mut hi) = (max_w / 2.0, max_w);
+    for _ in 0..8 {
+        let mid = (lo + hi) / 2.0;
+        if wrap_lines(engine, text, size, family, mid).len() == lines.len() {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    wrap_lines(engine, text, size, family, hi)
+}
 
 /// `text` broken into lines no wider than `max_w`: at spaces, and inside a
 /// word wider than a line (a URL, a path).
@@ -6351,13 +6396,21 @@ fn notifications_page(form: &mut Form, config: &Config) {
 
 /// Keybindings rows that match the type-to-filter query (action name with
 /// spaces for underscores, or the shortcut chips).
-pub fn filtered_bindings(keymap: &Keymap, filter: &str) -> Vec<(String, Vec<String>)> {
+/// The Keybindings page's rows: (action, its title, shortcut caps), those
+/// the filter matches by title, action name or shortcut.
+pub fn filtered_bindings(keymap: &Keymap, filter: &str) -> Vec<(String, String, Vec<String>)> {
     let q = filter.trim().to_lowercase();
+    let titles = super::palette::action_titles(keymap);
     keymap
         .display_rows()
         .into_iter()
-        .filter(|(action, chips)| {
+        .map(|(action, chips)| {
+            let title = super::palette::action_title(&titles, &action);
+            (action, title, chips)
+        })
+        .filter(|(action, title, chips)| {
             q.is_empty()
+                || title.to_lowercase().contains(&q)
                 || action.replace('_', " ").contains(&q)
                 || action.contains(&q)
                 || chips.concat().to_lowercase().contains(&q)
@@ -6436,7 +6489,7 @@ fn keybindings_page(
             form.theme.text_muted,
         );
     }
-    for (i, (action, chips)) in rows.iter().enumerate() {
+    for (i, (action, title, chips)) in rows.iter().enumerate() {
         let ry = fy + i as f32 * row_h;
         if !form.visible_band(ry, row_h) {
             continue;
@@ -6444,7 +6497,7 @@ fn keybindings_page(
         let recording = state.recording.as_deref() == Some(action.as_str());
         let custom = config.keybindings.contains_key(action);
         form.row_label = format!(
-            "{action}: {}",
+            "{title}: {}",
             if chips.is_empty() {
                 "unbound".to_string()
             } else {
@@ -6482,15 +6535,33 @@ fn keybindings_page(
         } else {
             caps_w + if custom { 32.0 } else { 0.0 }
         };
+        // the title as the palette names it, then the action name (muted,
+        // what config.toml's [keybindings] takes) where it fits
         let name_w = (form.card_w - reserve - 24.0).max(40.0);
-        let action_shown =
-            super::palette::elide_to(form.engine, action, 12.5, mono_family(), name_w);
+        let title_shown = super::palette::elide_to(form.engine, title, 13.0, FONT_SANS, name_w);
+        let title_w = form
+            .engine
+            .measure(&title_shown, 13.0, FONT_SANS, Weight::NORMAL);
         form.layer.text(
-            mono(form.engine, &action_shown, 12.5, Weight::NORMAL),
+            sans(form.engine, &title_shown, 13.0, Weight::NORMAL),
             form.x + 8.0,
-            ry + 11.5,
+            ry + 11.0,
             form.theme.text_ui,
         );
+        let id_room = name_w - title_w - 10.0;
+        if title_shown == *title
+            && form
+                .engine
+                .measure(action, 11.0, mono_family(), Weight::NORMAL)
+                <= id_room
+        {
+            form.layer.text(
+                mono(form.engine, action, 11.0, Weight::NORMAL),
+                form.x + 8.0 + title_w + 10.0,
+                ry + 13.0,
+                form.theme.text_muted,
+            );
+        }
         let mut cx = form.right() - 8.0;
         // reset to default (custom rows only)
         if custom && !recording {

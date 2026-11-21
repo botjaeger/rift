@@ -413,14 +413,34 @@ impl App {
             parts,
             from_pane: self.active_pane_id(),
         });
+        // an unstaged file's header also offers the row's ⋮ actions
+        let editable = self.win.review.model().is_some_and(|m| m.base.is_none());
+        let mut items = Vec::new();
+        if !staged && hunk.is_none() && editable {
+            items = Self::review_file_items();
+            self.win.review_menu = Some(path);
+            items.push(MenuItem::new("Send to agent…", MenuAction::SendToAgent).sep());
+        } else {
+            items.push(MenuItem::new("Send to agent…", MenuAction::SendToAgent));
+        }
         self.win.context_menu = ContextMenuState {
             open: true,
             pane: 0,
             block: 0,
             pos: self.win.mouse,
-            items: vec![MenuItem::new("Send to agent…", MenuAction::SendToAgent)],
+            items,
             selected: None,
         };
         true
+    }
+
+    /// An unstaged review file's actions (its ⋮ and its right-click):
+    /// open, stage, and discard, which asks first.
+    pub(super) fn review_file_items() -> Vec<MenuItem> {
+        vec![
+            MenuItem::new("Open file", MenuAction::ReviewOpen),
+            MenuItem::new("Stage file", MenuAction::ReviewStage),
+            MenuItem::new("Revert changes…", MenuAction::ReviewDiscard).sep(),
+        ]
     }
 }

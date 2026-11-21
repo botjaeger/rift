@@ -87,7 +87,7 @@ pub fn logo(layer: &mut Layer, at: [f32; 2], size: f32) {
 
 /// The height the list needs; callers skip it when the pane is shorter.
 pub fn height(entries: usize) -> f32 {
-    40.0 + 20.0 + entries as f32 * (ROW_H + 2.0) + 20.0 + 16.0
+    40.0 + 20.0 + entries as f32 * (ROW_H + 2.0)
 }
 
 /// Draw the list centred in `area` (the pane above its command line) and
@@ -186,16 +186,5 @@ pub fn render(
         rects.push(r);
         y += ROW_H + 2.0;
     }
-    layer.text(
-        sans(
-            engine,
-            "Shown on a new session until the first command runs.",
-            12.0,
-            Weight::NORMAL,
-        ),
-        x,
-        y + 18.0,
-        theme.text_dim,
-    );
     rects
 }
