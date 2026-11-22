@@ -123,7 +123,8 @@ export type ChipAction =
 export function chipCommand(a: ChipAction): string {
   switch (a.kind) {
     case "cd":
-      return a.name === ".." ? "cd .." : `cd ${shellQuote(`./${a.name}`)}`;
+      // an absolute name is a folder browsed to in the sheet (a listed name never holds a /)
+      return a.name === ".." ? "cd .." : a.name.startsWith("/") ? `cd ${shellQuote(a.name)}` : `cd ${shellQuote(`./${a.name}`)}`;
     case "checkout":
       return `git checkout ${shellQuote(a.branch)}`;
     case "create":
@@ -132,6 +133,16 @@ export function chipCommand(a: ChipAction): string {
       return a.command;
   }
 }
+
+/** The folder above `path` ("/Users/me/code" → "/Users/me", "/Users" → "/"). */
+export function parentPath(path: string): string {
+  const trimmed = path.replace(/\/+$/, "");
+  const i = trimmed.lastIndexOf("/");
+  return i <= 0 ? "/" : trimmed.slice(0, i);
+}
+
+/** `name` inside the folder `path`. */
+export const childPath = (path: string, name: string): string => `${path.replace(/\/+$/, "")}/${name}`;
 
 /** The branch menu's rows for `query`: matching branches, then "Create" when no branch is named so. */
 export function branchRows(branches: readonly string[], query: string): { name: string; create: boolean }[] {

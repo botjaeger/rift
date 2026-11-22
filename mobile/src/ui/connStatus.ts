@@ -153,6 +153,9 @@ const NOT_REGISTERED = /\b404\b|gateway offline|did not answer/i;
 const sentence = (t: string): string => (t ? t.charAt(0).toUpperCase() + t.slice(1) : t);
 
 /** Why a path failed, in the board's words where the cause is known, else the error itself. */
+/** A refused connection, as each platform's socket error says it. */
+const REFUSED = /refused|ECONNREFUSED/i;
+
 export function failNote(p: PathStatus): string {
   const error = p.error ?? "";
   if (p.path.kind === "relay") {
@@ -161,6 +164,9 @@ export function failNote(p: PathStatus): string {
     return sentence(error) || "No answer from the relay";
   }
   if (error === NO_ANSWER) return `No answer on this network${seconds(p.waitedMs)}`;
+  // the computer is there but nothing takes the connection: the system's own words
+  // ("The operation couldn’t be completed. Connection refused") say nothing a person can act on
+  if (REFUSED.test(error)) return "Nothing answered: is Rift open, with Remote access on?";
   return sentence(error) || "No answer on this network";
 }
 

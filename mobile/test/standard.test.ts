@@ -330,7 +330,7 @@ describe("the standard is wired into every page and sheet", () => {
       if (name === "connection") expect(src("ui/ConnectionSheet.tsx")).toContain("<SheetFrame");
       else if (["new-tab", "new-pane", "attach", "block", "confirm", "whats-new"].includes(name)) expect(text, r).toContain("<SheetFrame");
       // Change folder is a SheetFrame, the chips' other menus the header over one scroll view
-      else if (name === "chips") expect(text, r).toMatch(/<SheetFrame board="folder"[\s\S]*<SheetHeader/);
+      else if (name === "chips") expect(text, r).toMatch(/<SheetFrame\s+board="folder"[\s\S]*<SheetHeader/);
       else if (SHEETS.includes(name)) expect(text, r).toContain("<SheetHeader");
       else expect(text, r).toContain(PAGE_VIA[r] ? `<${PAGE_VIA[r]}` : "<PageHeader");
     }
@@ -356,7 +356,9 @@ describe("the standard is wired into every page and sheet", () => {
     }
   });
   it("a selection draws in the theme's selection colour, in a block and on a program's screen", () => {
-    expect(src("ui/SelectableText.tsx")).toContain("selectionColor={colors.selection}");
+    // the selection colour, except on iOS in a field holding a link: iOS draws detected links in the
+    // field's tint, which the translucent selection colour left unreadable (about 2:1)
+    expect(src("ui/SelectableText.tsx")).toContain('selectionColor={Platform.OS === "ios" && links.length > 0 ? colors.accent : colors.selection}');
     expect(src("ui/TerminalView.tsx")).toContain('band: { position: "absolute", backgroundColor: colors.selection },');
   });
 });

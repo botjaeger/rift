@@ -34,6 +34,9 @@ import {
   screenView,
   boxImages,
   partSend,
+  firstMatchLine,
+  matchCount,
+  rowsBeforeMatch,
 } from "../src/paneView";
 import type { Block, Pane, Tab, Waiting } from "../src/protocol/types";
 
@@ -422,5 +425,27 @@ describe("partSend", () => {
   it("blanks between tokens go, and with no typing at all it says why rather than nothing", () => {
     expect(partSend(" ", true)).toEqual({ ok: true, lines: [" "] });
     expect(partSend(" ", false)).toEqual({ ok: false, message: expect.stringContaining("too old") });
+  });
+});
+
+describe("a block sheet opened from Search output", () => {
+  it("counts the matches, case folded", () => {
+    expect(matchCount("lib.rs   main.rs\nMain branch", "main")).toBe(2);
+    expect(matchCount("lib.rs", "main")).toBe(0);
+    expect(matchCount("lib.rs", "  ")).toBe(0);
+  });
+  it("finds the first line that holds the words", () => {
+    expect(firstMatchLine("a\nb\nfound it\nfound again", "FOUND")).toBe(2);
+    expect(firstMatchLine("a\nb", "zzz")).toBe(-1);
+  });
+});
+
+describe("where a long output opens for a search", () => {
+  it("counts rows above the first match, wrapped lines as the rows they take", () => {
+    const text = ["short", "x".repeat(25), "", "the match", "after"].join("\n");
+    expect(rowsBeforeMatch(text, "match", false, 10)).toBe(3);
+    // 1 + 3 (25 cells at 10 a row) + 1 (an empty line is a row)
+    expect(rowsBeforeMatch(text, "match", true, 10)).toBe(5);
+    expect(rowsBeforeMatch(text, "nowhere", true, 10)).toBe(-1);
   });
 });

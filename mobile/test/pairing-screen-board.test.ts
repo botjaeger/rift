@@ -350,7 +350,7 @@ describe("the program screen and its selection (the New Screen and selection boa
       "@/runtime": {}, "@/scroll": {}, "@/stitch": stitchModule, "@/history": {}, "@/terminal": terminal, "@/paneView": paneView, "@/selection": {}, "@/haptics": {},
       "@/keyboard": {}, "@/lock": {}, "@/pending": {}, "@/fleet": {}, "@/protocol/types": {}, "@/controlKeys": {},
       "./useActionScope": {}, "./useOpenShell": {}, "./Icon": {}, "./SelectionBar": {}, "./ControlRow": {}, "./PaneLoading": {}, "./Notice": {},
-      "./theme": themeStub, "../../modules/rift-keys": {}, "expo-clipboard": {},
+      "./theme": themeStub, "./palette": { lift: (fg: string) => fg }, "../../modules/rift-keys": {}, "expo-clipboard": {},
     };
     const { handleSpots } = load("ui/TerminalView.tsx", deps) as { handleSpots: (a: object, b: object, cell: number, row: number) => { start: object; end: object } };
     // rows 10 to 11, columns 0 to 33, 6.6 pt cells, 15 pt rows: the start's top left, the end's bottom right
@@ -369,7 +369,9 @@ describe("the program screen and its selection (the New Screen and selection boa
   });
   it("gives Android's block handles the accent, apart from the selection's ground", () => {
     const field = src("ui/SelectableText.tsx");
-    expect(field).toContain("selectionColor={colors.selection}");
+    // the selection colour, except on iOS in a field holding a link: iOS draws detected links in the
+    // field's tint, which the translucent selection colour left unreadable (about 2:1)
+    expect(field).toContain('selectionColor={Platform.OS === "ios" && links.length > 0 ? colors.accent : colors.selection}');
     expect(field).toContain("selectionHandleColor={colors.accent}");
   });
 });

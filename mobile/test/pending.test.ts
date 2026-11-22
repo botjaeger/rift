@@ -89,6 +89,8 @@ describe("the clipboard without iOS's paste button", () => {
 describe("what iOS's paste button handed over", () => {
   it("routes text, an image and a file", () => {
     expect(nativeAttached({ text: "hi" }, prompt)).toEqual({ kind: "text", text: "hi" });
+    // an empty string on the clipboard: said, not a silent close
+    expect(nativeAttached({ text: "" }, prompt)).toEqual({ kind: "error", message: "The clipboard is empty." });
     expect(nativeAttached({ image: PNG }, open)).toMatchObject({ kind: "item", item: { kind: "image" } });
     expect(nativeAttached({ file: { status: "ok", name: "r.pdf", data: "aGk=" } }, open)).toMatchObject({ kind: "item", item: { name: "r.pdf" } });
     expect(nativeAttached({ file: { status: "too_large" } }, open)).toMatchObject({ kind: "error" });

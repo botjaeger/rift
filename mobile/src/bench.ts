@@ -5,6 +5,7 @@
 
 import { generateKeyPair, XXHandshake, type RandomBytes } from "./noise/noise";
 import { frameMessage, Reassembler } from "./protocol/framing";
+import { PROLOGUE } from "./protocol/types";
 
 export interface BenchResult {
   /** "Hermes" when the app runs on Hermes, else "JavaScript". */
@@ -17,12 +18,13 @@ export interface BenchResult {
   mibPerSecond: number;
 }
 
-const PROLOGUE = new TextEncoder().encode("rift-remote/2");
+// the handshake's own prologue, as the client binds it (one home: protocol/types)
+const PROLOGUE_BYTES = new TextEncoder().encode(PROLOGUE);
 
 export function runCryptoBench(random: RandomBytes, now: () => number, bytes = 1024 * 1024): BenchResult {
   const t0 = now();
-  const i = new XXHandshake({ initiator: true, prologue: PROLOGUE, s: generateKeyPair(random), random });
-  const r = new XXHandshake({ initiator: false, prologue: PROLOGUE, s: generateKeyPair(random), random });
+  const i = new XXHandshake({ initiator: true, prologue: PROLOGUE_BYTES, s: generateKeyPair(random), random });
+  const r = new XXHandshake({ initiator: false, prologue: PROLOGUE_BYTES, s: generateKeyPair(random), random });
   r.readMessage(i.writeMessage(new Uint8Array(0)));
   i.readMessage(r.writeMessage(new Uint8Array(0)));
   r.readMessage(i.writeMessage(new Uint8Array(0)));

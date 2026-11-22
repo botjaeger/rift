@@ -3,12 +3,13 @@ import { useLocalSearchParams, useRouter } from "expo-router";
 import { useEffect, useState } from "react";
 import { AccessibilityInfo, ActivityIndicator, Linking, Pressable, ScrollView, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { branchRows, chipCommand, dirRows, splitPath, tildePath, type ChipAction } from "@/chips";
-import { canOperate } from "@/fleet";
+import { branchRows, childPath, chipCommand, dirRows, parentPath, splitPath, tildePath, type ChipAction } from "@/chips";
+import { canOperate, hasFeature } from "@/fleet";
 import { containerRows, dockerTitle, elapsedBody, isPrUrl, versionRows, type ChipOpen } from "@/promptChips";
 import type { BranchesMsg, ChangedFile, ChangesMsg, ChipMsg, DirsMsg } from "@/protocol/types";
 import { fleet, useApp, useLock } from "@/runtime";
 import { findPane, paneTitle } from "@/topology";
+import { Button } from "@/ui/Button";
 import { Icon } from "@/ui/Icon";
 import { Field } from "@/ui/Field";
 import { ErrorText } from "@/ui/Notice";
@@ -113,6 +114,9 @@ export default function ChipsScreen() {
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [sending, setSending] = useState(false);
+  // Change folder: the pane's own folder (its first answer), and a folder being opened
+  const [home, setHome] = useState<string | null>(null);
+  const [opening, setOpening] = useState(false);
 
   // Presented natively above the app's lock screen: when the app locks, close it.
   useEffect(() => {
@@ -125,8 +129,10 @@ export default function ChipsScreen() {
       menu === "dirs" || menu === "branches" || menu === "changes" ? fleet.chipMenu(key, paneId, menu) : fleet.chipDetail(key, paneId, menu);
     void asked.then((r) => {
       if (!live) return;
-      if (r.ok) setAnswer(r.msg);
-      else setError(r.message);
+      if (r.ok) {
+        setAnswer(r.msg);
+        if (r.msg.t === "dirs") setHome(r.msg.cwd);
+      } else setError(r.message);
     });
     return () => {
       live = false;
@@ -138,6 +144,23 @@ export default function ChipsScreen() {
   const where = loc ? paneTitle(loc) : "this pane";
   const operate = host ? canOperate(host) : false;
   const hidden = lock.covered || lock.locked;
+  // Change folder browses (feature `dirs_path`): Parent folder and a folder open in the sheet,
+  // one button runs the cd; without it every pick runs its cd at once
+  const dirs = answer?.t === "dirs" ? answer : null;
+  const browses = menu === "dirs" && operate && hasFeature(host, "dirs_path") && !!dirs?.cwd?.startsWith("/");
+  const openFolder = async (path: string) => {
+    const current = scope.capture();
+    setOpening(true);
+    setError(null);
+    const r = await fleet.chipMenu(key, paneId, "dirs", path);
+    if (!current()) return;
+    setOpening(false);
+    if (r.ok) {
+      setAnswer(r.msg);
+      setQuery("");
+      AccessibilityInfo.announceForAccessibility(`Showing ${r.msg.cwd ? tildePath(r.msg.cwd) : "the folder"}`);
+    } else setError(r.message);
+  };
 
   const act = async (action: ChipAction) => {
     const current = scope.capture();
@@ -194,7 +217,7 @@ export default function ChipsScreen() {
   const added = changes?.files.reduce((n, f) => n + f.added, 0) ?? 0;
   const removed = changes?.files.reduce((n, f) => n + f.removed, 0) ?? 0;
   // what a pick runs, under the field
-  const runs = menu === "dirs" ? `A folder runs cd in ${where}.` : menu === "branches" ? `A branch runs git checkout in ${where}.` : null;
+  const runs = menu === "dirs" ? (browses ? "Tap a folder to open it; cd when you are there." : `A folder runs cd in ${where}.`) : menu === "branches" ? `A branch runs git checkout in ${where}.` : null;
   const subtitle =
     menu === "dirs" || menu === "branches"
       ? current
@@ -308,23 +331,36 @@ export default function ChipsScreen() {
       const rows = dirRows(answer.parent, answer.dirs, query);
       if (rows.length === 0) return <Text style={styles.empty}>{query ? "No matches" : "No folders here"}</Text>;
       // the Change folder board: settings rows, a 28 pt grey tile, the name in Inter, a ›
+      const cwd = answer.cwd ?? "";
       return (
         <CardBox>
-          {rows.map((d, i) => (
-            <NavRow
-              key={d}
-              first={i === 0}
-              leading={
-                <View style={styles.tile}>
-                  {d === ".." ? <Text style={styles.tileGlyph}>↑</Text> : <Icon name="folder" size={14} color={colors.textMuted} />}
-                </View>
-              }
-              label={d === ".." ? "Parent folder" : d}
-              accessibilityLabel={d === ".." ? "cd .. (parent folder)" : `cd into ${d}`}
-              disabled={!operate || sending}
-              onPress={() => void act({ kind: "cd", name: d })}
-            />
-          ))}
+          {rows.map((d, i) => {
+            const here = browses && d !== ".." && childPath(cwd, d) === home;
+            return (
+              <NavRow
+                key={d}
+                first={i === 0}
+                leading={
+                  <View style={styles.tile}>
+                    {d === ".." ? <Text style={styles.tileGlyph}>↑</Text> : <Icon name="folder" size={14} color={colors.textMuted} />}
+                  </View>
+                }
+                label={d === ".." ? "Parent folder" : d}
+                value={here ? "you are here" : undefined}
+                accessibilityLabel={
+                  browses
+                    ? d === ".."
+                      ? `Parent folder: open ${tildePath(parentPath(cwd))}`
+                      : `Open ${d}${here ? ", the pane is here" : ""}`
+                    : d === ".."
+                      ? "cd .. (parent folder)"
+                      : `cd into ${d}`
+                }
+                disabled={!operate || sending || opening}
+                onPress={() => void (browses ? openFolder(d === ".." ? parentPath(cwd) : childPath(cwd, d)) : act({ kind: "cd", name: d }))}
+              />
+            );
+          })}
         </CardBox>
       );
     }
@@ -401,8 +437,11 @@ export default function ChipsScreen() {
                       </Text>
                     ) : null}
                   </View>
+                  {/* a side with nothing to count is left out (+4, not +4 −0), as on the desktop */}
                   <Text style={styles.counts}>
-                    <Text style={{ color: colors.success }}>+{f.added}</Text> <Text style={{ color: colors.textBright }}>−{f.removed}</Text>
+                    {f.added > 0 ? <Text style={{ color: colors.success }}>+{f.added}</Text> : null}
+                    {f.added > 0 && f.removed > 0 ? " " : null}
+                    {f.removed > 0 ? <Text style={{ color: colors.textBright }}>−{f.removed}</Text> : null}
                   </Text>
                   <Icon name="forward" size={14} color={colors.textMuted} />
                 </Pressable>
@@ -427,7 +466,26 @@ export default function ChipsScreen() {
   // 8 pt apart, then the folders
   if (menu === "dirs")
     return (
-      <SheetFrame board="folder" title={title} subtitle={subtitle ?? undefined} subtitleMono onClose={close}>
+      <SheetFrame
+        board="folder"
+        title={title}
+        subtitle={subtitle ?? undefined}
+        subtitleMono
+        onClose={close}
+        footer={
+          // browsed away from the pane's folder: one cd to where the sheet is
+          browses && dirs?.cwd && dirs.cwd !== home ? (
+            <Button
+              label={`cd ${tildePath(dirs.cwd)}`}
+              accessibilityLabel={`cd ${tildePath(dirs.cwd)} in ${where}`}
+              variant="primary"
+              numberOfLines={1}
+              disabled={sending || opening}
+              onPress={() => void act({ kind: "cd", name: dirs.cwd! })}
+            />
+          ) : undefined
+        }
+      >
         {answer ? (
           <View style={styles.fieldGroup}>
             <Field
@@ -470,8 +528,10 @@ export default function ChipsScreen() {
         subtitle={
           changes && changes.branch !== null ? (
             <>
-              {changes.branch} · {changes.files.length} {changes.files.length === 1 ? "file" : "files"} ·{" "}
-              <Text style={styles.added}>+{added}</Text> <Text style={styles.removed}>−{removed}</Text>
+              {changes.branch} · {changes.files.length} {changes.files.length === 1 ? "file" : "files"}
+              {added > 0 || removed > 0 ? " ·" : ""}
+              {added > 0 ? <Text style={styles.added}> +{added}</Text> : null}
+              {removed > 0 ? <Text style={styles.removed}> −{removed}</Text> : null}
             </>
           ) : (
             subtitle

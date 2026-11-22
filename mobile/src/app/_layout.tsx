@@ -290,20 +290,17 @@ export default function RootLayout() {
             />
             <Stack.Screen
               name="chips"
-              options={({ route }) => ({
+              options={{
                 title: "Prompt chip",
                 presentation: "formSheet",
-                // the pull request, interpreter, Docker and Time on tab menus are short: the sheet fits
-                // them; Change folder has its board's height (chips.tsx)
-                sheetAllowedDetents:
-                  ["dirs", "pr", "python", "php", "docker", "elapsed"].includes((route.params as { menu?: string } | undefined)?.menu ?? "")
-                    ? "fitToContents"
-                    : [0.75, 1],
+                // every menu fits what it holds (a long list stops at the screen and scrolls);
+                // Change folder has its board's height (chips.tsx)
+                sheetAllowedDetents: "fitToContents",
                 sheetGrabberVisible: false,
                 sheetCornerRadius: 20,
                 headerShown: false,
                 contentStyle: { backgroundColor: colors.surface },
-              })}
+              }}
             />
             <Stack.Screen
               name="pane-chips"

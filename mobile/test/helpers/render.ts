@@ -41,6 +41,8 @@ export function uiDeps(platform: "ios" | "android" | "web", extra: Record<string
     "react-native": rn,
     "react-native-safe-area-context": { useSafeAreaInsets: () => ({ top: 47, bottom: 34, left: 0, right: 0 }) },
     "./theme": themeStub,
+    // a link's colour lifted on the screen's ground: the accent as it is (no contrast to judge in a stub)
+    "./palette": { lift: (fg: string) => fg },
     "./Icon": { Icon: "Icon" },
     "./toggle": {
       toggleA11y: (on: boolean, disabled = false) => ({ accessibilityRole: "togglebutton", accessibilityState: { checked: on, disabled } }),
@@ -66,6 +68,9 @@ export function load(path: string, deps: Record<string, unknown>, edit?: (source
       module,
       exports: module.exports,
       React: react,
+      // the test's timers, looked up per call (fake timers swap them in after the load)
+      setTimeout: (...a: Parameters<typeof setTimeout>) => globalThis.setTimeout(...a),
+      clearTimeout: (id?: ReturnType<typeof setTimeout>) => globalThis.clearTimeout(id),
       require: (name: string) => {
         if (name in deps) return deps[name];
         if (name.startsWith("./")) {

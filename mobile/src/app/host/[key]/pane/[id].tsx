@@ -17,7 +17,7 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { askingTitle, questionKey } from "@/answer";
-import { chipItems } from "@/promptChips";
+import { chipItems, timerText } from "@/promptChips";
 import { canClose, canOperate, draftKey, hasFeature, isAsked, wrapsLines } from "@/fleet";
 import { foldBlocks, paneKind, paneName, programName, swipeTarget, tabKind, tabPane, type PaneItem } from "@/now";
 import { bareScreen as screenIsBare, paneMark, runsAgent, screenView, waitingOthers } from "@/paneView";
@@ -58,7 +58,7 @@ import { useSingleFlight } from "@/ui/useSingleFlight";
 import { mono, radius, ui, makeStyles, useColors } from "@/ui/theme";
 
 /** Within this many points of the end counts as "at the bottom" (stick to new output). */
-const BOTTOM_SLOP = 48;
+const LIST_BOTTOM_SLOP = 48;
 /** The wall clock, for effects (reads of it in render are flagged as impure). */
 const wallClock = () => Date.now();
 
@@ -233,6 +233,8 @@ export default function PaneScreen() {
     if (screenFeature && status === "open" && following && !closed) fleet.setScreenMode(key, paneId, pinned ? "on" : "auto");
   }, [screenFeature, status, following, closed, key, paneId, pinned]);
   const searching = search;
+  // the Search output query, marked in the blocks it shows (undefined: no search)
+  const found = searching?.trim() || undefined;
 
   // While the pane opens: the status strip, the steps card, the blocks held in memory (dimmed)
   // the wait starts when the page opens, when Try again is pressed, and when the view switches
@@ -279,8 +281,9 @@ export default function PaneScreen() {
   const canOpenTab = !!host && !closed && canNewTab(host);
   const onClose = useClose(key, paneId, setError, say);
   const onActions = useCallback(
-    (blockId: number) => router.push({ pathname: "/block", params: { key, pane: String(paneId), block: String(blockId) } }),
-    [router, key, paneId],
+    // opened from Search output: the sheet keeps the words marked
+    (blockId: number) => router.push({ pathname: "/block", params: { key, pane: String(paneId), block: String(blockId), ...(found ? { mark: found } : {}) } }),
+    [router, key, paneId, found],
   );
   const onBell = useCallback((b: Block, on: boolean) => fleet.setNotify(key, paneId, b.command, on), [key, paneId]);
   const onStop = useCallback(() => {
@@ -310,8 +313,6 @@ export default function PaneScreen() {
     [router, key, paneId, operate, once, say, loc],
   );
   const asked = s.asked;
-  // the Search output query, marked in the blocks it shows (undefined: no search)
-  const found = searching?.trim() || undefined;
   const extraData = useMemo(() => ({ wrap, asked, found }), [wrap, asked, found]);
   const items = useMemo(
     () => (searching === null ? foldBlocks(blocks, unfolded) : foldBlocks(matching(blocks, searching), true)),
@@ -342,7 +343,7 @@ export default function PaneScreen() {
   const onScrollEnd = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
     if (dragged.current) {
       const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
-      atBottom.current = atEnd(contentOffset.y, contentSize.height, layoutMeasurement.height, BOTTOM_SLOP);
+      atBottom.current = atEnd(contentOffset.y, contentSize.height, layoutMeasurement.height, LIST_BOTTOM_SLOP);
     }
     // the selected field moved: a tap on it (or its handles) must still keep the selection
     selectionScope.current?.refresh();
@@ -472,6 +473,14 @@ export default function PaneScreen() {
         onOpen={openSwitcher}
       />
     ) : null;
+  const allChips = chipItems(loc?.pane ?? null, state, {
+    git: hasFeature(host, "git"),
+    menus: hasFeature(host, "chips"),
+    promptChips: hasFeature(host, "prompt_chips"),
+  });
+  // Time on tab leaves the row (rarely needed, always there); the ⋯ menu opens its card
+  const elapsedChip = allChips.find((c) => c.id === "elapsed") ?? null;
+  const rowChips = elapsedChip ? allChips.filter((c) => c !== elapsedChip) : allChips;
   const composer =
     closed || !host ? null : operate ? (
       // the board's 28 pt under the command line: the home indicator's inset, less the
@@ -484,15 +493,7 @@ export default function PaneScreen() {
           program={program}
           online={status === "open"}
           // while searching the results take the room, and while the pane opens nothing is known yet: no context row (the New Blocks board)
-          chips={
-            searching !== null || waitingForPane
-              ? []
-              : chipItems(loc?.pane ?? null, state, {
-                  git: hasFeature(host, "git"),
-                  menus: hasFeature(host, "chips"),
-                  promptChips: hasFeature(host, "prompt_chips"),
-                })
-          }
+          chips={searching !== null || waitingForPane ? [] : rowChips}
           complete={hasFeature(host, "complete") && operate}
           recent={recent}
           label={title}
@@ -650,7 +651,7 @@ export default function PaneScreen() {
           </View>
         </View>
       ) : null}
-      {load?.strip ? <PaneStrip strip={load.strip} onPress={details} /> : null}
+      {load?.strip ? <PaneStrip strip={load.strip} onPress={details} onRetry={tryAgain} /> : null}
       {waiting && status === "open" && !asking ? (
         <Pressable
           accessibilityRole="button"
@@ -761,7 +762,7 @@ export default function PaneScreen() {
                     <SelectionItem owner={`block:${item.block.id}`}>
                       <View style={styles.cardGap}>
                         {/* keyed: a recycled card must not keep another block's state */}
-                        <FailedCard key={item.block.id} block={item.block} onActions={onActions} onRunAgain={operate ? onRunAgain : undefined} mark={found} />
+                        <FailedCard key={item.block.id} block={item.block} onActions={onActions} onRunAgain={operate ? onRunAgain : undefined} onCopied={say} mark={found} />
                       </View>
                     </SelectionItem>
                   ) : (
@@ -773,12 +774,15 @@ export default function PaneScreen() {
                   )
                 }
                 ListHeaderComponent={header}
-                // opened at a block: no sticking to the bottom, which would scroll past it
+                // opened at a block: no sticking to the bottom, which would scroll past it; search
+                // results list from the top, under the field, not pinned to the bottom like live output
                 maintainVisibleContentPosition={
-                  target === null
+                  target === null && found === undefined
                     ? { startRenderingFromBottom: true, autoscrollToBottomThreshold: 0.1, animateAutoScrollToBottom: false }
                     : {}
                 }
+                // with the keyboard up (searching), the first tap on a result opens it
+                keyboardShouldPersistTaps="handled"
                 onScrollBeginDrag={() => {
                   dragged.current = true;
                   atBottom.current = false;
@@ -821,13 +825,26 @@ export default function PaneScreen() {
               hint="Finished, failed and questions here"
               on={notifOn}
               disabled={alerts.saving}
-              last={!fullScreen && !canSplit && !canOpenTab && !closeable}
+              last={!fullScreen && !elapsedChip?.opens && !canSplit && !canOpenTab && !closeable}
               onPress={() => alerts.change(!notifOn)}
             />
             {/* over a program's screen: the zoom a pinch changes, from here too (no Wrap there) */}
-            {fullScreen ? <TextSizeMenu last={!canSplit && !canOpenTab && !closeable} /> : null}
+            {fullScreen ? <TextSizeMenu last={!elapsedChip?.opens && !canSplit && !canOpenTab && !closeable} /> : null}
             {/* settings above, then new things, then what closes (in red); one hairline between every row */}
             {/* the New pane / New tab sheets (the program to run), as the Tabs page's header */}
+            {/* Time on tab: its card, from here (the chip row leaves it out) */}
+            {elapsedChip?.opens ? (
+              <MenuItem
+                icon="hourglass"
+                title="Time on tab"
+                hint={`${timerText(elapsedChip).replace(/ on tab$/, "")} so far`}
+                last={!canSplit && !canOpenTab && !closeable}
+                onPress={() => {
+                  setMenu(false);
+                  router.push({ pathname: "/chips", params: { key, pane: String(paneId), menu: "elapsed" } });
+                }}
+              />
+            ) : null}
             {canSplit ? (
               <MenuItem icon="newPane" title="Split pane" hint="Another program beside this one" last={!canOpenTab && !closeable} onPress={() => { setMenu(false); router.push({ pathname: "/new-pane", params: { key, pane: String(paneId) } }); }} />
             ) : null}
@@ -897,7 +914,7 @@ function MenuAction({ title, last, onPress }: { title: string; last?: boolean; o
 }
 
 /** One of the ⋯ menu's actions that opens a page: an icon, the label and what it does. */
-function MenuItem({ icon, title, hint, last, onPress }: { icon: "newPane" | "add"; title: string; hint: string; last?: boolean; onPress: () => void }) {
+function MenuItem({ icon, title, hint, last, onPress }: { icon: "newPane" | "add" | "hourglass"; title: string; hint: string; last?: boolean; onPress: () => void }) {
   const colors = useColors();
   const styles = useStyles();
   return (

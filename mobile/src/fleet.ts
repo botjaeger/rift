@@ -1353,11 +1353,13 @@ export class Fleet {
     host: string,
     pane: number,
     t: T,
+    /** `dirs` only (feature `dirs_path`): another folder to list, browsing before a cd. */
+    path?: string,
   ): Promise<{ ok: true; msg: Extract<ChipAnswerMsg, { t: T }> } | { ok: false; message: string }> {
     const name = this.host(host)?.record.name ?? "the computer";
     const client = this.clients.get(host);
     if (!client) return { ok: false, message: describeCode("disconnected", name, "") };
-    const r = await client.chipMenu(pane, t);
+    const r = await client.chipMenu(pane, t, path);
     return r.ok ? r : { ok: false, message: describeShowCode(r.code, name, r.message) };
   }
 

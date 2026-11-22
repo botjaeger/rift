@@ -7,6 +7,8 @@ import {
   branchRows,
   branchText,
   chipCommand,
+  childPath,
+  parentPath,
   chipRowMode,
   chipsSpoken,
   completionRows,
@@ -128,6 +130,8 @@ describe("chip menu commands (as the desktop's chip_menu.rs builds them)", () =>
   it("cd, checkout and create, with untrusted names quoted", () => {
     expect(chipCommand({ kind: "cd", name: ".." })).toBe("cd ..");
     expect(chipCommand({ kind: "cd", name: "-odd" })).toBe("cd ./-odd");
+    // a folder browsed to in the sheet: its absolute path, quoted
+    expect(chipCommand({ kind: "cd", name: "/Users/me/code/my project" })).toBe("cd '/Users/me/code/my project'");
     expect(chipCommand({ kind: "cd", name: "my dir" })).toBe("cd './my dir'");
     expect(chipCommand({ kind: "cd", name: "x`reboot`" })).toBe("cd './x`reboot`'");
     expect(chipCommand({ kind: "checkout", branch: "feat/chips" })).toBe("git checkout feat/chips");
@@ -224,5 +228,18 @@ describe("the chip row: prompt chips while the field is empty, completions while
   it("no match: no rows, and the row says what Return does", () => {
     expect(completionRows("zzz", [], [], ["ls", "git status"], 6)).toEqual([]);
     expect(NO_COMPLETIONS).toBe("No completions · Run runs it as typed");
+  });
+});
+
+describe("Change folder browsing paths", () => {
+  it("goes up a folder, stopping at the root", () => {
+    expect(parentPath("/Users/me/code")).toBe("/Users/me");
+    expect(parentPath("/Users/me/code/")).toBe("/Users/me");
+    expect(parentPath("/Users")).toBe("/");
+    expect(parentPath("/")).toBe("/");
+  });
+  it("goes into a folder", () => {
+    expect(childPath("/Users/me", "code")).toBe("/Users/me/code");
+    expect(childPath("/", "Users")).toBe("/Users");
   });
 });

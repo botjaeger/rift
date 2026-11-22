@@ -67,6 +67,37 @@ export const MAX_MARKS = 100;
 /** A piece of a text: marked where it matches the search. */
 export type MarkPart = { text: string; mark: boolean };
 
+/** A piece of block output as drawn: the Search output match it is part of, and the link it is part of. */
+export type TextPart = { text: string; mark: boolean; link: boolean };
+
+/**
+ * `text` cut where a match (`query`) or a link starts or ends, each piece saying which it is part
+ * of: the same characters in the same order, so a field holding the pieces selects and copies as
+ * it would the plain text. Null when there is nothing to draw apart.
+ */
+export function textParts(text: string, query: string | undefined, links: readonly { start: number; end: number }[]): TextPart[] | null {
+  const marks: { start: number; end: number }[] = [];
+  let at = 0;
+  for (const p of query ? (markParts(text, query) ?? []) : []) {
+    if (p.mark) marks.push({ start: at, end: at + p.text.length });
+    at += p.text.length;
+  }
+  if (marks.length === 0 && links.length === 0) return null;
+  const cuts = new Set<number>([0, text.length]);
+  for (const r of [...marks, ...links]) {
+    cuts.add(r.start);
+    cuts.add(r.end);
+  }
+  const edges = [...cuts].sort((x, y) => x - y);
+  const inside = (rs: readonly { start: number; end: number }[], i: number) => rs.some((r) => i >= r.start && i < r.end);
+  const out: TextPart[] = [];
+  for (let k = 0; k + 1 < edges.length; k++) {
+    const [s, e] = [edges[k]!, edges[k + 1]!];
+    if (e > s) out.push({ text: text.slice(s, e), mark: inside(marks, s), link: inside(links, s) });
+  }
+  return out;
+}
+
 const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, (c) => `\\${c}`);
 
 /**
@@ -75,6 +106,32 @@ const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, (c) => `\\$
  * the text, so the plain text is drawn as before. Joined, the pieces are `text` exactly: a
  * selection's offsets are the same.
  */
+/** How many times `query` occurs in `text` (case folded), counted up to `MAX_MARKS`. */
+export function matchCount(text: string, query: string): number {
+  return markParts(text, query)?.filter((p) => p.mark).length ?? 0;
+}
+
+/** The first line of `text` that holds `query` (case folded), or -1. */
+export function firstMatchLine(text: string, query: string): number {
+  const q = query.trim().toLowerCase();
+  if (q === "") return -1;
+  return text.split("\n").findIndex((l) => l.toLowerCase().includes(q));
+}
+
+/**
+ * The rows drawn above the first line holding `query`: one per line, or, wrapped at `cols`
+ * characters, as many as each line wraps to (an empty line is still a row); -1 without a match.
+ */
+export function rowsBeforeMatch(text: string, query: string, wrap: boolean, cols: number): number {
+  const line = firstMatchLine(text, query);
+  if (line < 0) return -1;
+  if (!wrap || cols < 1) return line;
+  return text
+    .split("\n")
+    .slice(0, line)
+    .reduce((n, l) => n + Math.max(1, Math.ceil(l.length / cols)), 0);
+}
+
 export function markParts(text: string, query: string, max = MAX_MARKS): MarkPart[] | null {
   const q = query.trim();
   if (q === "" || text === "") return null;

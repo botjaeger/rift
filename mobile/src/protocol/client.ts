@@ -846,8 +846,10 @@ export class RiftClient {
   chipMenu<T extends "dirs" | "branches" | "changes">(
     pane: number,
     t: T,
+    /** `dirs` only (feature `dirs_path`): another folder to list. */
+    path?: string,
   ): Promise<ChipResult<Extract<ChipAnswerMsg, { t: T }>>> {
-    return this.askChip({ t, id: "", pane }, (m) => m.t === t && m.pane === pane) as Promise<
+    return this.askChip({ t, id: "", pane, ...(path !== undefined ? { path } : {}) }, (m) => m.t === t && m.pane === pane) as Promise<
       ChipResult<Extract<ChipAnswerMsg, { t: T }>>
     >;
   }

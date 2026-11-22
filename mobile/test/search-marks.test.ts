@@ -3,6 +3,7 @@ import * as paneView from "../src/paneView";
 import { MAX_MARKS, markParts } from "../src/paneView";
 import type { Block } from "../src/protocol/types";
 import * as selection from "../src/selection";
+import * as terminal from "../src/terminal";
 import { stubColors } from "./helpers/themeStub";
 import { findAll, flat, load, react, render, textOf, uiDeps } from "./helpers/render";
 
@@ -57,6 +58,7 @@ function deps(platform: "ios" | "android" = "ios") {
   const d = uiDeps(platform, {
     "@/paneView": paneView,
     "@/selection": selection,
+    "@/terminal": terminal,
     "@/haptics": { copied: () => {} },
     "expo-clipboard": { setStringAsync: vi.fn(async () => {}) },
     "./SelectionScope": { useSelectionScope: () => null, useSelectionOwner: () => null },

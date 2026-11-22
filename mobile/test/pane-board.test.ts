@@ -131,6 +131,7 @@ describe("the block cards", () => {
   const deps = uiDeps("ios", {
     react: { ...react, memo: (c: unknown) => c },
     "expo-clipboard": { setStringAsync: async () => {} },
+    "@/haptics": { copied: () => {} },
     "@/paneView": { failureMessage, lastLines, liveDuration, parseLogLines },
     "./Button": { Button: "Button" },
     "./format": { formatClock: (ms: number) => `0:${String(Math.round(ms / 1000)).padStart(2, "0")}` },
@@ -153,6 +154,10 @@ describe("the block cards", () => {
     expect(out.props.lineHeight).toBe(17);
     expect(findAll(tree, (n) => n.type === "Button").map((b) => b.props.label)).toEqual(["Run again", "Copy error"]);
   });
+  it("a failed card's error reads as one line, path first, as the shell printed it", () => {
+    const tree = draw(FailedCard, { block: block({ command: "cat notes.txt", output: "cat: notes.txt: No such file or directory\n" }), onRunAgain: () => {} });
+    expect(findAll(tree, (n) => n.type === "SelectableText").map((n) => n.props.text)).toEqual(["notes.txt: No such file or directory"]);
+  });
   it("search results show the matching lines only: no Run again, Copy error or Stop", () => {
     expect(findAll(draw(FailedCard, { block: block({}), onRunAgain: () => {}, mark: "error" }), (n) => n.type === "Button")).toHaveLength(0);
     const running = { block: block({ state: "running", exit: null, command: "deploy", output: "a\nDone. notes.txt is the only file.\n" }), notify: false, onBell: () => {}, onStop: () => {} };
@@ -171,7 +176,9 @@ describe("the block cards", () => {
     expect(findAll(tree, (n) => n.type === "SelectableText").map((n) => n.props.text)).toEqual(["error in App.test.tsx"]);
   });
   it("while searching the command line has no context row", () => {
-    expect(pane).toMatch(/chips=\{\s*searching !== null \|\| waitingForPane\s*\? \[\]\s*: chipItems\(/);
+    expect(pane).toContain("chips={searching !== null || waitingForPane ? [] : rowChips}");
+    // Time on tab is not one of the row's chips: the ⋯ menu opens its card
+    expect(pane).toContain("const rowChips = elapsedChip ? allChips.filter((c) => c !== elapsedChip) : allChips;");
     // and the opening card stands alone, no skeleton blocks under it
     expect(pane).toContain("{!state && host && !load?.card ? <BlockSkeleton /> : null}");
   });

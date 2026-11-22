@@ -43,8 +43,11 @@ describe("sheet heights: the boards', to the screen's end", () => {
       expect(options, name).toContain('sheetAllowedDetents: "fitToContents"');
       expect(options, name).toContain("sheetGrabberVisible: false");
     }
-    // Change folder too (a chip menu), not the long Changes list
-    expect(layout).toMatch(/\["dirs", "pr", "python", "php", "docker", "elapsed"\]\.includes/);
+    // every chip menu fits what it holds (Changes and Change branch too: three rows were a
+    // short list in a sheet three quarters of the screen tall)
+    const chips = layout.slice(layout.indexOf('name="chips"'), layout.indexOf('name="pane-chips"'));
+    expect(chips).toContain('sheetAllowedDetents: "fitToContents"');
+    expect(chips).not.toContain("[0.75, 1]");
   });
   it("every board sheet is a SheetFrame of its board", () => {
     const boards: Record<string, string> = {

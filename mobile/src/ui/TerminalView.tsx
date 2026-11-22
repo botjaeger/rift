@@ -64,7 +64,14 @@ import { ControlRow, NO_STICKY, type Sticky } from "./ControlRow";
 import { ScreenSkeleton } from "./PaneLoading";
 import { useOpenShell } from "./useOpenShell";
 import { ErrorText, WarningText } from "./Notice";
+import { lift } from "./palette";
 import { fromPalette, mono, monoBold, tint, ui, makeStyles, useColors } from "./theme";
+
+/**
+ * A link's colour on the screen's ground: the accent, lifted until it reads there (the ground is
+ * the computer's, the accent the phone's theme, which may be of the other kind).
+ */
+const linkColor = (accent: string, defaults: { fg: string; bg: string }) => lift(accent, [defaults.bg], defaults.fg);
 
 /** The terminal's default colours (a run's null fg / bg): terminal text on the pane's ground. */
 const defaultColors = fromPalette((colors) => ({ fg: colors.fg, bg: colors.bg }));
@@ -128,7 +135,7 @@ function PieceView({
   const styles = useStyles();
   const colorsHere = segmentColors(piece, defaults);
   const backgroundColor = colorsHere.backgroundColor;
-  const color = link && !piece.cursor ? colors.accent : colorsHere.color;
+  const color = link && !piece.cursor ? linkColor(colors.accent, defaults) : colorsHere.color;
   const left = piece.col * cell;
   const width = piece.cells * cell;
   const text: TextStyle = {
@@ -299,7 +306,7 @@ function FlatRow({
       <Text
         key={piece.col}
         style={{
-          color: piece.link ? colors.accent : color,
+          color: piece.link ? linkColor(colors.accent, defaults) : color,
           backgroundColor,
           ...(piece.flags & RUN_BOLD ? { fontFamily: monoBold } : null),
           fontStyle: piece.flags & RUN_ITALIC ? "italic" : undefined,
@@ -1763,7 +1770,9 @@ export function TerminalView({
 }
 
 const useStyles = makeStyles((colors) => ({
-  fill: { flex: 1, backgroundColor: colors.bg },
+  // no ground of its own: the root paints the screen's (the computer's colours, which its frames
+  // carry); a wrapper in the phone's ground hid the screen's text under a phone theme of the other kind
+  fill: { flex: 1 },
   gridWrap: { flex: 1 },
   gridPad: { paddingVertical: PADDING, paddingHorizontal: PADDING_X },
   partPad: { paddingHorizontal: PADDING_X },

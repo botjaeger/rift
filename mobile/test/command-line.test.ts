@@ -107,15 +107,15 @@ describe("the command line's order", () => {
     // the first completion bright, the others in the text colour, whole (no typed / rest split)
     expect(source).toContain("<Text style={[styles.chipText, first && styles.firstText]} numberOfLines={1}>");
   });
-  it("⌃ shows the keys and says whether they show; no ⌨ beside the field", () => {
-    const keys = source.slice(at('accessibilityLabel="Control keys"') - 100, at('<Icon name={keys ? "chevronDown" : "control"}'));
+  it("the keys button shows the keys and says whether they show; no second keys button", () => {
+    const keys = source.slice(at('accessibilityLabel="Control keys"') - 100, at('<Icon name="keyboard"'));
     expect(keys).toContain("accessibilityState={{ expanded: keys, disabled: waiting }}");
     expect(keys).toContain("onPress={() => setKeys((k) => !k)}");
     expect(view).not.toContain('accessibilityLabel="Keys"');
-    expect(view).not.toContain('<Icon name="keyboard"');
+    expect(view.split('<Icon name="keyboard"').length).toBe(2);
   });
-  it("⌃ turns to ⌄ while the keys show: it folds them away", () => {
-    expect(source).toContain('<Icon name={keys ? "chevronDown" : "control"}');
+  it("the keys button is a keyboard, in the accent while the keys show", () => {
+    expect(source).toContain('<Icon name="keyboard" size={glyph(20, 17)} weight="medium" color={keys ? colors.accent : colors.text} />');
   });
   it("no Stop button on the command line, running or not", () => {
     expect(source).not.toContain("Stop ⌃C");

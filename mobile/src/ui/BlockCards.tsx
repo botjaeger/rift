@@ -1,6 +1,7 @@
 import * as Clipboard from "expo-clipboard";
 import { memo, useState, type ReactNode } from "react";
 import { AccessibilityInfo, Pressable, Text, View, type StyleProp, type ViewStyle } from "react-native";
+import * as haptics from "@/haptics";
 import { failureMessage, lastLines, liveDuration, parseLogLines } from "@/paneView";
 import type { Block } from "@/protocol/types";
 import { Button } from "./Button";
@@ -11,6 +12,7 @@ import { glyph } from "./Screen";
 import { SelectableText } from "./SelectableText";
 import { Spinner } from "./StatusMark";
 import { mono, monoMedium, ui, makeStyles, useColors } from "./theme";
+import { useFlash } from "./useFlash";
 import { useNow } from "./useNow";
 
 /** "✓ 3 earlier commands succeeded … Show": the folded successes (now.ts `foldBlocks`), the board's 36 pt pill. */
@@ -124,16 +126,25 @@ interface CardProps {
  * A failed command: `✕ 127`, its message and path, Run again (not for a view-only device: no
  * `onRunAgain`), Copy error. Search results (`mark`) show the matching lines only, no actions.
  */
-export const FailedCard = memo(function FailedCard({ block, onActions, onRunAgain, mark }: CardProps & { onRunAgain?: (b: Block) => void }) {
+export const FailedCard = memo(function FailedCard({
+  block,
+  onActions,
+  onRunAgain,
+  onCopied,
+  mark,
+}: CardProps & { onRunAgain?: (b: Block) => void; /** Says a copy landed (the pane's toast). */ onCopied?: (text: string) => void }) {
   const colors = useColors();
   const styles = useStyles();
+  const [copied, flash] = useFlash();
   // a search result shows the line that holds the words, when the message does not (the New Blocks board)
-  const fail = searchedLine(block.output, mark) ?? failureMessage(block.output);
+  const found = searchedLine(block.output, mark) ?? failureMessage(block.output);
+  // one line, as the shell printed it: "notes.txt: No such file or directory"
+  const fail = found ? (found.path ? `${found.path}: ${found.text}` : found.text) : null;
   return (
     <CardFrame
       ground={colors.surface}
       border={`${colors.error}88`}
-      label={`${block.command || "Command"}, failed, exit ${block.exit}${fail ? `, ${fail.text}` : ""}`}
+      label={`${block.command || "Command"}, failed, exit ${block.exit}${fail ? `, ${fail}` : ""}`}
       onOpen={() => onActions(block.id)}
       head={<CardHead command={block.command} status={`✕ ${block.exit}`} color={colors.error} mark={mark} />}
       pills={
@@ -149,12 +160,18 @@ export const FailedCard = memo(function FailedCard({ block, onActions, onRunAgai
           {/* nothing to copy from a command that printed nothing (`false`) */}
           {block.output !== "" ? (
             <Button
-              label="Copy error"
+              label={copied ? "Copied" : "Copy error"}
               size="small"
-              accessibilityLabel="Copy error: copies the output"
+              accessibilityLabel={copied ? "Copied" : "Copy error: copies the output"}
+              icon={copied ? <Icon name="check" size={glyph(14, 11)} color={colors.success} /> : undefined}
               onPress={() =>
                 void Clipboard.setStringAsync(block.output).then(
-                  () => AccessibilityInfo.announceForAccessibility("Error copied"),
+                  () => {
+                    haptics.copied();
+                    flash();
+                    if (onCopied) onCopied("Error copied");
+                    else AccessibilityInfo.announceForAccessibility("Error copied");
+                  },
                   () => AccessibilityInfo.announceForAccessibility("Could not copy the output"),
                 )
               }
@@ -163,8 +180,7 @@ export const FailedCard = memo(function FailedCard({ block, onActions, onRunAgai
         </>
       }
     >
-      {fail ? <SelectableText text={fail.text} style={styles.output} lineHeight={17} mark={mark} /> : null}
-      {fail?.path ? <SelectableText text={fail.path} style={styles.output} lineHeight={17} mark={mark} /> : null}
+      {fail ? <SelectableText text={fail} style={styles.output} lineHeight={17} mark={mark} /> : null}
     </CardFrame>
   );
 });

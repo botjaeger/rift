@@ -2000,7 +2000,7 @@ on the desktop (also for shells a phone started while no window is open).
   in words (*● 1 needs you · 2 working · 1 failed · 27 idle*; counts, not filters). *Portals*
   lists each computer in a card: its line says where it is (*This network · 30 tabs*, *Over the
   relay*, *Can't reach it · last seen 2 h ago*, with *paired 3 Nov* when two pairings share a
-  name), *New tab* (also on one it cannot reach, whose sheet says it is offline); one that cannot be reached offers *Try again* (or *Pair again*) and *Unpair*
+  name), *+ New tab* (a labelled button, apart from the header's round **+**; also on one it cannot reach, whose sheet says it is offline); one that cannot be reached offers *Try again* (or *Pair again*) and *Unpair*
   (in red, asking first) in the card, and any card swipes left for *Unpair*. A card shows up to five
   tabs in the computer's tab order (window by window, then each tab strip's; a tab never moves
   when its state changes); past five, the five that matter most (what needs you, tinted, then what
@@ -2047,8 +2047,9 @@ on the desktop (also for shells a phone started while no window is open).
   it, at most two actions; Portals keeps its large title as the root page.
   One sheet header: a 36 × 5 grabber, the title, a line under it and a round ✕
   (*Close*), on every sheet. Every sheet has its board's height (Attach and *What's new* 484 pt,
-  *Change folder* and *New tab* 645, a block 690, *New pane* 507, *Run this?* 381, *Connection*
-  541), its actions pinned to its foot (*Run again* / *Edit*, *Cancel* / *Run*, *Test again*,
+  *Change folder* and *New tab* 645, a block 690 (as tall as its output when that is short, the
+  buttons right under it), *New pane* 507, *Run this?* 381, *Connection*
+  541; the chip menus, *Changes* and *Change branch* included, fit what they hold), its actions pinned to its foot (*Run again* / *Edit*, *Cancel* / *Run*, *Test again*,
   *Done*), and closes with ✕, a swipe down or Android's Back. On Android a sheet is attached edge
   to edge with its top corners rounded; on iOS 27 the system floats a partial-height sheet inset
   from the screen's edges. One text field (46 pt, radius 10, an icon, its
@@ -2069,18 +2070,21 @@ on the desktop (also for shells a phone started while no window is open).
   and placeholders, versions and words are Inter.
   Successes before the newest failure fold away; blocks are cards (12 pt corners, the status in mono in its colour, output in mono 12) with a thin
   border in their state's colour (a table as a list, with *Raw*), failed ones
-  with *Run again* and *Copy error*, running ones with *Stop* and *Notify when
-  done*; a tap on a card's header opens the block sheet, and selecting its output copies the selection (a read-only field; its handles are the system's, in the accent on Android and in the selection colour on iOS) with a small vibration; while text is selected the other blocks dim and a bar docked where the pane's controls are (drawn over them, which stay in place hidden, so the output never moves and never hides the cursor; above a question card, which stays) shows how much is selected (lines and characters) and *✓ Copied* while the selection is on the clipboard (every change of the selection copies it; a screen reader hears *Copied* once per copy), then the same keys in the same places on block output and a full-screen program's screen: *Word*, *Line*, *All* (the whole block, or the whole screen), *To prompt* (the selection into the command line, its lines joined by spaces; disabled where nothing can be typed or no message box shows under the screen, with the reason as its screen reader hint) and ✕, over one line: "All selects the whole block." (or screen). On iOS it replaces the system's edit menu (the block sheet keeps that menu). A hold on another block ends the first selection and starts the new one; a tap elsewhere in the output, ✕ or Android's Back ends the selection. On a program's screen each end has an 18 pt accent knob with a dark rim on its corner, taken within 44 pt, and a dragged knob shows a 150 × 46 loupe with the row in mono 22. While text is selected a sideways drag moves the handle only: it never goes Back and never pans a wide screen, and a handle follows the finger from where it was taken. There is no view switch: the pane
+  with their error as one line ("notes.txt: No such file or directory"), *Run again* and *Copy error*, running ones with *Stop* and *Notify when
+  done*; *Copy error* and the block sheet's *Copy* and copy-command button turn to *✓ Copied* for a moment
+  with the copy vibration (*Copy error* also shows a toast; the sheet stays open); a tap on a card's header opens the block sheet, and selecting its output copies the selection (a read-only field; its handles are the system's, in the accent on Android and in the selection colour on iOS) with a small vibration; while text is selected the other blocks dim and a bar docked where the pane's controls are (drawn over them, which stay in place hidden, so the output never moves and never hides the cursor; above a question card, which stays) shows how much is selected (lines and characters) and *✓ Copied* while the selection is on the clipboard (every change of the selection copies it; a screen reader hears *Copied* once per copy), then the same keys in the same places on block output and a full-screen program's screen: *Word*, *Line*, *All* (the whole block, or the whole screen), *To prompt* (the selection into the command line, its lines joined by spaces; disabled where nothing can be typed or no message box shows under the screen, with the reason as its screen reader hint) and ✕, over one line: "All selects the whole block." (or screen). On iOS it replaces the system's edit menu (the block sheet keeps that menu). A hold on another block ends the first selection and starts the new one; a tap elsewhere in the output, ✕ or Android's Back ends the selection. On a program's screen each end has an 18 pt accent knob with a dark rim on its corner, taken within 44 pt, and a dragged knob shows a 150 × 46 loupe with the row in mono 22. While text is selected a sideways drag moves the handle only: it never goes Back and never pans a wide screen, and a handle follows the finger from where it was taken. There is no view switch: the pane
   shows its screen (the TUI, with pinch-to-zoom) for the alternate screen, a coding agent or a program no
   block holds, and blocks for everything else. On the screen, http(s) addresses are found as the
   desktop finds them (a long one the program wrapped onto the next rows included) and drawn
   underlined in the accent; a tap on one opens it in the phone's browser (before a program that
   tracks the mouse gets the click, and without raising the keyboard), and a screen reader's row with
-  a link opens it on activate. The command line, top to bottom: the
-  context (the folder as its whole path and the branch, as chips that open the chip menus, Time
-  on tab as plain text after them, "· last 2m"); then the suggestions, the first marked: at a
+  a link opens it on activate. Block output (the cards and the block sheet, its command too) draws its http(s) addresses the
+  same way (found as on the screen), and a tap on one opens it in the browser; a hold still selects. A
+  program's screen keeps the computer's ground under its text whatever theme the phone draws with. The command line, top to bottom: the
+  context (the folder as its whole path and the branch, as chips that open the chip menus; Time
+  on tab is not in the row, the pane's ⋯ menu opens its card); then the suggestions, the first marked: at a
   prompt the phone keyboard's Return takes it (a command is one line); one line: **+** attaches,
-  **⌃** shows the keys, and the round field with its run button runs (an empty field says
+  the keyboard button shows the keys (in the accent while they show), and the round field with its run button runs (an empty field says
   "Command"); the keys (labels in JetBrains Mono Bold, Paste as the word). While a program runs the field says who it types to ("Message for
   npm", or "Message" where that does not fit); ⌃C is ⌃ then C. The keys are one strip for the command line and a
   full-screen program alike, 88 pt high: the key block (Settings › Keys; Esc, Tab, ⌃, Return,
@@ -2101,8 +2105,12 @@ on the desktop (also for shells a phone started while no window is open).
   from a block or chip returns to that sheet; a successful run returns to the
   pane. *Wrap long lines* (Settings › Panes, and the pane's ⋯
   menu for one pane) off lets each block's output scroll sideways. The
-  header's search filters the blocks. The folder chip opens what the
-  desktop's chips do (feature `chips`): folders (`cd`), local branches
+  header's search filters the blocks and lists the matches from the top, under the field (a
+  tap on one opens it even with the keyboard up); the block sheet it opens keeps the words
+  marked, counts them ("1 match") and opens a long output at the first. The folder chip opens what the
+  desktop's chips do (feature `chips`): folders (`cd`; with `dirs_path`, *Parent folder* and a
+  folder open in the sheet, the pane's own marked *you are here*, and one button runs `cd` to
+  the folder shown), local branches
   (`git checkout`) and the code review panel's changed files, each with its
   diff; the names are shell-quoted; it shows the folder and branch the
   desktop computes for its own chips (feature `git`).
@@ -2167,7 +2175,9 @@ on the desktop (also for shells a phone started while no window is open).
   relay second, reconnects at once when the phone changes networks (moving
   home upgrades to the direct path), retries an unreachable computer 5 times
   (0.5 s doubling to 10 s; the card counts *retry 2 of 5*) and then stops
-  (*Can't reach it · stopped after 5 retries*, with *Try again*): it tries
+  (*Can't reach it · stopped after 5 retries*, with *Try again*; a pane's strip reads *Can't
+  reach studio-mac* with *Try again* on it, and the Connection sheet puts a refused connection
+  in words: "Nothing answered: is Rift open, with Remote access on?"): it tries
   again every 30 seconds while the app is open, when you tap *Try again*, when
   the phone is back online and when the app opens, and *Cancel* on a pane that is reconnecting stops it at once and
   goes to Portals. When the computer quits Rift it says so first (`closing`,

@@ -200,7 +200,8 @@ export default function Switcher() {
           returnKeyType="search"
         />
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filters} accessibilityRole="toolbar" accessibilityLabel="Show" keyboardShouldPersistTaps="handled">
-          {FILTERS.map((f) => (
+          {/* a filter with nothing in it is left out (the chosen one stays, to be turned off) */}
+          {FILTERS.filter((f) => f.filter === "all" || counts[f.filter] > 0 || filter === f.filter).map((f) => (
             <FilterChip key={f.filter} label={f.text} count={counts[f.filter]} selected={filter === f.filter} onPress={() => setFilter(f.filter)} />
           ))}
         </ScrollView>

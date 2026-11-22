@@ -30,11 +30,15 @@ export function hostMeta(host: { conn: Pick<ConnState, "status" | "path">; viewO
   return host.conn.status === "open" ? `${where} · ${host.viewOnly ? "view only" : "can run commands"}` : where;
 }
 
-/** "Show the command"'s detail: the example alert for the current value, as the app posts it. */
+/**
+ * "Show the command"'s detail: what the switch changes, with the alert's title as the app posts it
+ * with the command shown (a sample of the current value alone did not say what turning it does).
+ */
 export function notifyExample(hostName: string, showCommand: boolean): string {
-  const t = doneText({ host: hostName, tab: null, command: "npm test", exit: 1, durationMs: 8400, showCommand });
-  // said to be an example: without it the line read as a real failure
-  return `Shows as “${t.title}” · ${t.subtitle}`;
+  const on = doneText({ host: hostName, tab: null, command: "npm test", exit: 1, durationMs: 8400, showCommand: true });
+  const off = doneText({ host: hostName, tab: null, command: "npm test", exit: 1, durationMs: 8400, showCommand: false });
+  const hidden = off.title.replace(/^.*· /, "");
+  return showCommand ? `Alerts say what ran: “${on.title}”` : `Alerts say what ran (“${on.title}”), not just “${hidden}”`;
 }
 
 /** The "Updates" line: its text and whether it is the green "just checked" line. */

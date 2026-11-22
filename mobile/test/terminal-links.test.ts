@@ -1,6 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { findAll, flat, load, react, render, uiDeps } from "./helpers/render";
 import type { ScreenRun } from "../src/protocol/types";
-import { linkAt, markLinks, openableLink, rowPieces, rowSegments, screenLinks } from "../src/terminal";
+import { readFileSync } from "node:fs";
+import { textParts } from "../src/paneView";
+import { linkAt, linkAtOffset, markLinks, openableLink, rowPieces, rowSegments, screenLinks, textLinks } from "../src/terminal";
 
 const row = (...texts: string[]): ScreenRun[] => texts.map((t) => [t, null, null, 0]);
 
@@ -83,5 +86,117 @@ describe("openableLink", () => {
     expect(openableLink("javascript:alert(1)")).toBe(false);
     expect(openableLink("file:///etc/passwd")).toBe(false);
     expect(openableLink("https://a b")).toBe(false);
+  });
+});
+
+describe("links in block output (textLinks)", () => {
+  it("finds each address as the screen does: stops at a quote or bracket, drops trailing punctuation", () => {
+    const text = 'see https://example.com/docs, then (http://a.example/y).\nnext "https://b.example/z"';
+    expect(textLinks(text).map((l) => [l.url, text.slice(l.start, l.end)])).toEqual([
+      ["https://example.com/docs", "https://example.com/docs"],
+      ["http://a.example/y", "http://a.example/y"],
+      ["https://b.example/z", "https://b.example/z"],
+    ]);
+  });
+  it("never runs over a line end, and a bare scheme is no link", () => {
+    expect(textLinks("https://a.example\nrest").map((l) => l.url)).toEqual(["https://a.example"]);
+    expect(textLinks("just https:// here")).toEqual([]);
+  });
+  it("a caret on a link's first or last character is in it; one beside it is not", () => {
+    const text = "go https://a.example now";
+    const links = textLinks(text);
+    expect(linkAtOffset(links, 3)).toBe("https://a.example");
+    expect(linkAtOffset(links, 3 + "https://a.example".length)).toBe("https://a.example");
+    expect(linkAtOffset(links, 1)).toBeNull();
+  });
+  it("the drawn pieces keep every character, a match and a link each apart", () => {
+    const text = "see https://main.example now main";
+    const parts = textParts(text, "main", textLinks(text))!;
+    expect(parts.map((p) => p.text).join("")).toBe(text);
+    expect(parts.filter((p) => p.link).map((p) => p.text).join("")).toBe("https://main.example");
+    expect(parts.filter((p) => p.mark).map((p) => p.text)).toEqual(["main", "main"]);
+    expect(parts.find((p) => p.mark && p.link)?.text).toBe("main");
+    expect(textParts("plain words", undefined, [])).toBeNull();
+  });
+});
+
+describe("a program's screen keeps the computer's colours", () => {
+  const view = readFileSync(new URL("../src/ui/TerminalView.tsx", import.meta.url), "utf8");
+  it("its wrappers paint no ground of their own over the screen's (white text vanished on a light phone theme)", () => {
+    expect(view).toContain("  fill: { flex: 1 },");
+    expect(view).toContain("backgroundColor: screenDefaults(screen, defaultColors(colors)).bg");
+  });
+});
+
+// SelectableText run with its handlers: a tap on a link opens it, a hold selects (Android walk 2026-11-22)
+describe("a link in block output, on Android", () => {
+  const opened: string[] = [];
+  const mount = (text: string, lines?: number) => {
+    const paneView = { textParts, markParts: () => [] };
+    const deps = uiDeps("android", {
+      react: { ...react, useId: () => "field" },
+      "react-native": {
+        ...(uiDeps("android")["react-native"] as object),
+        AccessibilityInfo: { announceForAccessibility: () => {} },
+        Linking: { openURL: async (u: string) => void opened.push(u) },
+      },
+      "expo-clipboard": { setStringAsync: async () => {} },
+      "@/haptics": { copied: () => {} },
+      "@/paneView": paneView,
+      "@/terminal": { linkAtOffset, openableLink, textLinks },
+      "@/selection": { COPY_SETTLE_MS: 400, lineRange: () => ({}), selectedText: () => "", showsOwnCopied: () => false, textToCopy: () => null, wordRange: () => ({}) },
+      "./Marked": { partChildren: () => null, useMarkStyle: () => ({ mark: {} }) },
+      "./SelectionScope": { useSelectionOwner: () => undefined, useSelectionScope: () => null },
+      "./useFlash": { COPIED_MS: 1600 },
+    });
+    const { SelectableText } = load("ui/SelectableText.tsx", deps) as { SelectableText: (p: object) => unknown };
+    const tree = render({ type: SelectableText, props: { text, style: {}, lineHeight: 17, lines, children: [] } });
+    const field = findAll(tree, (n) => n.type === "TextInput")[0]!;
+    let focused = true;
+    (field.props.ref as { current: unknown }).current = { isFocused: () => focused, blur: () => {} };
+    const caret = (start: number, end = start) =>
+      (field.props.onSelectionChange as (e: object) => void)({ nativeEvent: { selection: { start, end } } });
+    return { tree, field, caret, unfocus: () => void (focused = false) };
+  };
+  const text = "docs: https://example.com/docs, then more";
+  const inLink = text.indexOf("example");
+
+  it("a tap's caret in a link opens it once no selection follows", () => {
+    vi.useFakeTimers();
+    opened.length = 0;
+    const { caret } = mount(text);
+    caret(inLink);
+    expect(opened).toEqual([]);
+    vi.advanceTimersByTime(200);
+    expect(opened).toEqual(["https://example.com/docs"]);
+    vi.useRealTimers();
+  });
+  it("a hold's caret, followed by its word selection, opens nothing", () => {
+    vi.useFakeTimers();
+    opened.length = 0;
+    const { caret } = mount(text);
+    caret(inLink);
+    vi.advanceTimersByTime(13);
+    caret(inLink - 0, inLink + 11);
+    vi.advanceTimersByTime(1000);
+    expect(opened).toEqual([]);
+    vi.useRealTimers();
+  });
+  it("a caret the field gets unfocused (laid out, not touched) opens nothing", () => {
+    vi.useFakeTimers();
+    opened.length = 0;
+    const { caret, unfocus } = mount("go https://example.com/end");
+    unfocus();
+    caret("go https://example.com/end".length);
+    vi.advanceTimersByTime(1000);
+    expect(opened).toEqual([]);
+    vi.useRealTimers();
+  });
+  it("a cut field is clipped from outside and keeps its whole text's height (Android scrolled it to the caret)", () => {
+    const { tree, field } = mount(text, 2);
+    expect(flat(field.props.style).maxHeight).toBeUndefined();
+    const clip = findAll(tree, (n) => n.type === "View" && flat(n.props.style).overflow === "hidden")[0]!;
+    expect(flat(clip.props.style).maxHeight).toBe(34);
+    expect(findAll(clip, (n) => n.type === "TextInput")).toHaveLength(1);
   });
 });

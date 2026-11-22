@@ -615,8 +615,8 @@ export function Composer({
           onPress={() => setKeys((k) => !k)}
           style={({ pressed }) => [styles.round, keys && styles.roundOn, pressed && styles.pressed]}
         >
-          {/* shown, the keys fold away downward: ⌄; hidden, ⌃ */}
-          <Icon name={keys ? "chevronDown" : "control"} size={glyph(18, 12)} weight="medium" color={keys ? colors.accent : colors.text} />
+          {/* a keyboard, in the accent while the keys are shown (a chevron read as "scroll up") */}
+          <Icon name="keyboard" size={glyph(20, 17)} weight="medium" color={keys ? colors.accent : colors.text} />
         </Pressable>
         <View style={styles.field}>
           <TextInput

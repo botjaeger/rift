@@ -4,7 +4,7 @@
 
 import { MAX_RETRIES, type ConnState } from "../protocol/client";
 import { failureLabel } from "./connLabel";
-import { agoText, backInText, failNote, QUIT_HINT, retryRound, stoppedText, UPDATE_HINT, updating } from "./connStatus";
+import { agoText, backInText, failNote, QUIT_HINT, retryRound, UPDATE_HINT, updating } from "./connStatus";
 import { formatClock } from "./format";
 
 /** After this long without the pane the card says "Taking longer than usual". */
@@ -20,7 +20,7 @@ export interface PaneStep {
 
 export interface PaneLoad {
   /** The full-width strip under the header; null when nothing needs saying (the pane is open and loaded). */
-  strip: { text: string; tone: "busy" | "quiet" | "bad"; busy: boolean; elapsed: string } | null;
+  strip: { text: string; tone: "busy" | "quiet" | "bad"; busy: boolean; elapsed: string; retry?: boolean } | null;
   /** The steps card over the skeleton; null when blocks are held or the pane is loaded. */
   card: {
     title: string;
@@ -181,12 +181,11 @@ export function paneLoad(i: PaneLoadInput): PaneLoad {
       const quit = conn.status === "failed" && conn.failure === "host_quit";
       const text = retrying
         ? `Can’t reach your computer · ${retryRound(conn, i.now)}`
-        : gaveUp
-          ? `Can’t reach your computer · ${stoppedText(conn)}`
-          : quit
-            ? `Rift quit on ${i.hostName}`
-            : "Can’t reach your computer";
-      const strip = { text, tone: quit ? ("quiet" as const) : ("bad" as const), busy: false, elapsed: "" };
+        : quit
+          ? `Rift quit on ${i.hostName}`
+          : `Can’t reach ${i.hostName}`;
+      // retrying is over: Try again on the strip itself, not two taps away in the Connection sheet
+      const strip = { text, tone: quit ? ("quiet" as const) : ("bad" as const), busy: false, elapsed: "", retry: !retrying && !quit };
       if (hasHeld) return { strip, card: null, held: true };
       if (quit) {
         return {

@@ -330,6 +330,43 @@ export function screenLinks(lines: readonly (readonly ScreenRun[])[], cols: numb
   return out;
 }
 
+/** A link in plain text (block output): where it starts and ends in `text` (UTF-16 offsets) and its address. */
+export interface TextLink {
+  start: number;
+  end: number;
+  url: string;
+}
+
+/**
+ * The http(s) links in plain text, found as `screenLinks` finds them on a screen (from the scheme
+ * to a space, quote or closing bracket, without trailing . , ; :): block output has no columns,
+ * so a long address is one run of characters, never wrapped onto a next row.
+ */
+export function textLinks(text: string): TextLink[] {
+  const out: TextLink[] = [];
+  const lower = text.toLowerCase();
+  let from = 0;
+  for (;;) {
+    const a = lower.indexOf("http://", from);
+    const b = lower.indexOf("https://", from);
+    const start = a === -1 ? b : b === -1 ? a : Math.min(a, b);
+    if (start === -1) break;
+    const scheme = lower.startsWith("https://", start) ? 8 : 7;
+    let end = start;
+    while (end < text.length && !LINK_STOP.has(text[end]!) && text[end] !== "\n" && text[end] !== "\r") end++;
+    let stop = end;
+    while (stop - start > scheme && ".,;:".includes(text[stop - 1]!)) stop--;
+    if (stop - start > scheme) out.push({ start, end: stop, url: text.slice(start, stop) });
+    from = Math.max(end, start + 1);
+  }
+  return out;
+}
+
+/** The link a caret at `offset` stands in (a tap on its first or last character included). */
+export function linkAtOffset(links: readonly TextLink[], offset: number): string | null {
+  return links.find((l) => offset >= l.start && offset <= l.end)?.url ?? null;
+}
+
 /** Only web links open from the phone (the desktop's `openable_url` also takes file and mailto, which the screen never finds). */
 export const openableLink = (url: string) => /^https?:\/\/\S+$/i.test(url);
 

@@ -103,7 +103,7 @@ describe("client fixtures", () => {
       "upload",
       "visible",
     ]);
-    expect(client).toHaveLength(43);
+    expect(client).toHaveLength(44);
   });
 
   it.each(client.map((f) => [f.name, f.json] as const))("%s is a ClientMsg", (_name, json) => {

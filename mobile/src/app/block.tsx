@@ -1,12 +1,13 @@
 import { useActionScope } from "@/ui/useActionScope";
 import * as Clipboard from "expo-clipboard";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AccessibilityInfo, Pressable, ScrollView, Text, View } from "react-native";
 import { tildePath } from "@/chips";
 import { gapLines, heldLines, MAX_EARLIER_LINES, nextRequest, unloadedLines } from "@/earlier";
 import { canOperate, draftKey, hasFeature, wrapsLines } from "@/fleet";
-import { agoText, liveBlock, outputLines, sheetChip } from "@/paneView";
+import * as haptics from "@/haptics";
+import { agoText, liveBlock, matchCount, MAX_MARKS, outputLines, rowsBeforeMatch, sheetChip } from "@/paneView";
 import { commandProblem } from "@/protocol/types";
 import { fleet, useApp, useLock } from "@/runtime";
 import { findPane, runningCommand } from "@/topology";
@@ -18,6 +19,7 @@ import { SheetButtons, SheetFrame } from "@/ui/SheetFrame";
 import { confirmDestructive } from "@/ui/confirm";
 import { formatDuration } from "@/ui/format";
 import { ErrorText } from "@/ui/Notice";
+import { useFlash } from "@/ui/useFlash";
 import { useNow } from "@/ui/useNow";
 import { useSingleFlight } from "@/ui/useSingleFlight";
 import { mono, radius, ui, makeStyles, useColors } from "@/ui/theme";
@@ -37,7 +39,10 @@ export default function BlockActionsScreen() {
     key,
     pane: paneParam,
     block: blockParam,
-  } = useLocalSearchParams<{ key: string; pane: string; block: string }>();
+    mark: markParam,
+  } = useLocalSearchParams<{ key: string; pane: string; block: string; mark?: string }>();
+  // opened from Search output: the words stay marked in the output
+  const mark = markParam?.trim() || undefined;
   const paneId = Number(paneParam);
   const blockId = Number(blockParam);
   const scope = useActionScope(`${key}:${paneId}:${blockId}`);
@@ -82,14 +87,33 @@ export default function BlockActionsScreen() {
     if (scope.leave()) router.back();
   };
 
-  const copy = async (text: string, what: string) => {
+  // a copy says so where it was tapped, and the sheet stays (the other one may be wanted too)
+  const [commandCopied, flashCommand] = useFlash();
+  const [outputCopied, flashOutput] = useFlash();
+  const copy = async (text: string, what: "Command" | "Output") => {
     const current = scope.capture();
     try {
       await Clipboard.setStringAsync(text);
-      if (current()) done(`${what} copied`);
+      if (!current()) return;
+      haptics.copied();
+      (what === "Command" ? flashCommand : flashOutput)();
+      AccessibilityInfo.announceForAccessibility(`${what} copied`);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
+  };
+  const matches = mark ? matchCount(output, mark) : 0;
+  // a long output opens at its first match, a row above it (18 pt rows; wrapped, the box's
+  // width in JetBrains Mono 12 cells of 0.6 em says how many rows each line takes)
+  const outScroll = useRef<ScrollView>(null);
+  const scrolledTo = useRef(false);
+  const outWidth = useRef(0);
+  const toMatch = () => {
+    if (!mark || scrolledTo.current || (wrap && outWidth.current === 0)) return;
+    const rows = rowsBeforeMatch(output, mark, wrap, Math.floor((outWidth.current - OUT_PAD_X * 2) / (12 * 0.6)));
+    if (rows <= 0) return;
+    scrolledTo.current = true;
+    outScroll.current?.scrollTo({ y: Math.max(0, (rows - 1) * 18), animated: false });
   };
 
   const edit = async () => {
@@ -192,6 +216,8 @@ export default function BlockActionsScreen() {
       bodyStyle={styles.body}
       // a long output scrolls in its own box down to the footer; the rest stays put above it
       fill={longOutput(output)}
+      // a short one: the sheet is as tall as what it holds, the buttons right under the output
+      fit={!longOutput(output)}
     >
       {block ? (
         <>
@@ -214,24 +240,27 @@ export default function BlockActionsScreen() {
             </View>
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="Copy command"
+              accessibilityLabel={commandCopied ? "Command copied" : "Copy command"}
               accessibilityState={{ disabled: command === "" }}
               disabled={command === ""}
               onPress={() => void copy(command, "Command")}
               hitSlop={6}
               style={({ pressed }) => [styles.copyIcon, pressed && styles.pressed]}
             >
-              <Icon name="copy" size={17} color={colors.textMuted} />
+              <Icon name={commandCopied ? "check" : "copy"} size={17} color={commandCopied ? colors.success : colors.textMuted} />
             </Pressable>
           </View>
           <View style={styles.outHead}>
-            <Text style={styles.outTitle}>Output · {outputLines(output)}</Text>
+            <Text style={styles.outTitle}>
+              Output · {outputLines(output)}
+              {mark ? ` · ${matches >= MAX_MARKS ? `${MAX_MARKS}+` : matches} ${matches === 1 ? "match" : "matches"}` : ""}
+            </Text>
             <Button
-              label="Copy"
-              accessibilityLabel="Copy output"
+              label={outputCopied ? "Copied" : "Copy"}
+              accessibilityLabel={outputCopied ? "Output copied" : "Copy output"}
               size="small"
               disabled={output === ""}
-              icon={<Icon name="copy" size={13} color={colors.text} />}
+              icon={outputCopied ? <Icon name="check" size={13} color={colors.success} /> : <Icon name="copy" size={13} color={colors.text} />}
               onPress={() => void copy(output, "Output")}
             />
           </View>
@@ -261,11 +290,22 @@ export default function BlockActionsScreen() {
             </Text>
           ) : null}
           {earlier?.error ? <ErrorText>{earlier.error}</ErrorText> : null}
-          <ScrollView style={[styles.outBox, longOutput(output) && styles.outGrow, output === "" && styles.outEmpty]} contentContainerStyle={styles.outPad} nestedScrollEnabled accessibilityLabel="Output">
+          <ScrollView
+            ref={outScroll}
+            style={[styles.outBox, longOutput(output) && styles.outGrow, !longOutput(output) && styles.outFit]}
+            contentContainerStyle={styles.outPad}
+            nestedScrollEnabled
+            onLayout={(e) => {
+              outWidth.current = e.nativeEvent.layout.width;
+              toMatch();
+            }}
+            onContentSizeChange={toMatch}
+            accessibilityLabel="Output"
+          >
             {output === "" ? (
               <Text style={styles.empty}>(no output)</Text>
             ) : (
-              <Output text={output.endsWith("\n") ? output.slice(0, -1) : output} wrap={wrap} ground={colors.bg} size={12} lineHeight={18} />
+              <Output text={output.endsWith("\n") ? output.slice(0, -1) : output} wrap={wrap} ground={colors.bg} size={12} lineHeight={18} mark={mark} />
             )}
           </ScrollView>
           {error ? <ErrorText>{error}</ErrorText> : null}
@@ -280,8 +320,15 @@ const spacedDuration = (ms: number) => formatDuration(ms).replace(/^([\d.]+)(m?s
 
 // The Block board: a 10 pt gap down the body, the command and the output in #050505 boxes with a
 // neutral hairline, mono 13/18 and 12/18, the output box 150 pt of lines (172 with its padding).
-/** More output than the board's box holds (about 8 lines of 18 pt, wrapped or not): it takes the sheet's free room. */
-const longOutput = (text: string) => text.split("\n").length > 8 || text.length > 400;
+/**
+ * More output than a fitted sheet holds under the board's 690 pt (about 20 rows of 18 pt, wrapped
+ * or not): it scrolls in its own box, which takes the sheet's free room. Less: the sheet fits it,
+ * growing with a running command's lines, so it never jumps to the full height with room to spare.
+ */
+const longOutput = (text: string) => text.split("\n").length > 20 || text.length > 1000;
+
+/** The output box's padding at each side. */
+const OUT_PAD_X = 12;
 
 const useStyles = makeStyles((colors) => ({
   body: { gap: 10 },
@@ -313,9 +360,9 @@ const useStyles = makeStyles((colors) => ({
   outBox: { height: 172, flexGrow: 0, borderRadius: radius.field, borderWidth: 1, borderColor: colors.hairline, backgroundColor: colors.bg },
   // the room down to the sheet's foot (never less than the board's 172), scrolling inside it
   outGrow: { height: undefined, flexGrow: 1, flexBasis: 0, minHeight: 172 },
-  // "(no output)": one line, not 172 pt of empty box
-  outEmpty: { height: undefined },
-  outPad: { paddingVertical: 10, paddingHorizontal: 12 },
+  // a short output (and "(no output)"): as tall as its lines, not 172 pt of empty box
+  outFit: { height: undefined },
+  outPad: { paddingVertical: 10, paddingHorizontal: OUT_PAD_X },
   // "(no output)" is words, not output
   empty: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13, lineHeight: 18 },
 }));

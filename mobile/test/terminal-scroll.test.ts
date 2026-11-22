@@ -63,6 +63,7 @@ function harness(typing = false, props: Record<string, unknown> = {}) {
     "./SelectionBar": { SelectionBar: "SelectionBar" },
     "./ControlRow": { NO_STICKY: {}, ControlRow: "ControlRow" },
     "./theme": themeStub,
+    "./palette": { lift: (fg: string) => fg },
     "../../modules/rift-keys": { KeyCaptureView: "KeyCaptureView" },
     "@/protocol/types": {}, "@/controlKeys": controlKeys, "./PaneLoading": {}, "./Notice": {}, "expo-clipboard": {},
   };

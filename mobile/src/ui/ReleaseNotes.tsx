@@ -52,15 +52,16 @@ export function ReleaseList({ releases, named, sheet }: { releases: readonly Rel
             </Text>
           ) : null}
           {r.summary ? <Text style={styles.summary}>{r.summary}</Text> : null}
-          {r.groups.map((g) => {
+          {r.groups.map((g, gi) => {
             const color = groupColor(g.title, colors);
             return (
-              <Fragment key={g.title}>
+              // by place: a release can list a group title twice (two "Improved")
+              <Fragment key={`${gi}:${g.title}`}>
                 <Text style={[styles.groupTitle, sheet && styles.sheetGroupTitle, { color }]} accessibilityRole="header">
                   {g.title}
                 </Text>
-                {g.items.map((it) => (
-                  <Text key={it.title} style={styles.item} accessibilityLabel={`${it.title} — ${it.text}`}>
+                {g.items.map((it, ii) => (
+                  <Text key={`${ii}:${it.title}`} style={styles.item} accessibilityLabel={`${it.title} — ${it.text}`}>
                     {/* a line's inline view takes no margin: its box holds the 8 pt after the dot */}
                     <View style={styles.lead}>
                       <View style={[styles.dot, { backgroundColor: color }]} />

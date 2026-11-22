@@ -105,10 +105,16 @@ const ARROWS_DEFAULT_CONTROL_KEYS: readonly string[] = ["esc", "tab", "ctrl+c", 
 const NEWLINE_DEFAULT_CONTROL_KEYS: readonly string[] = ["esc", "tab", "ctrl+c", "ctrl", "up", "down", "enter", "ctrl+j"];
 /** The one-line row's default, before the key block and arrow pad: a row stored as exactly this moves too. */
 export const ROW_DEFAULT_CONTROL_KEYS: readonly string[] = ["esc", "tab", "ctrl+c", "ctrl", "up", "down", "enter"];
-/** Places in the key block, the keyboard key's included (Settings › Keys: "6 of 8 in the key block"). */
+/** Places in the key block, the keyboard key's included. */
 export const BLOCK_SLOTS = 8;
 /** Keys Settings › Keys can put in the block: every place but the keyboard key's. */
 export const MAX_ROW_KEYS = BLOCK_SLOTS - 1;
+
+/** Settings › Keys' subtitle: the keys its list holds and the room left ("5 keys · room for 2 more"). */
+export function keysSubtitle(count: number): string {
+  const room = Math.max(0, MAX_ROW_KEYS - count);
+  return `${count} ${count === 1 ? "key" : "keys"} · ${room === 0 ? "the block is full" : `room for ${room} more`}`;
+}
 
 /**
  * The block as shown: `ids`, with Paste at the end where an image can be pasted (`images`: the

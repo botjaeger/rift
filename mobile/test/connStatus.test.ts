@@ -225,8 +225,14 @@ describe("pathRows: the Connection sheet", () => {
     expect(pathRows(c)[1]).toMatchObject({ tone: "busy", note: "Relay up · your computer has not joined" });
   });
   it("shows the real error of a path, not a made-up cause", () => {
-    const c = conn({ status: "closed", retryInMs: 1, paths: [path(LAN, { state: "failed", error: "connect ECONNREFUSED" }), path(RELAY)] });
-    expect(pathRows(c)[0]).toMatchObject({ tone: "bad", note: "Connect ECONNREFUSED" });
+    const c = conn({ status: "closed", retryInMs: 1, paths: [path(LAN, { state: "failed", error: "connect EHOSTUNREACH" }), path(RELAY)] });
+    expect(pathRows(c)[0]).toMatchObject({ tone: "bad", note: "Connect EHOSTUNREACH" });
+  });
+  it("a refused connection says what to check, not the system's words", () => {
+    for (const error of ["connect ECONNREFUSED", "The operation couldn’t be completed. Connection refused"]) {
+      const c = conn({ status: "closed", retryInMs: 1, paths: [path(LAN, { state: "failed", error }), path(RELAY)] });
+      expect(pathRows(c)[0]).toMatchObject({ tone: "bad", note: "Nothing answered: is Rift open, with Remote access on?" });
+    }
   });
   it("lists one row per LAN address", () => {
     const second: Endpoint = { kind: "lan", address: "10.0.0.5:7878" };

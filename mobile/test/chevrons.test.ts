@@ -17,7 +17,7 @@ describe("a chevron flips while what it opens is open", () => {
     expect(pane).toMatch(/setPicking\(true\);\s*router\.push\(\{ pathname: "\/panes"/);
     expect(pane).toContain("useFocusEffect(useCallback(() => setPicking(false), []));");
   });
-  it("the ⌃ keys button shows ⌄ while the keys show", () => {
-    expect(read("ui/Composer.tsx")).toContain('<Icon name={keys ? "chevronDown" : "control"}');
+  it("the keys button is a keyboard, in the accent while the keys show (a chevron read as scroll up)", () => {
+    expect(read("ui/Composer.tsx")).toContain('<Icon name="keyboard" size={glyph(20, 17)} weight="medium" color={keys ? colors.accent : colors.text} />');
   });
 });

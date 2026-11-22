@@ -33,8 +33,8 @@ describe("Settings words (the Settings board)", () => {
   });
 
   it("notifyExample shows the alert for the current value, with the computer's name", () => {
-    expect(notifyExample("build-box", true)).toBe("Shows as “✕ 1 · npm test” · Failed after 8.4s · build-box");
-    expect(notifyExample("build-box", false)).toBe("Shows as “✕ 1 · A command” · Failed after 8.4s · build-box");
+    expect(notifyExample("build-box", true)).toBe("Alerts say what ran: “✕ 1 · npm test”");
+    expect(notifyExample("build-box", false)).toBe("Alerts say what ran (“✕ 1 · npm test”), not just “A command”");
   });
 
   it("updateLine: checking, just checked (green), older, failed, pending", () => {

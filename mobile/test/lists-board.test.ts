@@ -255,10 +255,13 @@ describe("Portals: the New Portals board", () => {
     expect(style(header).paddingHorizontal).toBe(16);
     expect(findAll(tree, (n) => n.type === "ScrollView")[0]!.props.contentContainerStyle).toEqual(expect.arrayContaining([expect.objectContaining({ paddingTop: 4, gap: 14, paddingHorizontal: 16 })]));
   });
-  it("New tab is a 34 pt round glass button on each card, the unreachable one too", () => {
+  it("New tab says so on each card, the unreachable one too (the header's round + pairs a computer)", () => {
     const plus = findAll(tree, (n) => String(n.props.accessibilityLabel ?? "").startsWith("New tab on "));
     expect(plus.map((n) => n.props.accessibilityLabel)).toEqual(["New tab on studio-mac", "New tab on build-box"]);
-    expect(style(plus[1])).toMatchObject({ width: 34, height: 34, borderRadius: 17, backgroundColor: stubColors.glass, borderColor: stubColors.glassRim });
+    expect(plus.map((n) => [n.type, n.props.label, n.props.size])).toEqual([
+      ["Button", "New tab", "small"],
+      ["Button", "New tab", "small"],
+    ]);
   });
   it("the card's line has no chevron; the unreachable one is grey, with no hint paragraph", () => {
     expect(findAll(tree, (n) => n.type === "Icon" && n.props.name === "forward")).toHaveLength(0);

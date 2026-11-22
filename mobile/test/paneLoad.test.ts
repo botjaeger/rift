@@ -141,7 +141,7 @@ describe("paneLoad: the PaneLoading board's states", () => {
 
   it("Can’t reach: the real reason in full, the hint, Try again and Details", () => {
     const l = paneLoad(input({ conn: unregistered }));
-    expect(l.strip).toEqual({ text: "Can’t reach your computer · retry 1 of 5 in 8 s", tone: "bad", busy: false, elapsed: "" });
+    expect(l.strip).toEqual({ text: "Can’t reach your computer · retry 1 of 5 in 8 s", tone: "bad", busy: false, elapsed: "", retry: false });
     expect(l.card).toMatchObject({
       title: "Reconnecting to Sam’s MacBook Pro",
       actions: true,
@@ -162,7 +162,7 @@ describe("paneLoad: the PaneLoading board's states", () => {
 
   it("Gave up: Try again, Back to Portals and Details, and no more retrying is promised", () => {
     const l = paneLoad(input({ conn: conn({ status: "failed", failure: "gave_up", attempt: 5 }) }));
-    expect(l.strip).toEqual({ text: "Can’t reach your computer · stopped after 5 retries", tone: "bad", busy: false, elapsed: "" });
+    expect(l.strip).toEqual({ text: "Can’t reach Sam’s MacBook Pro", tone: "bad", busy: false, elapsed: "", retry: true });
     expect(l.card).toMatchObject({
       title: "Can’t reach Sam’s MacBook Pro",
       actions: true,
@@ -208,7 +208,7 @@ describe("paneLoad: the PaneLoading board's states", () => {
 
   it("Rift quit: says so, with Try again, Back to Portals and Details", () => {
     const l = paneLoad(input({ conn: conn({ status: "failed", failure: "host_quit", error: "Rift quit on the computer" }) }));
-    expect(l.strip).toEqual({ text: "Rift quit on Sam’s MacBook Pro", tone: "quiet", busy: false, elapsed: "" });
+    expect(l.strip).toEqual({ text: "Rift quit on Sam’s MacBook Pro", tone: "quiet", busy: false, elapsed: "", retry: false });
     expect(l.card).toEqual({
       title: "Rift quit on Sam’s MacBook Pro",
       steps: [{ tone: "bad", mark: "✕", label: "Reach Sam’s MacBook Pro", note: "Rift quit on this computer" }],
@@ -220,7 +220,7 @@ describe("paneLoad: the PaneLoading board's states", () => {
 
   it("a failure that stopped the client names its reason in full", () => {
     const l = paneLoad(input({ conn: conn({ status: "failed", failure: "key_mismatch", error: "ignored" }) }));
-    expect(l.strip!.text).toBe("Can’t reach your computer");
+    expect(l.strip!.text).toBe("Can’t reach Sam’s MacBook Pro");
     expect(l.card!.steps[0]!.note).toBe("A different computer answered at this address (its key does not match). Not connected.");
     expect(l.card!.leave).toBe("Back to Portals");
   });

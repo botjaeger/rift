@@ -13,22 +13,39 @@ const stripBg = fromPalette((colors) => ({ busy: tint(colors.accent, 0x14), quie
  * shows the wait while connecting, and a tap opens the Connection sheet. It is not a live
  * region (its wait and countdown change each second); the card under it is, politely.
  */
-export function PaneStrip({ strip, onPress }: { strip: NonNullable<PaneLoad["strip"]>; onPress: () => void }) {
+export function PaneStrip({ strip, onPress, onRetry }: { strip: NonNullable<PaneLoad["strip"]>; onPress: () => void; onRetry?: () => void }) {
   const colors = useColors();
   const styles = useStyles();
   const fg = stripFg(colors)[strip.tone];
-  return (
+  const details = (
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={`${strip.text}${strip.elapsed ? `, ${strip.elapsed}` : ""}. Connection details`}
       onPress={onPress}
-      style={({ pressed }) => [styles.strip, { backgroundColor: stripBg(colors)[strip.tone] }, pressed && styles.pressed]}
+      style={({ pressed }) => [styles.stripDetails, pressed && styles.pressed]}
     >
       {strip.busy ? <ActivityIndicator size="small" color={fg} /> : <View style={[styles.stripDot, { backgroundColor: fg }]} />}
       <Text style={[styles.stripText, { color: fg }]}>{strip.text}</Text>
       {strip.elapsed ? <Text style={[styles.elapsed, { color: fg }]}>{strip.elapsed}</Text> : null}
-      <Icon name="forward" size={12} color={fg} />
+      {strip.retry && onRetry ? null : <Icon name="forward" size={12} color={fg} />}
     </Pressable>
+  );
+  // Try again beside the details, not inside them: a button in a button is one element to a screen reader
+  return (
+    <View style={[styles.strip, { backgroundColor: stripBg(colors)[strip.tone] }]}>
+      {details}
+      {strip.retry && onRetry ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Try again"
+          hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}
+          onPress={onRetry}
+          style={({ pressed }) => [styles.stripRetry, { borderColor: fg }, pressed && styles.pressed]}
+        >
+          <Text style={[styles.stripRetryText, { color: fg }]}>Try again</Text>
+        </Pressable>
+      ) : null}
+    </View>
   );
 }
 
@@ -182,9 +199,14 @@ const useStyles = makeStyles((colors) => ({
     borderBottomWidth: 1,
     borderBottomColor: colors.hairline,
   },
+  // the strip's tappable words (dot, text, wait, ›): the row's room but Try again's
+  stripDetails: { flex: 1, minHeight: 26, flexDirection: "row", alignItems: "center", gap: 8 },
   stripDot: { width: 8, height: 8, borderRadius: 4 },
   stripText: { flex: 1, fontFamily: ui(400), fontSize: 13, lineHeight: 18 },
   elapsed: { fontFamily: mono, fontSize: 12, opacity: 0.8 },
+  // the strip's Try again: an outlined pill in the strip's colour, 32 pt (44 to the touch)
+  stripRetry: { height: 32, paddingHorizontal: 14, borderRadius: 16, borderWidth: 1, justifyContent: "center", backgroundColor: colors.surface },
+  stripRetryText: { fontFamily: ui(600), fontSize: 13 },
   cardLayer: { ...StyleSheet.absoluteFill, justifyContent: "center", paddingHorizontal: 16 },
   // the New Blocks board's card: the surface, a hairline rim, 14 pt corners, no shadow
   card: {

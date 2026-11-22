@@ -32,7 +32,7 @@ const pressable = (tree: unknown, label: string) => findAll(tree, (n) => n.type 
 describe("Settings › Keys", () => {
   it("counts the block's places with the keyboard key, and previews the key block itself", () => {
     const { tree } = draw([...controlKeys.DEFAULT_CONTROL_KEYS]);
-    expect(one(tree, "PageHeader")[0]!.props.subtitle).toBe("6 of 8 in the key block");
+    expect(one(tree, "PageHeader")[0]!.props.subtitle).toBe("5 keys · room for 2 more");
     const preview = one(tree, "ControlRow")[0]!;
     expect(preview.props.ids).toEqual(controlKeys.DEFAULT_CONTROL_KEYS);
     expect(preview.props.tipBelow).toBe(true);
@@ -72,8 +72,8 @@ describe("Settings › Keys", () => {
 
   it("a full block says so and adds nothing", () => {
     const { tree } = draw(["esc", "tab", "ctrl", "enter", "paste", "alt", "shift"]);
-    expect(one(tree, "PageHeader")[0]!.props.subtitle).toBe("8 of 8 in the key block");
-    expect(one(tree, "SectionTitle").map((n) => textOf(n))).toContain("Add a key · the block holds 8: remove one first");
+    expect(one(tree, "PageHeader")[0]!.props.subtitle).toBe("7 keys · the block is full");
+    expect(one(tree, "SectionTitle").map((n) => textOf(n))).toContain("Add a key · the block is full: remove one first");
     expect(pressable(tree, "Add Shift Tab").props.disabled).toBe(true);
   });
 });

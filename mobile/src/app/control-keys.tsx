@@ -2,7 +2,7 @@ import { useRouter } from "expo-router";
 import { useState } from "react";
 import { KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { BLOCK_SLOTS, DEFAULT_CONTROL_KEYS, FKEYS_CHIP, addChoices, canAddKey, controlKey, keyName, moveKeyTo, toggleKey } from "@/controlKeys";
+import { DEFAULT_CONTROL_KEYS, keysSubtitle, FKEYS_CHIP, addChoices, canAddKey, controlKey, keyName, moveKeyTo, toggleKey } from "@/controlKeys";
 import { fleet, useApp } from "@/runtime";
 import { Button } from "@/ui/Button";
 import { ControlRow, KeyCap, NO_STICKY } from "@/ui/ControlRow";
@@ -88,8 +88,8 @@ export default function ControlKeysScreen() {
     <KeyboardAvoidingView style={styles.fill} behavior="padding" enabled={Platform.OS === "android"}>
       <PageHeader
         title="Keys"
-        // the keyboard key is one of the block's places
-        subtitle={`${known.length + 1} of ${BLOCK_SLOTS} in the key block`}
+        // counts what the list below shows (the keyboard key's place is not one of them)
+        subtitle={keysSubtitle(known.length)}
         back={() => (router.canGoBack() ? router.back() : router.replace("/settings"))}
         // reached from Settings and from the command line's ⌨ held
         backLabel="Back"
@@ -157,7 +157,7 @@ export default function ControlKeysScreen() {
         ) : null}
 
         <View style={styles.section}>
-          <SectionTitle>{full ? `Add a key · the block holds ${BLOCK_SLOTS}: remove one first` : "Add a key"}</SectionTitle>
+          <SectionTitle>{full ? "Add a key · the block is full: remove one first" : "Add a key"}</SectionTitle>
           <Field icon="search" value={query} onChangeText={setQuery} label="Search keys" placeholder="Search keys" autoCapitalize="none" autoCorrect={false} returnKeyType="search" />
           <View style={styles.add}>
             {choices.length === 0 ? <Text style={styles.empty}>No key matches “{query.trim()}”.</Text> : null}

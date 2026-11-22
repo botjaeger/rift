@@ -112,7 +112,10 @@ export function ConnectionSheet({ hostKey }: { hostKey: string }) {
           </View>
           <View style={styles.rowText}>
             <Text style={styles.rowTitle}>End-to-end encrypted</Text>
-            <Text style={styles.line}>The relay passes bytes it cannot read.</Text>
+            {/* the relay line only where a relay is one of the ways in */}
+            <Text style={styles.line}>
+              {host.conn.paths.some((p) => p.path.kind === "relay") ? "The relay passes bytes it cannot read." : "Only this phone and your computer can read it."}
+            </Text>
           </View>
         </View>
       </View>

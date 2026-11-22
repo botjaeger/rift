@@ -100,7 +100,8 @@ export function nativeAttached(
   paste: { text: string } | { image: string } | { file: NativeFile },
   rules: AttachRules,
 ): Attached {
-  if ("text" in paste) return { kind: "text", text: paste.text };
+  // a clipboard that holds an empty string: nothing to paste, said as readClipboard says it
+  if ("text" in paste) return paste.text === "" ? { kind: "error", message: "The clipboard is empty." } : { kind: "text", text: paste.text };
   if ("image" in paste) return attachedItem(photoAttachment(paste.image), rules);
   return attachedItem(fileAttachment(paste.file), rules, paste.file.name);
 }

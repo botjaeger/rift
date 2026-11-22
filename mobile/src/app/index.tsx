@@ -227,16 +227,14 @@ function HostCard({ host, rows, now, answerHere, twin, replaced }: { host: HostV
           </View>
           {/* on a computer it cannot reach too: the sheet says it is offline */}
           {!viewOnly && (!online || canNewTab(host)) ? (
-            <Pressable
-              accessibilityRole="button"
+            // says what it does: the header's round + pairs a computer, this opens a tab
+            <Button
+              label="New tab"
               accessibilityLabel={`New tab on ${name}`}
-              // the board's 34 pt glass button, 44 to the touch
-              hitSlop={5}
+              size="small"
+              icon={<Icon name="add" size={glyph(14, 12)} color={colors.text} />}
               onPress={newTab}
-              style={({ pressed }) => [styles.headIcon, pressed && styles.pressed]}
-            >
-              <Icon name="newTab" size={glyph(20, 19)} color={colors.textMuted} />
-            </Pressable>
+            />
           ) : null}
           {!unreachable && line.retry ? (
             <Button
@@ -425,7 +423,6 @@ const useStyles = makeStyles((colors) => ({
     borderWidth: 1,
     borderColor: colors.borderStrong,
   },
-  headIcon: { width: 34, height: 34, borderRadius: 17, backgroundColor: colors.glass, borderWidth: 1, borderColor: colors.glassRim, alignItems: "center", justifyContent: "center" },
   why: { fontFamily: ui(400), color: colors.textMuted, fontSize: 13, lineHeight: 18, paddingHorizontal: 16, paddingBottom: 14 },
   inset: { marginHorizontal: 16, marginBottom: 12 },
   row: { minHeight: 62 },

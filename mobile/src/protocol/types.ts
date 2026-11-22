@@ -174,7 +174,9 @@ export type Feature =
   | "clipboard"
   | "theme"
   | "history"
-  | "stitch";
+  | "stitch"
+  // `dirs` with a `path`: the Change folder sheet browses before one cd
+  | "dirs_path";
 
 /** `complete` bounds: line bytes, entries per list, bytes per entry. */
 export const MAX_COMPLETE_LINE = 1024;
@@ -469,6 +471,8 @@ export interface ChipRequestMsg {
   t: "dirs" | "branches" | "changes";
   id: string;
   pane: number;
+  /** `dirs` only (feature `dirs_path`): list this absolute folder instead of the pane's. */
+  path?: string;
 }
 /** What a pull request, interpreter, Docker or Time on tab chip opens (feature `prompt_chips`). */
 export type ChipDetailKind = "pr" | "python" | "php" | "docker" | "elapsed";
@@ -1436,6 +1440,7 @@ export function isClientMsg(v: unknown): v is ClientMsg {
     case "page_seek":
       return isId(v.id) && isUint(v.pane) && isUint(v.epoch) && isInt(v.at);
     case "dirs":
+      return isId(v.id) && isUint(v.pane) && (v.path === undefined || (isStr(v.path) && v.path.startsWith("/") && v.path.length <= 1024));
     case "branches":
     case "changes":
       return isId(v.id) && isUint(v.pane);
