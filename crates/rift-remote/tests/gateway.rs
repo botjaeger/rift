@@ -1034,7 +1034,7 @@ fn pairing_then_reconnecting_gets_welcome_and_topology() {
     assert_eq!(
         welcome,
         json!({"t":"welcome","v":2,"host":"test-host","os":"linux","version":"9.9.9",
-               "device":d.id,"permission":"operate","features":["screen","text","output","push_failures","push_ntfy","git","notify_off","chips","waiting","complete","running","open","close","move","fit","prompt_chips","closing","scroll","upload","upload_files","paste","mouse","clipboard","history","stitch"],
+               "device":d.id,"permission":"operate","features":["screen","text","output","push_failures","push_ntfy","git","notify_off","chips","waiting","complete","running","open","close","move","fit","prompt_chips","closing","scroll","upload","upload_files","paste","mouse","clipboard","history","stitch","dirs_path"],
                // where it listens now (a specific address: that one)
                "addresses":[env.addr.to_string()]})
     );
@@ -4124,6 +4124,80 @@ fn only_operate_devices_reset_the_time_on_tab() {
     );
     put(&mut op, json!({"t":"reset_elapsed","id":"r3","pane":77}));
     assert_eq!(ack(&recv_t(&mut op, "ack")), (false, "no_pane"));
+}
+
+#[test]
+fn dirs_with_a_path_lists_that_folder_for_operate_devices_only() {
+    let env = start(|_| {});
+    // a folder to browse: two sub-folders (one hidden), a file
+    let root = scratch().with_file_name("browse");
+    std::fs::create_dir_all(root.join("project2").join("src")).unwrap();
+    std::fs::create_dir_all(root.join("Alpha")).unwrap();
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::write(root.join("notes.txt"), "x").unwrap();
+    let path = root.to_string_lossy().into_owned();
+    let (_k, mut view, _) = env.pair(Permission::View);
+    put(
+        &mut view,
+        json!({"t":"dirs","id":"v1","pane":12,"path":path}),
+    );
+    assert_eq!(ack(&recv_t(&mut view, "ack")), (false, "forbidden"));
+    let (_k, mut op, _) = env.pair(Permission::Operate);
+    put(&mut op, json!({"t":"dirs","id":"p1","pane":12,"path":path}));
+    let v = recv_t(&mut op, "dirs");
+    assert_eq!(
+        (&v["id"], &v["cwd"], &v["parent"], &v["dirs"], &v["more"]),
+        (
+            &json!("p1"),
+            &json!(path),
+            &json!(true),
+            &json!(["Alpha", "project2"]),
+            &json!(false)
+        ),
+        "the folder's own sub-folders, hidden ones and files left out"
+    );
+    // through a symlink the folder stays as asked (the pane's own cwd spelling), and a
+    // trailing slash is the same folder
+    let link = root.with_file_name("browse-link");
+    let _ = std::fs::remove_file(&link);
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&root, &link).unwrap();
+        let linked = format!("{}/", link.to_string_lossy());
+        put(
+            &mut op,
+            json!({"t":"dirs","id":"p3","pane":12,"path":linked}),
+        );
+        let v = recv_t(&mut op, "dirs");
+        assert_eq!(
+            (&v["cwd"], &v["dirs"]),
+            (
+                &json!(link.to_string_lossy()),
+                &json!(["Alpha", "project2"])
+            )
+        );
+        put(&mut op, json!({"t":"dirs","id":"p4","pane":12,"path":"/"}));
+        let v = recv_t(&mut op, "dirs");
+        assert_eq!((&v["cwd"], &v["parent"]), (&json!("/"), &json!(false)));
+        let _ = std::fs::remove_file(&link);
+    }
+    // without a path: still the pane's own folder
+    put(&mut op, json!({"t":"dirs","id":"p2","pane":12}));
+    assert_eq!(recv_t(&mut op, "dirs")["cwd"], json!("/w/rift"));
+    // relative, missing, too long
+    for (id, bad) in [
+        ("b1", "project2".to_string()),
+        ("b2", root.join("gone").to_string_lossy().into_owned()),
+        ("b3", format!("/{}", "p".repeat(1024))),
+    ] {
+        put(&mut op, json!({"t":"dirs","id":id,"pane":12,"path":bad}));
+        assert_eq!(
+            ack(&recv_t(&mut op, "ack")),
+            (false, "bad_request"),
+            "{bad}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]

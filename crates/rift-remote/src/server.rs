@@ -85,7 +85,7 @@ const DONE_RUNNING: usize = 64;
 /// after the 45 s idle timeout.
 pub const FOLLOW_FRESH: Duration = Duration::from_secs(20);
 /// What this gateway serves beyond Phase 2 (`welcome.features`).
-const FEATURES: [&str; 25] = [
+const FEATURES: [&str; 26] = [
     "screen",
     "text",
     "output",
@@ -111,6 +111,7 @@ const FEATURES: [&str; 25] = [
     "clipboard",
     "history",
     "stitch",
+    "dirs_path",
 ];
 
 /// Gateway settings. [`Config::new`] takes the limits from the protocol;
@@ -2329,9 +2330,16 @@ fn session<S: Source, T: Socket>(
                 from,
                 to,
             }) => Some(history(shared, &mut histories, rid, pane, epoch, from, to)),
-            Ok(ClientMsg::Dirs { id: rid, pane }) => {
-                Some(menu(shared, &mut outputs, rid, pane, MenuKind::Dirs))
-            }
+            Ok(ClientMsg::Dirs {
+                id: rid,
+                pane,
+                path: None,
+            }) => Some(menu(shared, &mut outputs, rid, pane, MenuKind::Dirs)),
+            Ok(ClientMsg::Dirs {
+                id: rid,
+                pane,
+                path: Some(path),
+            }) => Some(dirs_at(shared, device, &mut outputs, rid, pane, &path)),
             Ok(ClientMsg::Branches { id: rid, pane }) => {
                 Some(menu(shared, &mut outputs, rid, pane, MenuKind::Branches))
             }
@@ -4698,6 +4706,40 @@ fn menu<S: Source>(
             ),
         },
         Err(e) => chip_error(rid, pane, e),
+    }
+}
+
+/// `dirs` with a `path`: another folder's sub-directories, for browsing
+/// before a `cd` (the phone's Change folder sheet). Operate devices only:
+/// it lists any folder, as path completion does. Read here, in the gateway
+/// (the same user's file system), not through the window.
+fn dirs_at<S: Source>(
+    shared: &Shared<S>,
+    device: &Device,
+    rate: &mut Rate,
+    rid: String,
+    pane: u64,
+    path: &str,
+) -> ServerMsg {
+    if let Some(refused) = chip_admit(&rid, rate) {
+        return refused;
+    }
+    if !operates(shared, device) {
+        return ServerMsg::ack_err(rid, ErrorCode::Forbidden, VIEW_ONLY);
+    }
+    match crate::list_dirs(path) {
+        Ok(m) => match crate::bound_menu(m) {
+            (Menu::Dirs { cwd, parent, dirs }, more) => ServerMsg::Dirs {
+                id: rid,
+                pane,
+                cwd,
+                parent,
+                dirs,
+                more,
+            },
+            _ => unreachable!("list_dirs answers a folder menu"),
+        },
+        Err(why) => ServerMsg::ack_err(rid, ErrorCode::BadRequest, why),
     }
 }
 

@@ -168,10 +168,13 @@ pub enum ClientMsg {
         to: u64,
     },
     /// The pane's folder chip menu: its directory's sub-directories
-    /// (feature `chips`).
+    /// (feature `chips`), or another folder's when `path` names one
+    /// (feature `dirs_path`, operate devices only: browsing before a `cd`).
     Dirs {
         id: String,
         pane: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
     },
     /// The pane's branch chip menu: the repository's local branches.
     Branches {
@@ -1134,7 +1137,7 @@ mod tests {
     #[test]
     fn every_client_fixture_round_trips() {
         let all = fixtures("client");
-        assert_eq!(all.len(), 43, "client fixtures");
+        assert_eq!(all.len(), 44, "client fixtures");
         for (name, value) in all {
             let msg: ClientMsg =
                 serde_json::from_value(value.clone()).unwrap_or_else(|e| panic!("{name}: {e}"));

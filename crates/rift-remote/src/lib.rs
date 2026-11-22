@@ -409,6 +409,49 @@ pub struct DiffPage {
     pub lines: Vec<protocol::DiffLine>,
 }
 
+/// Raw entries [`list_dirs`] reads at most: a folder of a million files
+/// costs a bounded read, not a stat of each (the desktop's folder menu's
+/// bound).
+pub const MAX_DIR_ENTRIES: usize = 5000;
+
+/// A folder's menu for `dirs` with a `path` ([`MAX_DIFF_PATH`] bytes at
+/// most, absolute): the folder as asked (the shell's logical path, so it
+/// matches the pane's own `cwd` through a symlink such as macOS's `/tmp`),
+/// whether it has a parent, and its sub-directories among the first
+/// [`MAX_DIR_ENTRIES`] entries (symlinks to folders count), hidden ones left
+/// out, sorted case-insensitively, as the desktop's folder menu lists them;
+/// one more than [`MAX_MENU_ITEMS`] kept, so [`bound_menu`] says `more`.
+/// `Err` says why in words.
+pub fn list_dirs(path: &str) -> Result<Menu, String> {
+    if path.is_empty() || path.len() > MAX_DIFF_PATH || path.contains('\0') {
+        return Err(format!("path is 1 to {MAX_DIFF_PATH} bytes"));
+    }
+    let dir = std::path::Path::new(path);
+    if !dir.is_absolute() {
+        return Err("path is absolute".into());
+    }
+    let read = std::fs::read_dir(dir).map_err(|e| format!("cannot open {path}: {e}"))?;
+    let mut dirs: Vec<String> = read
+        .take(MAX_DIR_ENTRIES)
+        .filter_map(Result::ok)
+        .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+        .filter(|e| e.path().metadata().is_ok_and(|m| m.is_dir()))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .take(MAX_MENU_ITEMS + 1)
+        .collect();
+    dirs.sort_by_key(|n| n.to_lowercase());
+    // "/a/b/" and "/a/b" are one folder; the root stays "/"
+    let shown = match path.trim_end_matches('/') {
+        "" => "/".to_string(),
+        p => p.to_string(),
+    };
+    Ok(Menu::Dirs {
+        parent: std::path::Path::new(&shown).parent().is_some(),
+        cwd: Some(shown),
+        dirs,
+    })
+}
+
 /// `menu` within the wire bounds: names over [`MAX_MENU_NAME`] bytes left
 /// out, at most [`MAX_MENU_ITEMS`] entries; `true` when anything was left out.
 pub fn bound_menu(menu: Menu) -> (Menu, bool) {

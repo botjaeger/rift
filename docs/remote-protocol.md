@@ -407,7 +407,7 @@ rift-remote://pair?a=192.168.1.29:7878,10.0.0.5:7878&k=<gateway static public ke
   (`push.failures_only`, § Push), `push_ntfy` (`push.ntfy` and `visible`, § Push), `git`
   (a pane's `git` in `topology`, below), `notify_off` (`notify` with
   `off`, § Push), `chips` (`dirs`, `branches`, `changes`, `diff`, §
-  Phase 3), `waiting` (a pane's `waiting` in `topology`, below),
+  Phase 3), `dirs_path` (`dirs` with a `path`, § Prompt chip menus), `waiting` (a pane's `waiting` in `topology`, below),
   `complete` (§ Phase 3), `running` (a pane's `running` in
   `topology`, below), `fit` (§ Phase 3), `prompt_chips` (a pane's `chips`
   in `topology`, below, and the `chip` and `reset_elapsed` requests, §
@@ -1080,6 +1080,8 @@ code review panel's changed files with each file's diff.
 ```json
 {"t":"dirs","id":"m1","pane":12}
 {"t":"dirs","id":"m1","pane":12,"cwd":"/Users/me/rift","parent":true,"dirs":["crates","docs","mobile"],"more":false}
+{"t":"dirs","id":"m5","pane":12,"path":"/Users/me"}
+{"t":"dirs","id":"m5","pane":12,"cwd":"/Users/me","parent":true,"dirs":["code","rift"],"more":false}
 {"t":"branches","id":"m2","pane":12}
 {"t":"branches","id":"m2","pane":12,"current":"main","branches":["feat/chips","main"],"more":false}
 {"t":"changes","id":"m3","pane":12}
@@ -1092,7 +1094,11 @@ code review panel's changed files with each file's diff.
   parent, and its sub-directories by name, sorted case-insensitively,
   hidden ones (a leading `.`) left out: what the desktop's folder menu
   lists. Picking one runs `cd ..` or `cd ./<name>` (shell-quoted) as an
-  ordinary `run`.
+  ordinary `run`. With `path` (feature `dirs_path`; absolute, at most
+  1,024 bytes) it lists that folder instead, `cwd` being the folder as the
+  system resolves it: the phone browses up and into folders before one
+  `cd <cwd>`. `operate` devices only (`view` gets `ack` `forbidden`); a
+  relative, missing or unreadable path answers `ack` `bad_request`.
 - `branches`: the repository's local branches, the checked-out one
   (`current`; a short commit id when detached) first, then by name; empty
   and null outside a repository; a branch whose name starts with `-` is
