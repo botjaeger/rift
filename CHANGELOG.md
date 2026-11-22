@@ -8,6 +8,14 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.33.0 — 2026-11-22
+
+Lets the phone app browse your folders.
+
+### New
+
+- **Browse folders from your phone** — The phone's Change folder can now open a folder's parent and its subfolders, then go to the one shown with a single `cd`. Only phones paired with permission to type can do this.
+
 ## 0.32.0 — 2026-11-21
 
 A cleaner window: less repeated information, and the things that matter stand out.

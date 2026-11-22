@@ -6,6 +6,41 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.9.0 · update 13 — 2026-11-22
+
+Links in command output open with a tap, Change folder browses folders, and copying says it worked.
+
+### New
+
+- **Links in command output open with a tap** — Web addresses in a command's output, on its card
+  and in its sheet, show underlined in the accent colour. A tap opens one in the browser, and a
+  hold still selects text.
+- **Browse folders in Change folder** — Open a folder's parent or a subfolder, see which folder
+  you are in, and go to the one shown with one button. Your computer needs Rift 0.33.0 or newer.
+
+### Improved
+
+- **Copying says it worked** — Copy, Copy error and the copy-command button change to
+  "✓ Copied" for a moment, with a small vibration. The block sheet stays open.
+- **A failed command shows its error** — A failed card shows its error message on one line, for
+  example "notes.txt: No such file or directory".
+- **Sheets fit what they show** — A block with short output opens a short sheet with its buttons
+  right under the text. The folder, branch and changes menus are as tall as their contents.
+- **Search lists matches from the top** — Results start under the search box, and a tap opens one
+  even while the keyboard is up. Its sheet keeps the words marked, says how many matches there
+  are and opens at the first.
+- **Clearer connection problems** — A pane that loses its computer says "Can't reach" with the
+  computer's name and shows Try again. A refused connection is explained in words.
+- **Tidier controls** — Time on tab moved to the pane's ⋯ menu, the keys button shows a keyboard,
+  Portals has a labelled "+ New tab" button, and empty filters and zero counts are hidden.
+
+### Fixed
+
+- **Pasting an empty clipboard** — It now says "The clipboard is empty."
+- **Android: long lines on a card** — The two-line preview of a long line shows its start and no
+  longer scrolls when you tap it.
+- **Android: holding a link** — A hold on a link selects it and no longer opens the browser.
+
 ## 0.9.0 · update 12 — 2026-11-19
 
 Older lines of a full-screen program are ready when you flick, and an old pairing no longer locks you out.
