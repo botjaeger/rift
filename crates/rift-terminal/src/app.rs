@@ -415,6 +415,39 @@ fn with_remote_hint(
 
 /// Pause before starting a new completion thread after one failed.
 const COMPLETION_RETRY: Duration = Duration::from_secs(5);
+/// Writes of one copy before it counts as failed, and the wait between them
+/// (`copy_rich_to_clipboard`: another process took the pasteboard meanwhile).
+const COPY_TRIES: usize = 3;
+const COPY_RETRY_WAIT: Duration = Duration::from_millis(10);
+
+/// Put `text` (and `html` as the rich flavor) on the clipboard. macOS refuses a
+/// write when another process (a clipboard manager, another app copying) takes
+/// the pasteboard between its clear and the write ("NSPasteboard#writeObjects:
+/// returned false"): measured 1.5% of copies under a pbcopy loop, none after a
+/// retry.
+fn write_clipboard(
+    cb: &mut arboard::Clipboard,
+    text: &str,
+    html: Option<&str>,
+) -> Result<(), arboard::Error> {
+    retry_copy(|| match html {
+        Some(html) => cb.set().html(html, Some(text)),
+        None => cb.set_text(text),
+    })
+}
+
+/// `write` up to [`COPY_TRIES`] times, [`COPY_RETRY_WAIT`] apart, until it succeeds.
+fn retry_copy<E>(mut write: impl FnMut() -> Result<(), E>) -> Result<(), E> {
+    let mut done = write();
+    for _ in 1..COPY_TRIES {
+        if done.is_ok() {
+            break;
+        }
+        std::thread::sleep(COPY_RETRY_WAIT);
+        done = write();
+    }
+    done
+}
 
 /// Queue of the completion thread, started on the first request. Providers
 /// read the filesystem and Git, so they never run on the UI thread: when the
@@ -4767,10 +4800,7 @@ impl App {
         let Some(cb) = self.clipboard() else {
             return false;
         };
-        let done = match html {
-            Some(html) => cb.set().html(html, Some(text)),
-            None => cb.set_text(text),
-        };
+        let done = write_clipboard(cb, &text, html.as_deref());
         match done {
             Ok(()) => true,
             Err(e) => {
@@ -26691,6 +26721,94 @@ fn caret_key(key: &EditorKey, pairs: bool) -> Option<CaretOp> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A copy the clipboard refused (another process took it meanwhile) is
+    /// written again: two refusals still copy, three report the error.
+    #[test]
+    fn a_refused_copy_is_tried_again() {
+        let mut calls = 0;
+        let r: Result<(), &str> = retry_copy(|| {
+            calls += 1;
+            if calls < 3 { Err("refused") } else { Ok(()) }
+        });
+        assert_eq!((r, calls), (Ok(()), 3));
+        let mut calls = 0;
+        let r: Result<(), &str> = retry_copy(|| {
+            calls += 1;
+            Err("refused")
+        });
+        assert_eq!((r, calls), (Err("refused"), COPY_TRIES));
+        let mut calls = 0;
+        let _ = retry_copy(|| {
+            calls += 1;
+            Ok::<(), ()>(())
+        });
+        assert_eq!(calls, 1);
+    }
+
+    /// Rift's copy on the real macOS clipboard while another process keeps
+    /// writing it (as a clipboard manager does): every copy lands. Touches
+    /// the user's clipboard (saved and put back), so run by hand:
+    /// `cargo test -p rift-terminal copies_land_while -- --ignored`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn copies_land_while_another_process_writes_the_clipboard() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let saved = std::process::Command::new("pbpaste")
+            .output()
+            .unwrap()
+            .stdout;
+        let stop = Arc::new(AtomicBool::new(false));
+        let other = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let mut i = 0;
+                while !stop.load(Ordering::Relaxed) {
+                    let mut p = std::process::Command::new("pbcopy")
+                        .stdin(std::process::Stdio::piped())
+                        .spawn()
+                        .unwrap();
+                    use std::io::Write;
+                    let _ = p
+                        .stdin
+                        .take()
+                        .unwrap()
+                        .write_all(format!("other{i}").as_bytes());
+                    let _ = p.wait();
+                    i += 1;
+                }
+            })
+        };
+        let mut cb = arboard::Clipboard::new().unwrap();
+        let mut failed = Vec::new();
+        for i in 0..2000 {
+            let html = format!("<b>x{i}</b>");
+            let r = write_clipboard(
+                &mut cb,
+                &format!("x{i}"),
+                (i % 2 == 0).then_some(html.as_str()),
+            );
+            if let Err(e) = r {
+                failed.push(e.to_string());
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        other.join().unwrap();
+        let mut p = std::process::Command::new("pbcopy")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        use std::io::Write;
+        p.stdin.take().unwrap().write_all(&saved).unwrap();
+        p.wait().unwrap();
+        assert!(
+            failed.is_empty(),
+            "{} of 2000 copies failed: {:?}",
+            failed.len(),
+            failed.first()
+        );
+    }
 
     #[test]
     fn git_status_is_polled_for_a_phone_while_the_window_is_not_in_use() {
