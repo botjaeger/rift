@@ -1,5 +1,5 @@
 import { useLocalSearchParams, useRouter } from "expo-router";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { View } from "react-native";
 import { canOperate, hasFeature } from "@/fleet";
 import { useApp } from "@/runtime";
@@ -28,6 +28,14 @@ export default function LocalPageSheet() {
   const name = host?.record.name ?? "";
   const online = host?.conn.status === "open";
   const [port, setPort] = useState("");
+  // closed by then (a lost connection), going back would leave the pane instead
+  const shown = useRef(true);
+  useEffect(
+    () => () => {
+      shown.current = false;
+    },
+    [],
+  );
   const pane = s.pane?.host === key ? s.pane : null;
   const found = useMemo(() => {
     if (!pane) return [];
@@ -37,9 +45,12 @@ export default function LocalPageSheet() {
   }, [pane]);
   const n = Number(port);
   const valid = /^\d{1,5}$/.test(port) && n >= 1 && n <= 65535;
+  // The sheet stays under the browser and closes once it does: iOS presents the browser over the
+  // topmost screen, and a sheet closed first (still dismissing) took the browser down with it.
   const open = (p: number, path = "/") => {
-    router.back();
-    openPort(key, p, path);
+    void openPort(key, p, path).then(() => {
+      if (shown.current) router.back();
+    });
   };
 
   let body;

@@ -30,14 +30,17 @@ export function openLink(url: string): void {
     void Linking.openURL(url);
     return;
   }
-  openPort(host, local.port, local.path);
+  void openPort(host, local.port, local.path);
 }
 
-/** Open `localhost:port` + `path` of computer `host` in the browser sheet. */
-export function openPort(host: string, port: number, path = "/"): void {
-  if (opening) return;
+/**
+ * Open `localhost:port` + `path` of computer `host` in the browser sheet; resolves once the
+ * browser has closed again (at once when one is already open).
+ */
+export function openPort(host: string, port: number, path = "/"): Promise<void> {
+  if (opening) return Promise.resolve();
   opening = true;
-  openLocal(port, path, () => fleet.tunnelTarget(host), trouble)
+  return openLocal(port, path, () => fleet.tunnelTarget(host), trouble)
     .catch((e: unknown) => trouble(e instanceof Error ? e.message : String(e)))
     .finally(() => {
       opening = false;
