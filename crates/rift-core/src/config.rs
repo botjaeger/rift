@@ -2926,6 +2926,10 @@ name = "clean"
                 if Config::try_load_from(&reader_path).ok().flatten().is_none() {
                     bad += 1;
                 }
+                // a moment between reads: under Wine an open handle refuses the
+                // writer's replace, and a reader that never lets go starved its
+                // half-second retry (the app reads only on a change)
+                std::thread::sleep(std::time::Duration::from_micros(300));
             }
             bad
         });
