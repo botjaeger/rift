@@ -6,6 +6,16 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.10.0 · update 1 — 2026-11-23
+
+Long Claude Code replies show whole when you scroll up.
+
+### Fixed
+
+- **Long replies scrolled up** — scrolling up through a coding agent's long reply
+  no longer shows its old spinner and input box where the start of the reply
+  belongs: those lines now come from the computer.
+
 ## 0.10.0 — 2026-11-23
 
 Open the pages your computer serves on localhost, right from your phone.
