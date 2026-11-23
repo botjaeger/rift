@@ -27,6 +27,13 @@ export interface HistoryCache {
   lines: Map<number, ScreenRun[]>;
   /** Block rules of lines held, by number. */
   rules: Map<number, string>;
+  /**
+   * Lines held as the last screen frame showed them, not yet as the computer keeps them: a
+   * program that redraws in place (an agent's spinner and input box) may have written over a
+   * row between the frame and its leaving the screen. They show until a `history` page brings
+   * the final text, and are asked for like missing ones.
+   */
+  unsure: Set<number>;
 }
 
 /**
@@ -40,7 +47,7 @@ export function nextCache(cache: HistoryCache | null, prev: ScreenState | null, 
   if (!screen || !sb || screen.alt) return null;
   let c = cache;
   if (!c || c.epoch !== sb.epoch || c.cols !== screen.cols) {
-    c = { epoch: sb.epoch, cols: screen.cols, origin: sb.first, first: sb.first, lines: new Map(), rules: new Map() };
+    c = { epoch: sb.epoch, cols: screen.cols, origin: sb.first, first: sb.first, lines: new Map(), rules: new Map(), unsure: new Set() };
   } else {
     c = { ...c, first: sb.first };
   }
@@ -49,7 +56,10 @@ export function nextCache(cache: HistoryCache | null, prev: ScreenState | null, 
   if (prev && was && was.epoch === sb.epoch && prev.cols === screen.cols) {
     for (let i = 0; i < prev.lines.length && was.top + i < sb.top; i++) {
       const n = was.top + i;
+      // a page that already brought it is final
+      if (c.lines.has(n) && !c.unsure.has(n)) continue;
       c.lines.set(n, prev.lines[i]!);
+      c.unsure.add(n);
       const rule = prev.rules.get(i);
       if (rule) c.rules.set(n, rule);
       else c.rules.delete(n);
@@ -62,6 +72,7 @@ export function nextCache(cache: HistoryCache | null, prev: ScreenState | null, 
     c.origin = origin;
     for (const n of c.lines.keys()) if (n < origin || n >= sb.top) c.lines.delete(n);
     for (const n of c.rules.keys()) if (n < origin || n >= sb.top) c.rules.delete(n);
+    for (const n of c.unsure) if (n < origin || n >= sb.top) c.unsure.delete(n);
   }
   return c;
 }
@@ -79,6 +90,7 @@ export function withPage(cache: HistoryCache, msg: HistoryMsg, asked?: { from: n
     const n = msg.from + i;
     if (n < c.origin) return;
     c.lines.set(n, runs);
+    c.unsure.delete(n);
     const rule = rules.get(i);
     if (rule) c.rules.set(n, rule);
     else c.rules.delete(n);
@@ -125,7 +137,7 @@ export function missing(cache: HistoryCache, top: number, from: number, to: numb
   const lo = Math.max(cache.origin + Math.max(0, from), cache.first);
   const hi = Math.min(cache.origin + to, top);
   for (let n = hi - 1; n >= lo; n--) {
-    if (!cache.lines.has(n)) {
+    if (!cache.lines.has(n) || cache.unsure.has(n)) {
       const end = n + 1;
       return { from: Math.max(cache.first, end - HISTORY_PAGE), to: end };
     }

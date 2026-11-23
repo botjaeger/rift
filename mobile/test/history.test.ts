@@ -76,6 +76,27 @@ describe("the lines above the screen", () => {
     expect(missing(nextCache(null, null, big, true)!, 1000, 0, 1000)).toEqual({ from: 1000 - HISTORY_PAGE, to: 1000 });
   });
 
+  // A Claude Code reply (inline, not full screen) on the phone, 2026-11-23: the frame before the
+  // reply showed the agent's spinner footer and input box on rows that the reply then wrote over
+  // before they scrolled off; the phone kept the footer and box as those lines and never showed
+  // the reply's first 25 rows.
+  it("asks for the lines it took from a frame, and the computer's text replaces them", () => {
+    const a = { ...screen(10), lines: [row("✻ Baked for 16s"), row("────"), row("❯"), row("────")] };
+    const c1 = withPage(nextCache(null, null, a, true)!, page(0, 10))!;
+    const b = screen(14);
+    const c2 = nextCache(c1, a, b, true)!;
+    // shown at once as the frame had them…
+    expect(text(composite(c2, b).screen.lines.slice(10, 14))).toEqual(["✻ Baked for 16s", "────", "❯", "────"]);
+    // …and asked for, since the program may have written over them before they left
+    expect(missing(c2, 14, 0, 14)).toEqual({ from: 0, to: 14 });
+    const c3 = withPage(c2, page(10, 14, { lines: ["BATCH 1", "  - one", "BATCH 2", "  - two"].map(row) }), { from: 10, to: 14 })!;
+    expect(text(composite(c3, b).screen.lines.slice(10, 14))).toEqual(["BATCH 1", "  - one", "BATCH 2", "  - two"]);
+    expect(missing(c3, 14, 0, 14)).toBeNull();
+    // a later frame never puts the stale text back over what a page brought
+    const c4 = nextCache(c3, a, b, true)!;
+    expect(text(composite(c4, b).screen.lines.slice(10, 14))).toEqual(["BATCH 1", "  - one", "BATCH 2", "  - two"]);
+  });
+
   it("moves nothing the user reads: trimmed lines leave the top only while following the end", () => {
     const a = screen(10, { first: 0 });
     const c1 = withPage(nextCache(null, null, a, true)!, page(0, 10))!;
