@@ -1320,6 +1320,19 @@ impl Default for HistorySession {
 }
 
 impl PaneState {
+    /// The terminal mode while the pane's program tracks the mouse (any of
+    /// `MOUSE_MODE`); `None` once it ended or lost its session service
+    /// (`exited`): the mode it left behind reports to nobody, and the clicks
+    /// belong to the Restart / Reconnect bar and to selecting its output.
+    pub fn mouse_mode(&self) -> Option<rift_pty::alacritty_terminal::term::TermMode> {
+        use rift_pty::alacritty_terminal::term::TermMode;
+        if self.exited.is_some() {
+            return None;
+        }
+        let mode = *self.session.term.lock().mode();
+        mode.intersects(TermMode::MOUSE_MODE).then_some(mode)
+    }
+
     /// The program's title as a name: a coding agent's status mark (`✳`,
     /// `◑`, a braille spinner frame) is the tab's status, not part of it.
     /// Empty when the program set no title.

@@ -1661,7 +1661,9 @@ fresh shells, with saved block output when enabled.
   service that does not answer is retried for 30 s; after that the pane
   stays with "Lost the session service; the shell may still be running" and
   *Reconnect* (⏎), which reattaches the same shell — it is never closed or
-  hung up for it. Input typed
+  hung up for it. A click on the bar is the bar's even when the program had
+  mouse reporting on (Claude Code): a program that ended, or whose service
+  was lost, gets no mouse reports, so its output can be selected. Input typed
   meanwhile is held (up to 64 KiB) and sent, in order, once reconnected; a
   toast says so if some of it did not fit, or if output produced meanwhile
   had already left the 8 MiB the service keeps. A lock file

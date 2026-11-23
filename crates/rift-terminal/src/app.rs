@@ -2910,15 +2910,7 @@ impl App {
             return;
         };
         // reserve the gesture for mouse-reporting apps unless shift is held
-        use rift_pty::alacritty_terminal::term::TermMode;
-        if !shift
-            && pane
-                .session
-                .term
-                .lock()
-                .mode()
-                .intersects(TermMode::MOUSE_MODE)
-        {
+        if !shift && pane.mouse_mode().is_some() {
             pane.clear_selection();
             return;
         }
@@ -18828,14 +18820,12 @@ impl App {
         mods: ModifiersState,
     ) -> bool {
         use crate::mouse::Wheel;
-        use rift_pty::alacritty_terminal::term::TermMode;
         match wheel {
             Wheel::Report { button, count } => {
                 let Some(mode) = self
                     .find_tab_of_pane(target)
                     .and_then(|(_, t)| t.pane(target))
-                    .map(|p| *p.session.term.lock().mode())
-                    .filter(|m| m.intersects(TermMode::MOUSE_MODE))
+                    .and_then(|p| p.mouse_mode())
                 else {
                     return false;
                 };
@@ -18906,13 +18896,10 @@ impl App {
     /// Terminal mode of `pane` when its program tracks the mouse and
     /// reporting applies (Shift forces local selection, xterm-style).
     fn mouse_tracking(&self, pane: PaneId) -> Option<rift_pty::alacritty_terminal::term::TermMode> {
-        use rift_pty::alacritty_terminal::term::TermMode;
         if !self.config.mouse_reporting || self.win.modifiers.shift_key() {
             return None;
         }
-        let p = self.win.tabs.get(self.win.active)?.pane(pane)?;
-        let mode = *p.session.term.lock().mode();
-        mode.intersects(TermMode::MOUSE_MODE).then_some(mode)
+        self.win.tabs.get(self.win.active)?.pane(pane)?.mouse_mode()
     }
 
     /// 0-based screen cell under the pointer inside `pane`'s grid (None over
@@ -23535,7 +23522,6 @@ impl App {
     fn remote_mouse(&mut self, pane: u64, col: u16, row: u16) -> crate::control::Response {
         use crate::control::Response;
         use rift_pty::alacritty_terminal::grid::Dimensions;
-        use rift_pty::alacritty_terminal::term::TermMode;
         if !self.config.remote_access {
             return Response::error("remote access is off");
         }
@@ -23544,15 +23530,16 @@ impl App {
             .and_then(|(_, t)| t.pane(pane))
             .filter(|p| !p.session.read_only())
             .map(|p| {
+                let mode = p.mouse_mode();
                 let term = p.session.term.lock();
-                (*term.mode(), term.columns(), term.screen_lines())
+                (mode, term.columns(), term.screen_lines())
             })
         else {
             return Response::error("no such pane");
         };
-        if !self.config.mouse_reporting || !mode.intersects(TermMode::MOUSE_MODE) {
+        let Some(mode) = mode.filter(|_| self.config.mouse_reporting) else {
             return Response::error(crate::remote::NOT_TRACKING);
-        }
+        };
         // the phone sees a capture at its own size: its cells are not the
         // program's, which runs at the window's
         if self
@@ -23654,19 +23641,24 @@ impl App {
             return Response::error("bad request: 1 to 50 lines either way");
         }
         let reporting = self.config.mouse_reporting;
-        let Some((mode, cell)) = self
+        let Some((tracking, mode, cell)) = self
             .find_tab_of_pane(pane)
             .and_then(|(_, t)| t.pane(pane))
             .map(|p| {
+                let tracking = p.mouse_mode().is_some();
                 let term = p.session.term.lock();
-                (*term.mode(), (term.columns() / 2, term.screen_lines() / 2))
+                (
+                    tracking,
+                    *term.mode(),
+                    (term.columns() / 2, term.screen_lines() / 2),
+                )
             })
         else {
             return Response::error("no such pane");
         };
         let wheel = crate::mouse::wheel(
             lines,
-            reporting && mode.intersects(TermMode::MOUSE_MODE),
+            reporting && tracking,
             mode.contains(TermMode::ALT_SCREEN),
             mode.contains(TermMode::ALTERNATE_SCROLL),
             mode.contains(TermMode::APP_CURSOR),

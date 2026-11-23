@@ -7067,6 +7067,31 @@ assert 'confirm=Some((Restart(2), ["sleep 30"]))' in pl_state("restart-confirm")
     pl_state("restart-confirm")
 assert [p[0] for p in pl_panes("exit0")] == ["1"], pl_state("exit0")
 
+# A program that turned mouse reporting on and ended (Claude Code losing
+# its session service) leaves the mode behind: a click on the bar's
+# Restart / Reconnect is the bar's, never a report to the program that is gone.
+pm = scratch / "exited-mouse"
+for sub in ("cfg/rift", "data"):
+    (pm / sub).mkdir(parents=True, exist_ok=True)
+(pm / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
+    'sync_os_theme = false\nclose_on_exit = "never"\n')
+(pm / "t.rift").write_text("\n".join([
+    "resize 1000 600", "wait_prompt", "type printf '\\\\e[?1000h\\\\e[?1006h'; exit 3\\n", "wait 1200",
+    f"dump {pm}/kept.txt",
+    # the bar is centred at the pane's foot (640 wide, 36 high, 10 up):
+    # Restart sits left of Close
+    "click 690 572", "wait_prompt", "wait 500", f"dump {pm}/clicked.txt", "quit"]) + "\n")
+with (pm / "app.log").open("w") as log:
+    rc = subprocess.run([str(binary), "--script", str(pm / "t.rift"), "--headless"],
+                        env=dict(env, XDG_CONFIG_HOME=str(pm / "cfg"), XDG_DATA_HOME=str(pm / "data"),
+                                 BASH_SILENCE_DEPRECATION_WARNING="1"),
+                        stdout=log, stderr=log, timeout=60).returncode
+assert rc == 0, died("exited mouse run failed", pm / "app.log")
+pm_kept, pm_clicked = (pm / "kept.txt").read_text(), (pm / "clicked.txt").read_text()
+assert "    exited=Some(3) " in pm_kept, pm_kept[-3000:]
+assert "    exited=None " in pm_clicked, pm_clicked[-3000:]
+
 # Read-only command recall refuses every insertion path without replacing
 # the draft: the shortcut, the history palette and a multi-block menu.
 ro_recall = scratch / "read-only-recall"
