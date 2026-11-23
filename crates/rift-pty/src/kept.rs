@@ -11,7 +11,10 @@
 //! had drawn ([`Kept::prelude`]), then the replay, which starts on an empty
 //! screen: no line twice, none lost. (A program that redraws lines above
 //! the cursor, like an agent's prompt box, may show its last frame once
-//! more where the two meet.)
+//! more where the two meet.) Under a full-screen program it also keeps the
+//! alternate screen's picture and the output position parsed
+//! ([`Kept::alt_screen`]): the replay then goes on from there over that
+//! picture, for a program that repaints only what changes.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -39,9 +42,14 @@ const MAX_FILE: u64 = 256 << 20;
 /// that once the service's output up to byte `seq` was parsed, every line
 /// above abs line `boundary` (the cursor's) was drawn.
 #[derive(Debug, Default, Clone)]
-pub(crate) struct Marks(VecDeque<(u64, u64)>, Option<u64>);
+pub(crate) struct Marks(VecDeque<(u64, u64)>, Option<u64>, u64);
 
 impl Marks {
+    /// The output position parsed so far (the last [`Self::note`]'s `seq`).
+    pub(crate) fn parsed(&self) -> u64 {
+        self.2
+    }
+
     /// Output up to byte `seq` was parsed and the terminal shows the
     /// alternate screen (`alt`) or not: remembers the first such `seq` of
     /// the stretch it has been on it without a break.
@@ -62,6 +70,7 @@ impl Marks {
     /// Output up to byte `seq` was parsed; lines above `boundary` are
     /// drawn.
     pub(crate) fn note(&mut self, seq: u64, boundary: u64) {
+        self.2 = self.2.max(seq);
         if self.0.back().is_some_and(|last| last.1 == boundary) {
             return;
         }
@@ -110,6 +119,24 @@ pub struct Kept {
     /// alternate screen without a break, if it was on it.
     #[serde(default)]
     pub alt_since: Option<u64>,
+    /// The alternate screen as the window showed it, when it was on it: each
+    /// row placed and styled, then the cursor (`screen_of`), and the output
+    /// position parsed when it was taken. A program that repaints only the
+    /// cells that change (an agent) may not draw it whole again when asked;
+    /// the replay goes on from that position over this picture.
+    #[serde(default)]
+    pub alt_screen: Option<KeptScreen>,
+}
+
+/// The alternate screen kept for an update restart ([`Kept::alt_screen`]).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct KeptScreen {
+    /// The output position parsed when it was taken.
+    pub seq: u64,
+    pub cols: usize,
+    pub rows: usize,
+    /// `screen_of`: the sequences that draw it on an empty screen.
+    pub draw: String,
 }
 
 impl Kept {
@@ -163,6 +190,68 @@ impl Kept {
         let since = self.alt_since?;
         (from > 0 && since <= from && !self.modes.is_empty()).then_some(self.modes.as_bytes())
     }
+
+    /// With [`Self::modes_before`]: the full-screen program's picture to parse
+    /// after its modes, and the output position the replay goes on from (its
+    /// bytes before that are already in the picture). None when the window
+    /// had not parsed up to `from` (the picture is older than the replay's
+    /// start) or kept no picture, or the screen is no longer `cols` × `rows`
+    /// (the program redraws for a new size by itself).
+    pub fn alt_screen_from(&self, from: u64, cols: usize, rows: usize) -> Option<(u64, &[u8])> {
+        self.modes_before(from)?;
+        let s = self.alt_screen.as_ref()?;
+        (s.seq >= from && (s.cols, s.rows) == (cols, rows)).then_some((s.seq, s.draw.as_bytes()))
+    }
+
+    /// The rows a reattached pane `cols` wide starts with: the kept
+    /// picture's while the pane comes back under its full-screen program
+    /// (no editor takes rows from it then), else `rows`.
+    pub fn start_rows(&self, cols: usize, rows: usize) -> usize {
+        match &self.alt_screen {
+            Some(s) if self.alt_since.is_some() && s.cols == cols && s.rows > 0 => s.rows,
+            _ => rows,
+        }
+    }
+}
+
+/// The screen `grid` shows (the alternate one) as the sequences that draw it
+/// on an empty one: each row placed and styled, then the cursor where it was.
+pub(crate) fn screen_of(grid: &Grid<Cell>) -> String {
+    let cols = grid.columns();
+    let mut out = String::new();
+    let mut pen = Pen::default();
+    for r in 0..grid.screen_lines() {
+        let row = &grid[Line(r as i32)];
+        let end = (0..cols)
+            .rev()
+            .find(|&c| !blank(&row[Column(c)]))
+            .map_or(0, |c| c + 1);
+        if end == 0 {
+            continue;
+        }
+        out.push_str(&format!("\x1b[{};1H", r + 1));
+        for c in 0..end {
+            let cell = &row[Column(c)];
+            if cell
+                .flags
+                .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+            {
+                continue;
+            }
+            pen.write(cell, &mut out);
+            out.push(cell.c);
+            if let Some(zw) = cell.zerowidth() {
+                out.extend(zw);
+            }
+        }
+    }
+    let at = grid.cursor.point;
+    out.push_str(&format!(
+        "\x1b[0m\x1b[{};{}H",
+        at.line.0.max(0) + 1,
+        at.column.0 + 1
+    ));
+    out
 }
 
 /// The sequences that put a fresh terminal into `mode`.

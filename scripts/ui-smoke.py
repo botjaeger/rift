@@ -5045,6 +5045,92 @@ kr_found = re.search(r"matches=(\d+) total=(\d+)", (kr / "b.txt").read_text())
 assert kr_found and kr_found[2] == "300", (kr_found and kr_found[0], (kr / "b.txt").read_text()[:3000])
 assert not kr_kept[0].exists(), "the kept scrollback stayed after the restart read it"
 
+# an update restart keeps a full-screen program's picture: a program that
+# drew its screen once, then repainted one cell for 10 MB (past what the
+# service retains, as an agent's spinner), and does not draw its screen
+# whole again when told the same size twice (it coalesces resizes), comes
+# back with every row, not only the cell it repainted on an empty screen
+fp = scratch / "fs-picture"
+for sub in ("cfg/rift", "data/rift"):
+    (fp / sub).mkdir(parents=True, exist_ok=True)
+(fp / "rawctl.py").write_text(
+    "import pathlib, socket, sys\n"
+    "for sock in pathlib.Path(sys.argv[1]).glob('*.sock'):\n"
+    "    s = socket.socket(socket.AF_UNIX)\n"
+    "    s.settimeout(10)\n"
+    "    s.connect(str(sock))\n"
+    "    s.sendall(sys.argv[2].encode() + b'\\n')\n"
+    "    pathlib.Path(sys.argv[3]).write_text(s.makefile().readline())\n")
+(fp / "cfg/rift/config.toml").write_text(
+    'shell = "/bin/bash"\nrestore_session = true\ndurable_sessions = true\n'
+    'sync_os_theme = false\n')
+(fp / "tui.py").write_text(
+    "import fcntl, signal, struct, sys, termios, time\n"
+    "out = sys.stdout.buffer\n"
+    "size = lambda: struct.unpack('HHHH', fcntl.ioctl(1, termios.TIOCGWINSZ, b'\\0' * 8))[:2]\n"
+    "drawn = None\n"
+    "def full():\n"
+    "    global drawn\n"
+    "    rows, cols = size()\n"
+    "    out.write(b'\\x1b[H\\x1b[2J' + b''.join(b'\\x1b[%d;1Hrow %02d' % (r, r) for r in range(1, rows - 1))\n"
+    "              + b'\\x1b[%d;1HSTATUS-LINE\\x1b[%d;1H> ' % (rows - 1, rows))\n"
+    "    out.flush()\n"
+    "    drawn = (rows, cols)\n"
+    "due = [0.0]\n"
+    "signal.signal(signal.SIGWINCH, lambda *a: due.__setitem__(0, time.monotonic() + 0.15))\n"
+    "out.write(b'\\x1b[?1049h\\x1b[?25l')\n"
+    "full()\n"
+    "for i in range(5000):\n"
+    "    out.write(b''.join(b'\\x1b[1;30H%c' % b'|/-\\\\'[(i + k) % 4] for k in range(2000)))\n"
+    "out.flush()\n"
+    "open(sys.argv[1], 'w').write('ready')\n"
+    "while True:\n"
+    "    time.sleep(0.02)\n"
+    "    if due[0] and time.monotonic() >= due[0]:\n"
+    "        due[0] = 0.0\n"
+    "        if size() != drawn:\n"
+    "            full()\n")
+fp_env = dict(env, XDG_CONFIG_HOME=str(fp / "cfg"), XDG_DATA_HOME=str(fp / "data"),
+              RIFT_PERSIST_SESSION="1", BASH_SILENCE_DEPRECATION_WARNING="1")
+fp_token = os.urandom(16).hex()
+(fp / "data/rift/update-pending.json").write_text(json.dumps(
+    {"from": "0.0.1", "to": "0.0.2", "old_path": str(fp / "app.old"),
+     "new_path": str(fp / "app"), "token": fp_token}))
+fp_ctl = json.dumps({"cmd": "prepare-restart", "token": fp_token})
+(fp / "a.rift").write_text("\n".join([
+    "resize 1000 700", "wait_prompt",
+    f"type python3 {fp / 'tui.py'} {fp / 'ready'}\\n",
+    f"wait_file {fp / 'ready'}", "wait 1500", f"dump {fp}/a.txt",
+    "sh python3 " + " ".join(shlex.quote(str(a)) for a in
+                             (fp / "rawctl.py", fp / "data/rift/control", fp_ctl, fp / "asked.json"))
+    + " >/dev/null 2>&1 &",
+    "wait 15000", "quit"]) + "\n")
+try:
+    with (fp / "a.log").open("w") as log:
+        rc = subprocess.run([str(binary), "--script", str(fp / "a.rift"), "--headless"],
+                            env=fp_env, stdout=log, stderr=log, timeout=180).returncode
+    assert rc == 0, died("full-screen picture first run failed", fp / "a.log")
+    assert json.loads((fp / "asked.json").read_text()).get("ok") is True, (fp / "asked.json").read_text()
+    fp_files = list((fp / "data/rift/restart").glob("main-*.toml"))
+    assert len(fp_files) == 1, died("no restart file", fp / "a.log")
+    (fp / "data/rift/update-pending.json").unlink()
+    (fp / "b.rift").write_text(f"wait 5000\ndump {fp}/b.txt\nquit\n")
+    with (fp / "b.log").open("w") as log:
+        rc = subprocess.run([str(binary), "--script", str(fp / "b.rift"), "--headless"],
+                            env=dict(fp_env, RIFT_RESTORE_SESSION=str(fp_files[0])),
+                            stdout=log, stderr=log, timeout=120).returncode
+finally:
+    for pid in session_daemons(fp / "data"):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+assert rc == 0, died("full-screen picture restart run failed", fp / "b.log")
+fp_before, fp_after = (fp / "a.txt").read_text(), (fp / "b.txt").read_text()
+for text in ("row 01", "row 30", "STATUS-LINE"):
+    assert text in fp_before, (text, fp_before[:3000])
+    assert text in fp_after, (text, "missing after the restart", fp_after[:3000])
+
 # --- remote access (mobile companion, window side) ---
 # The gateway's `remote-input` request reaches the window only while
 # remote_access is on (independent of control_api); a command runs only at a

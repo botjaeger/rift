@@ -835,7 +835,7 @@ enum Source {
         /// The connection `PtyWriter` sends input on (replaced on resume).
         conn: Arc<Mutex<ServiceConn>>,
         /// Scrollback the window before an update restart kept.
-        kept: Option<crate::kept::Kept>,
+        kept: Option<Box<crate::kept::Kept>>,
     },
 }
 
@@ -1136,6 +1136,9 @@ impl Reader {
                 // and the modes a full-screen program set in output the
                 // service no longer holds: its replay goes on from there
                 let mut redraw = false;
+                // replayed bytes before this are already on the screen: the
+                // program's picture as the window before the restart showed it
+                let mut skip_to = 0u64;
                 if let Some((k, modes)) =
                     kept.as_ref().and_then(|k| Some((k, k.modes_before(from)?)))
                 {
@@ -1144,6 +1147,17 @@ impl Reader {
                     // the shell's screen first: the program covers it
                     feed(&mut parser, &mut scanner, &k.screen_before(from), &self.ctx);
                     feed(&mut parser, &mut scanner, modes, &self.ctx);
+                    // A program that repaints only what changes may coalesce
+                    // the size signals below and draw nothing: without its
+                    // picture the replay's changes would land on an empty screen.
+                    let (cols, rows) = {
+                        let t = self.ctx.term.lock();
+                        (t.columns(), t.screen_lines())
+                    };
+                    if let Some((seq, screen)) = k.alt_screen_from(from, cols, rows) {
+                        feed(&mut parser, &mut scanner, screen, &self.ctx);
+                        skip_to = seq;
+                    }
                     redraw = true;
                 }
                 // first byte not yet fed to the parser, and resumes since
@@ -1247,7 +1261,14 @@ impl Reader {
                                 // this window: no notifications for them
                                 blocks.set_replaying(first);
                             }
-                            let marked = self.take_output(&mut parser, &mut scanner, &bytes);
+                            let fresh = skip_to
+                                .checked_sub(seq)
+                                .map_or(0, |n| (n as usize).min(bytes.len()));
+                            let marked = if fresh < bytes.len() {
+                                self.take_output(&mut parser, &mut scanner, &bytes[fresh..])
+                            } else {
+                                None
+                            };
                             self.note_mark(next_seq);
                             if let (false, Some(marked)) = (replaying, marked) {
                                 self.wake_after(marked);
@@ -1476,6 +1497,15 @@ impl Session {
             clipboard,
             ambiguous_wide,
         } = opts;
+        // a pane coming back under its full-screen program has the rows it
+        // had: no editor takes them, and the program sees no size change
+        let size = match (&service, &kept) {
+            (Some(ServiceTarget::Attach(_)), Some(k)) => GridSize {
+                rows: k.start_rows(size.cols, size.rows),
+                ..size
+            },
+            _ => size,
+        };
 
         let window_size = WindowSize {
             num_lines: size.rows as u16,
@@ -1558,7 +1588,9 @@ impl Session {
                     job: job.clone(),
                     hidden: hidden.clone(),
                     conn: conn.clone(),
-                    kept: kept.filter(|_| matches!(target, ServiceTarget::Attach(_))),
+                    kept: kept
+                        .filter(|_| matches!(target, ServiceTarget::Attach(_)))
+                        .map(Box::new),
                 };
                 let conn = conn.clone();
                 (
@@ -1755,18 +1787,12 @@ impl Session {
         }
         // under the term lock, as a resize remaps the marks
         let term = self.term.lock();
-        let (marks, alt_since) = {
-            let m = self.feed_ctx.marks.lock().unwrap();
-            (m.list(), m.alt_since())
-        };
-        let lines =
-            crate::kept::lines_of(term.primary_grid(), self.scrolled.load(Ordering::Acquire));
-        Some(crate::kept::Kept {
-            marks,
-            lines,
-            modes: crate::kept::modes_of(*term.mode()),
-            alt_since,
-        })
+        let marks = self.feed_ctx.marks.lock().unwrap();
+        Some(kept_of_term(
+            &term,
+            &marks,
+            self.scrolled.load(Ordering::Acquire),
+        ))
     }
 
     /// The working directory when it is on this machine: `None` while the
@@ -2608,6 +2634,29 @@ impl Shadow {
 /// move lines between history and screen; keep `abs = scrolled + screen_row`
 /// coherent by folding the history delta into the counter (same term lock
 /// the reader thread uses).
+/// What a window keeps of a durable pane for an update restart
+/// ([`crate::kept`]): the primary screen's lines, the marks, the modes and,
+/// on the alternate screen, its picture with the output position parsed.
+fn kept_of_term(
+    term: &Term<EventProxy>,
+    marks: &crate::kept::Marks,
+    scrolled: u64,
+) -> crate::kept::Kept {
+    let alt_since = marks.alt_since();
+    crate::kept::Kept {
+        marks: marks.list(),
+        lines: crate::kept::lines_of(term.primary_grid(), scrolled),
+        modes: crate::kept::modes_of(*term.mode()),
+        alt_since,
+        alt_screen: alt_since.map(|_| crate::kept::KeptScreen {
+            seq: marks.parsed(),
+            cols: term.columns(),
+            rows: term.screen_lines(),
+            draw: crate::kept::screen_of(term.grid()),
+        }),
+    }
+}
+
 fn resize_term(
     term: &mut Term<EventProxy>,
     size: GridSize,
@@ -4062,7 +4111,7 @@ mod tests {
             Arc::new(Mutex::new(ServiceConn::new(conn))),
         );
         if let Source::Service { kept: k, .. } = &mut source {
-            *k = kept;
+            *k = kept.map(Box::new);
         }
         (
             std::thread::spawn(move || reader.run(source)),
@@ -4126,12 +4175,7 @@ mod tests {
     fn kept_of(c: &FeedCtx) -> crate::kept::Kept {
         let term = c.term.lock();
         let marks = c.marks.lock().unwrap();
-        crate::kept::Kept {
-            marks: marks.list(),
-            lines: crate::kept::lines_of(term.primary_grid(), c.scrolled.load(Ordering::Acquire)),
-            modes: crate::kept::modes_of(*term.mode()),
-            alt_since: marks.alt_since(),
-        }
+        kept_of_term(&term, &marks, c.scrolled.load(Ordering::Acquire))
     }
 
     /// A full-screen program that has run for long set its modes in output the
@@ -4201,6 +4245,83 @@ mod tests {
         left.push(chunk("\x1b[?1049l".into()));
         let gone = reattach(ctx(20, 5), &left, 0, None);
         assert_eq!(kept_of(&gone).alt_since, None);
+    }
+
+    /// A full-screen program that repaints only the cells that change (an
+    /// agent's spinner) and does not draw its whole screen again when told
+    /// the same size twice: after an update restart its pane shows the
+    /// picture the window before had, with the replay's later changes on it,
+    /// not those changes alone on an empty screen.
+    #[test]
+    fn a_reattach_inside_a_full_screen_program_keeps_its_picture() {
+        let mut seq = 0u64;
+        let mut chunk = |text: String| {
+            let at = seq;
+            seq += text.len() as u64;
+            (at, text.into_bytes())
+        };
+        let mut chunks = vec![chunk("shell one\r\n".into())];
+        chunks.push(chunk(
+            "\x1b[?1049h\x1b[?1000h\x1b[1;1Htop rule\x1b[5;1Hstatus line".into(),
+        ));
+        for i in 0..20 {
+            chunks.push(chunk(format!("\x1b[3;1Hspin {i:02}")));
+            // a scroll inside the replay: applied twice, it would move
+            // the picture once more
+            if i == 14 {
+                chunks.push(chunk("\x1b[S".into()));
+            }
+        }
+        let screen = |c: &FeedCtx| -> Vec<String> {
+            let t = c.term.lock();
+            let g = t.grid();
+            (0..g.screen_lines() as i32)
+                .map(|r| {
+                    let row: String = (0..g.columns()).map(|c| g[Line(r)][Column(c)].c).collect();
+                    row.trim_end().to_string()
+                })
+                .collect()
+        };
+        let want = ["", "spin 14", "spin 19", "status line", ""];
+        let before = reattach(ctx(20, 5), &chunks, 0, None);
+        assert_eq!(screen(&before), want);
+        let kept = kept_of(&before);
+        let picture = kept
+            .alt_screen
+            .clone()
+            .expect("a picture of the alternate screen");
+        assert_eq!((picture.seq, picture.cols, picture.rows), (seq, 20, 5));
+        // the service retained only the spinner's last frames
+        let from = chunks[12].0;
+        let after = reattach(ctx(20, 5), &chunks[12..], from, Some(kept.clone()));
+        assert_eq!(screen(&after), want);
+        // output the window had not parsed yet comes on top of the picture,
+        // also when its frame starts before the picture's position
+        let mut later = chunks[12..].to_vec();
+        let (at, last) = later.pop().unwrap();
+        let mut straddling = last.clone();
+        straddling.extend_from_slice(b"\x1b[3;1Hspin 20");
+        later.push((at, straddling));
+        assert_eq!(
+            screen(&reattach(ctx(20, 5), &later, from, Some(kept.clone())))[2],
+            "spin 20"
+        );
+        // without the picture: the changes alone, on an empty screen
+        let bare = crate::kept::Kept {
+            alt_screen: None,
+            ..kept.clone()
+        };
+        assert_eq!(
+            screen(&reattach(ctx(20, 5), &chunks[12..], from, Some(bare))),
+            ["", "spin 14", "spin 19", "", ""]
+        );
+        // a pane of another size is not given it: the program draws anew
+        // for the size it is told
+        let other = reattach(ctx(20, 6), &chunks[12..], from, Some(kept.clone()));
+        assert_eq!(screen(&other)[3], "");
+        // and a pane comes back at the picture's size while its program runs
+        assert_eq!(kept.start_rows(20, 3), 5);
+        assert_eq!(kept.start_rows(30, 3), 3);
     }
 
     /// A shell whose service kept only its last lines comes back after an
