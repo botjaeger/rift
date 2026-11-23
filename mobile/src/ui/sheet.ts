@@ -15,6 +15,7 @@ export const SHEET_HEIGHTS = {
   confirm: 381,
   whatsNew: 484,
   connection: 541,
+  localPage: 484,
 } as const;
 
 export type SheetBoard = keyof typeof SHEET_HEIGHTS;

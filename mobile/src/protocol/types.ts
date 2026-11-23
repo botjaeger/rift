@@ -176,7 +176,9 @@ export type Feature =
   | "history"
   | "stitch"
   // `dirs` with a `path`: the Change folder sheet browses before one cd
-  | "dirs_path";
+  | "dirs_path"
+  // a second connection carries the browser's requests to the computer's local ports (src/tunnel)
+  | "tunnel";
 
 /** `complete` bounds: line bytes, entries per list, bytes per entry. */
 export const MAX_COMPLETE_LINE = 1024;
@@ -263,6 +265,8 @@ export interface ClientHello {
   platform: string;
   /** The pairing secret (base64url), only on the pairing connection. */
   pair?: string;
+  /** `tunnel`: the binary tunnel to the computer's local ports (feature `tunnel`, src/tunnel). */
+  role?: "tunnel";
 }
 
 // Client → gateway.
@@ -1549,5 +1553,12 @@ export function isGatewayHello(v: unknown): v is GatewayHello {
 }
 
 export function isClientHello(v: unknown): v is ClientHello {
-  return isObj(v) && isUint(v.v) && isStr(v.name) && isStr(v.platform) && isOptStr(v.pair);
+  return (
+    isObj(v) &&
+    isUint(v.v) &&
+    isStr(v.name) &&
+    isStr(v.platform) &&
+    isOptStr(v.pair) &&
+    (v.role === undefined || v.role === "tunnel")
+  );
 }

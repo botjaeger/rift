@@ -833,6 +833,7 @@ impl Env {
             name: "Needle Phone".into(),
             platform: "ios".into(),
             pair: pair.map(String::from),
+            role: None,
         };
         transport::connect(ws, key, &self.pinned, &hello, 4 << 20).map(|(c, _)| c)
     }
@@ -1220,6 +1221,7 @@ fn a_relay_flood_never_refuses_lan_phones() {
         name: "LAN Phone".into(),
         platform: "android".into(),
         pair: Some(secret),
+        role: None,
     };
     let (mut ch, _) = transport::connect(ws, &key, &env.pinned, &hello, 4 << 20).unwrap();
     assert_eq!(recv(&mut ch)["t"], "welcome");

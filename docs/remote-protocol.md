@@ -1200,6 +1200,56 @@ before, for the phone's Run sheet and the pane's suggestions:
   `bad_request`; a `view` device `forbidden` (history can hold secrets
   typed on a command line, and path completion lists any folder).
 
+### Local web servers (feature `tunnel`)
+
+The phone opens a page served on the computer's `localhost` (a dev
+server's `http://localhost:5173`) in its browser sheet. It runs a listener
+on its own loopback; every connection the browser makes to it is carried
+over a second connection to the gateway and connected to the same port on
+the computer's loopback.
+
+- The second connection is an ordinary one (same pairing, same Noise
+  handshake, LAN or relay) whose hello adds `"role":"tunnel"`:
+
+  ```json
+  {"v":2,"name":"Sam's iPhone","platform":"ios","role":"tunnel"}
+  ```
+
+  No `welcome` follows. A `view` device gets `error` `forbidden` and the
+  socket closes (a local server's pages can change things); an unpaired key
+  gets `error` `auth` as on any connection. A gateway without the feature
+  treats the hello as a session's, so the app opens a tunnel only when the
+  session's `welcome.features` has `tunnel`. The connection ends with the
+  device's sessions: revoked, its permission changed, displaced, or idle
+  for 45 s (the app pings).
+- Its messages are **binary**, one per Noise message (chunked like JSON
+  ones), not JSON. Each starts with an op byte; numbers are big-endian;
+  `stream` is a nonzero `u32` the phone picks.
+
+  | Op | Bytes | Direction | Meaning |
+  |---|---|---|---|
+  | `open` | `01 stream:u32 port:u16` | phone → computer | connect `port` (1–65535) on `127.0.0.1`, else `::1` |
+  | `opened` | `02 stream:u32` | computer → phone | connected; data may flow |
+  | `data` | `03 stream:u32 bytes…` | both | 1 to 32,768 bytes |
+  | `ack` | `04 stream:u32 n:u32` | both | `n` (1 to 262,144) bytes of the stream were written on |
+  | `end` | `05 stream:u32` | both | the sender sends no more (half close) |
+  | `reset` | `06 stream:u32 reason:u8` | both | the stream is gone: 1 `refused` (nothing listens), 2 `limit`, 3 `error`, 4 `protocol`, 5 `aborted` |
+  | `ping` / `pong` | `07` / `08` | phone → computer / back | keepalive |
+
+  Fixtures: `crates/rift-remote/fixtures/tunnel/frames.json` (each frame's
+  bytes and fields, and frames that must be refused).
+- Flow control: each side has at most 262,144 bytes of a stream in flight
+  that the other has not acknowledged; past that the stream is reset
+  `protocol`. A side acknowledges data once it wrote it on (to the local
+  server, to the browser), so a slow reader stalls its own stream only.
+- Bounds: 64 streams at once and 50 opens a second (`limit`); `data`
+  before `opened` or after `end`, or an id in use, resets the stream
+  `protocol`; a malformed frame ends the connection. A stream is done once
+  both sides sent `end`, or either sent `reset`.
+- Only the computer's loopback: the phone names a port, never a host, so
+  the tunnel reaches what a command run on the computer could, and no
+  other machine on its network.
+
 ## Connection history and permissions (Phase 2)
 
 - `<data dir>/remote/history.jsonl` (0600): one line per closed

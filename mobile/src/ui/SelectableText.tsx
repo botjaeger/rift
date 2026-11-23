@@ -1,6 +1,7 @@
 import * as Clipboard from "expo-clipboard";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
-import { AccessibilityInfo, Linking, Platform, Text, TextInput, View, type TextInputSelectionChangeEvent, type TextStyle } from "react-native";
+import { AccessibilityInfo, Platform, Text, TextInput, View, type TextInputSelectionChangeEvent, type TextStyle } from "react-native";
+import { openLink } from "@/links";
 import * as haptics from "@/haptics";
 import { textParts } from "@/paneView";
 import { linkAtOffset, openableLink, textLinks } from "@/terminal";
@@ -162,7 +163,7 @@ export function SelectableText({
       if (url && openableLink(url)) {
         timer.current = setTimeout(() => {
           field.current?.blur();
-          void Linking.openURL(url);
+          openLink(url);
         }, LINK_TAP_MS);
       }
       return;
@@ -205,7 +206,7 @@ export function SelectableText({
           accessibilityActions={links.length > 0 ? [{ name: "openLink", label: `Open ${links[0]!.url}` }] : undefined}
           onAccessibilityAction={(e) => {
             const url = links[0]?.url;
-            if (e.nativeEvent.actionName === "openLink" && url && openableLink(url)) void Linking.openURL(url);
+            if (e.nativeEvent.actionName === "openLink" && url && openableLink(url)) openLink(url);
           }}
         >
           {parts ? partChildren(parts, markStyle.mark, styles.link) : null}

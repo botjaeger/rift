@@ -36,9 +36,14 @@ export function uiDeps(platform: "ios" | "android" | "web", extra: Record<string
     // the boards' phone (402 × 874): the sheets' heights (ui/sheet.ts)
     useWindowDimensions: () => ({ width: 402, height: 874, scale: 3, fontScale: 1 }),
   };
-  return {
+  const deps: Record<string, unknown> = {
     react,
     "react-native": rn,
+    // src/links as the app runs it without a handler: the system opens the link (the deps'
+    // `Linking`, looked up per call so a test's own stub counts)
+    "@/links": {
+      openLink: (url: string) => (deps["react-native"] as { Linking?: { openURL(u: string): unknown } }).Linking?.openURL(url),
+    },
     "react-native-safe-area-context": { useSafeAreaInsets: () => ({ top: 47, bottom: 34, left: 0, right: 0 }) },
     "./theme": themeStub,
     // a link's colour lifted on the screen's ground: the accent as it is (no contrast to judge in a stub)
@@ -49,6 +54,7 @@ export function uiDeps(platform: "ios" | "android" | "web", extra: Record<string
     },
     ...extra,
   };
+  return deps;
 }
 
 /**

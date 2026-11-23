@@ -21,7 +21,7 @@ const { SHEET_HEIGHTS, SHEET_TOP_ROOM, sheetHeight, sheetUnder } = load("ui/shee
 
 describe("sheet heights: the boards', to the screen's end", () => {
   it("each board sheet has its board's height on the 402 × 874 phone", () => {
-    expect(SHEET_HEIGHTS).toEqual({ attach: 484, folder: 645, block: 690, newTab: 645, newPane: 507, confirm: 381, whatsNew: 484, connection: 541 });
+    expect(SHEET_HEIGHTS).toEqual({ attach: 484, folder: 645, block: 690, newTab: 645, newPane: 507, confirm: 381, whatsNew: 484, connection: 541, localPage: 484 });
     for (const board of Object.keys(SHEET_HEIGHTS)) expect(sheetHeight(board, 874, 62)).toBe(SHEET_HEIGHTS[board]);
   });
   it("a short screen keeps the sheet clear of the status bar", () => {

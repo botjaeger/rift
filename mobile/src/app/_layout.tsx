@@ -18,6 +18,8 @@ import { APP_UPDATE } from "@/release";
 import { appLock, authenticate, fleet, kv, startPlatformWatchers, useApp, useLock } from "@/runtime";
 import { loadSeenRelease, saveSeenRelease } from "@/stores";
 import { paneAnimation } from "@/paneAnimation";
+import { setLinkHandler } from "@/links";
+import { openLink as openLinkThroughTunnel } from "@/tunnel/open";
 import { LockGate } from "@/ui/LockGate";
 import { Splash } from "@/ui/Splash";
 import { DARK_DEFAULT } from "@/ui/palette";
@@ -34,6 +36,9 @@ void SplashScreen.preventAutoHideAsync().catch(() => undefined);
 // A link straight to a screen (a notification tap, rift://host/…/pane/…) keeps the tabs below
 // it, so Back leads to Portals instead of out of the app.
 export const unstable_settings = { initialRouteName: "index" };
+
+// a tapped `localhost` link opens the computer's page through the tunnel (src/tunnel/open)
+setLinkHandler(openLinkThroughTunnel);
 
 /** The navigators' own grounds (containers, cards, the tab bar's) in the palette's colours: the
  *  navigator's own white showed around a page while it slid in or out. */
@@ -207,6 +212,18 @@ export default function RootLayout() {
               name="new-tab"
               options={{
                 title: "New tab",
+                presentation: "formSheet",
+                sheetAllowedDetents: "fitToContents",
+                sheetGrabberVisible: false,
+                sheetCornerRadius: 20,
+                headerShown: false,
+                contentStyle: { backgroundColor: colors.surface },
+              }}
+            />
+            <Stack.Screen
+              name="local-page"
+              options={{
+                title: "Open a local page",
                 presentation: "formSheet",
                 sheetAllowedDetents: "fitToContents",
                 sheetGrabberVisible: false,

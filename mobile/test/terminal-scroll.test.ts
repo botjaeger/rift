@@ -48,6 +48,7 @@ function harness(typing = false, props: Record<string, unknown> = {}) {
     },
     "@/runtime": { useApp: () => ({ settings: { controlKeys: [] }, hosts: [] }), fleet: { sendScroll: send, history, pageAhead, pageSeek: vi.fn(), onPage: () => () => {} } },
     "@/scroll": scroll,
+    "@/links": { openLink: () => {} },
     "@/stitch": stitchModule,
     "@/history": historyModule,
     "@/terminal": terminal,

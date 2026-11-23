@@ -63,6 +63,7 @@ const ICONS = {
   chevronUp: { ios: "chevron.up", android: "expand_less", web: "expand_less" },
   // the computer menu's Connection row
   wifi: { ios: "wifi", android: "wifi", web: "wifi" },
+  globe: { ios: "globe", android: "language", web: "language" },
   // the tab row's ‹ ›: one shape both ways (back and forward differ on Android)
   chevronLeft: { ios: "chevron.left", android: "chevron_left", web: "chevron_left" },
   chevronRight: { ios: "chevron.right", android: "chevron_right", web: "chevron_right" },

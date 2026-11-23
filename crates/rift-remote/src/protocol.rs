@@ -31,6 +31,18 @@ pub struct ClientHello {
     /// A pairing secret (base64url) on the first connection of a device.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pair: Option<String>,
+    /// What the connection is for: absent for the app's session, `tunnel`
+    /// for the binary tunnel to the computer's local ports (feature
+    /// `tunnel`, [`crate::tunnel`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<Role>,
+}
+
+/// [`ClientHello::role`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    Tunnel,
 }
 
 /// What a paired device may do: `view` gets `forbidden` for `run` / `keys`
@@ -1159,7 +1171,7 @@ mod tests {
     #[test]
     fn every_handshake_fixture_round_trips() {
         let all = fixtures("handshake");
-        assert_eq!(all.len(), 3, "handshake fixtures");
+        assert_eq!(all.len(), 4, "handshake fixtures");
         for (name, value) in all {
             let back = if name.starts_with("gateway") {
                 let h: GatewayHello =

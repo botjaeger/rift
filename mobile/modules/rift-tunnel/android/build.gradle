@@ -1,0 +1,20 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'dev.botjaeger.rift'
+version = '1.0.0'
+
+android {
+  namespace "dev.botjaeger.rift.tunnel"
+  defaultConfig {
+    versionCode 1
+    versionName '1.0.0'
+  }
+}
+
+dependencies {
+  // the custom tab with a keep-alive (openTab); the version expo-web-browser already brings in
+  implementation "androidx.browser:browser:1.6.0"
+}

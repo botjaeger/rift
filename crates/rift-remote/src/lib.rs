@@ -21,6 +21,7 @@ mod server;
 mod stitch;
 mod sys;
 pub mod transport;
+pub mod tunnel;
 mod uplink;
 
 pub use server::{Config, Gateway, serve};

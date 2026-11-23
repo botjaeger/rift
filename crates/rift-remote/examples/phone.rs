@@ -95,6 +95,7 @@ fn main() {
         name: "Live Check Phone".into(),
         platform: "test".into(),
         pair,
+        role: None,
     };
     log("hs→", &serde_json::to_value(&hello).unwrap());
     let (mut ch, gateway) =

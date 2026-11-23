@@ -29,8 +29,8 @@
 
 use crate::protocol::{
     Block, BlockState, ClientHello, ClientMsg, CloseKind, ClosingReason, ErrorCode, GatewayHello,
-    MAX_WELCOME_ADDRESSES, MoveKind, OpenKind, PageDir, PageState, Permission, Run, ScreenMode,
-    ServerMsg, Theme, VERSION,
+    MAX_WELCOME_ADDRESSES, MoveKind, OpenKind, PageDir, PageState, Permission, Role, Run,
+    ScreenMode, ServerMsg, Theme, VERSION,
 };
 use crate::registry::{self, Device, RelayState, RelayStatus, Via};
 use crate::transport::{self, Channel, KEY_LEN, Recv, Socket};
@@ -85,7 +85,7 @@ const DONE_RUNNING: usize = 64;
 /// after the 45 s idle timeout.
 pub const FOLLOW_FRESH: Duration = Duration::from_secs(20);
 /// What this gateway serves beyond Phase 2 (`welcome.features`).
-const FEATURES: [&str; 26] = [
+const FEATURES: [&str; 27] = [
     "screen",
     "text",
     "output",
@@ -112,6 +112,7 @@ const FEATURES: [&str; 26] = [
     "history",
     "stitch",
     "dirs_path",
+    "tunnel",
 ];
 
 /// Gateway settings. [`Config::new`] takes the limits from the protocol;
@@ -501,6 +502,10 @@ pub(crate) struct Shared<S> {
 struct Hub {
     /// Authenticated clients.
     clients: HashMap<u64, Slot>,
+    /// Authenticated tunnel connections ([`crate::tunnel`]): no session, no
+    /// broadcasts; revoked, displaced and ended on a permission change like
+    /// a client.
+    tunnels: HashMap<u64, TunnelSlot>,
     feeds: HashMap<u64, Feed>,
     /// Last topology frame sent.
     topology: Option<Arc<str>>,
@@ -529,6 +534,14 @@ const REVOKED: u8 = 2;
 const PERMISSION: u8 = 3;
 /// Its device connected again with every slot taken ([`Shared::displace`]).
 const DISPLACED: u8 = 4;
+
+/// A tunnel connection in the [`Hub`].
+struct TunnelSlot {
+    key: [u8; KEY_LEN],
+    permission: Permission,
+    end: Arc<AtomicU8>,
+    seen: Arc<Heard>,
+}
 
 /// When a client was last heard from, readable from other threads.
 struct Heard {
@@ -1074,14 +1087,13 @@ impl<S> Shared<S> {
         let silent = self.config.idle_timeout / 2;
         let hub = self.hub.lock().unwrap();
         let mut any = false;
-        for c in hub
+        let ends = hub
             .clients
             .values()
-            .filter(|c| &c.key == key && !c.seen.within(silent))
-        {
-            let _ = c
-                .end
-                .compare_exchange(LIVE, DISPLACED, Ordering::AcqRel, Ordering::Acquire);
+            .map(|c| (&c.key, &c.seen, &c.end))
+            .chain(hub.tunnels.values().map(|t| (&t.key, &t.seen, &t.end)));
+        for (_, _, end) in ends.filter(|(k, seen, _)| *k == key && !seen.within(silent)) {
+            let _ = end.compare_exchange(LIVE, DISPLACED, Ordering::AcqRel, Ordering::Acquire);
             any = true;
         }
         any
@@ -1452,15 +1464,18 @@ fn reload_devices<S>(shared: &Shared<S>) {
         .collect();
     *shared.devices.lock().unwrap() = now;
     let hub = shared.hub.lock().unwrap();
-    for c in hub.clients.values() {
-        let why = match keys.get(&c.key) {
+    let ends = hub
+        .clients
+        .values()
+        .map(|c| (&c.key, c.permission, &c.end))
+        .chain(hub.tunnels.values().map(|t| (&t.key, t.permission, &t.end)));
+    for (key, permission, end) in ends {
+        let why = match keys.get(key) {
             None => REVOKED,
-            Some(p) if *p != c.permission => PERMISSION,
+            Some(p) if *p != permission => PERMISSION,
             Some(_) => continue,
         };
-        let _ = c
-            .end
-            .compare_exchange(LIVE, why, Ordering::AcqRel, Ordering::Acquire);
+        let _ = end.compare_exchange(LIVE, why, Ordering::AcqRel, Ordering::Acquire);
     }
 }
 
@@ -1936,13 +1951,17 @@ pub(crate) fn connection<S: Source, T: Socket>(
         shared.record(None, &peer, start, "busy");
         return;
     }
-    let (device, mut ch) = match authenticate(shared, ch, &payload, &peer.address) {
+    let (device, mut ch, role) = match authenticate(shared, ch, &payload, &peer.address) {
         Ok(r) => r,
         Err(reason) => {
             shared.failed(&peer, start, reason);
             return;
         }
     };
+    if role == Some(Role::Tunnel) {
+        serve_tunnel(shared, ch, device, peer, start);
+        return;
+    }
     // a permission change ends the connection: a view device never uploads
     if device.permission == Permission::Operate {
         allow_uploads(&mut ch);
@@ -1957,7 +1976,7 @@ fn authenticate<S: Source, T: Socket>(
     ch: Conn<T>,
     payload: &[u8],
     ip: &str,
-) -> Result<(Device, Conn<T>), &'static str> {
+) -> Result<(Device, Conn<T>, Option<Role>), &'static str> {
     let v = serde_json::from_slice::<serde_json::Value>(payload)
         .ok()
         .and_then(|v| v.get("v").and_then(serde_json::Value::as_u64));
@@ -2022,7 +2041,79 @@ fn authenticate<S: Source, T: Socket>(
         );
         return Err("auth");
     };
-    Ok((device, ch))
+    Ok((device, ch, hello.role))
+}
+
+/// An authenticated tunnel connection ([`crate::tunnel`]): only an
+/// `operate` device's (a view device could reach a local server's admin
+/// page), held in the hub so a revoke or permission change ends it, and
+/// recorded in the history.
+fn serve_tunnel<S: Source, T: Socket>(
+    shared: &Shared<S>,
+    mut ch: Conn<T>,
+    device: Device,
+    peer: Peer,
+    start: SystemTime,
+) {
+    if device.permission != Permission::Operate {
+        refuse(
+            ch,
+            ServerMsg::error(ErrorCode::Forbidden, "a view-only device has no tunnel"),
+        );
+        shared.record(Some((&device.id, &device.name)), &peer, start, "forbidden");
+        return;
+    }
+    let max_frame = transport::max_client_frame(crate::tunnel::MAX_FRAME);
+    ch.ws.set_config(|c| {
+        c.max_frame_size = Some(max_frame);
+        c.max_message_size = Some(max_frame);
+    });
+    ch.set_limit(crate::tunnel::MAX_FRAME);
+    let id = shared.next_client.fetch_add(1, Ordering::Relaxed);
+    let end = Arc::new(AtomicU8::new(LIVE));
+    let seen = Arc::new(Heard::new());
+    shared.hub.lock().unwrap().tunnels.insert(
+        id,
+        TunnelSlot {
+            key: ch.remote_static(),
+            permission: device.permission,
+            end: end.clone(),
+            seen: seen.clone(),
+        },
+    );
+    log::info!(
+        "remote: {:?} ({}) opened a tunnel via {}",
+        device.name,
+        device.id,
+        peer.via.as_str()
+    );
+    let reason = crate::tunnel::serve(
+        &mut ch,
+        &end,
+        shared.config.idle_timeout,
+        || seen.mark(),
+        crate::tunnel::connect_local,
+    );
+    shared.hub.lock().unwrap().tunnels.remove(&id);
+    ch.close();
+    log::info!(
+        "remote: {:?} ({}) closed its tunnel: {reason}",
+        device.name,
+        device.id
+    );
+    shared.record(
+        Some((&device.id, &device.name)),
+        &peer,
+        start,
+        // ended from outside: why, as the history names it for a session
+        match end.load(Ordering::Acquire) {
+            REVOKED => "revoked",
+            PERMISSION => "permission",
+            DISPLACED => "displaced",
+            LIVE => reason,
+            _ => "too_slow",
+        },
+    );
 }
 
 fn serve_device<S: Source, T: Socket>(

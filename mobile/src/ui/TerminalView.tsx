@@ -5,7 +5,6 @@ import {
   AccessibilityInfo,
   AppState,
   Keyboard,
-  Linking,
   Platform,
   Pressable,
   ScrollView,
@@ -59,6 +58,7 @@ import { promptText, textToCopy } from "@/selection";
 import { SelectionBar } from "./SelectionBar";
 import * as haptics from "@/haptics";
 import { rowWithPaste } from "@/controlKeys";
+import { openLink as openTappedLink } from "@/links";
 import { CELL_RATIO, rowKeys, textRoom, atEnd, cellAt, cursorScrollY, drawnText, fitArea, fitFont, lastTextRow, lineAt, linkAt, markLinks, openableLink, ordered, screenLinks, screenSpan, selectionText, wordAt, wordStep, type Cell, LINE_RATIO, rowPieces, rowSegments, screenDefaults, segmentColors, showsKeyRow, type Piece, type ScreenLink } from "@/terminal";
 import { ControlRow, NO_STICKY, type Sticky } from "./ControlRow";
 import { ScreenSkeleton } from "./PaneLoading";
@@ -1174,7 +1174,7 @@ export function TerminalView({
     }));
   }, [shown, linkFrom, linkTo]);
   const openLink = useCallback((url: string) => {
-    if (openableLink(url)) void Linking.openURL(url);
+    if (openableLink(url)) openTappedLink(url);
   }, []);
   // the link under a point, by the rows' last measured place (a tap's keyboard focus asks it at once)
   const linkUnder = (pageX: number, pageY: number) => (shown ? linkAt(links, cellOf(pageX, pageY, shown)) : null);

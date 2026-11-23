@@ -18,7 +18,8 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { askingTitle, questionKey } from "@/answer";
 import { chipItems, timerText } from "@/promptChips";
-import { canClose, canOperate, draftKey, hasFeature, isAsked, wrapsLines } from "@/fleet";
+import { canClose, canOperate, canTunnel, draftKey, hasFeature, isAsked, wrapsLines } from "@/fleet";
+import { tunnelAvailable } from "@/tunnel";
 import { foldBlocks, paneKind, paneName, programName, swipeTarget, tabKind, tabPane, type PaneItem } from "@/now";
 import { bareScreen as screenIsBare, paneMark, runsAgent, screenView, waitingOthers } from "@/paneView";
 import { canLoadOlder, MAX_BLOCKS } from "@/protocol/store";
@@ -877,6 +878,14 @@ export default function PaneScreen() {
               setComputers(false);
               details();
             }}
+            onLocalPage={
+              canTunnel(host) && tunnelAvailable
+                ? () => {
+                    setComputers(false);
+                    router.push({ pathname: "/local-page", params: { key } });
+                  }
+                : undefined
+            }
             onDismiss={() => setComputers(false)}
             onPortals={() => {
               setComputers(false);

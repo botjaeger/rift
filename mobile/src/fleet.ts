@@ -24,7 +24,7 @@ import type { PairLink } from "./pairing";
 import { BatchedStore, FRAME_MS } from "./protocol/batch";
 import { MAX_OUTPUT_LINES, MAX_TEXT_BYTES, MAX_UPLOAD_BYTES, textProblem } from "./protocol/types";
 import { UPLOAD_TIMEOUT_MS, uploadChunks, uploadRefusal } from "./upload";
-import { RiftClient, type ConnState, type Failure, type SocketFactory } from "./protocol/client";
+import { RiftClient, type ConnState, type Failure, type SocketFactory, type TunnelTarget } from "./protocol/client";
 import type { SpeedSnapshot } from "./protocol/speed";
 import { canLoadOlder, reducePane, reduceScreen, screenShapeSame, staleScreen, type PaneState, type ScreenState } from "./protocol/store";
 import { findPane, tabTitle } from "./topology";
@@ -326,6 +326,14 @@ export function canOperate(host: HostView): boolean {
 /** Whether the phone offers dragging tabs and panes into another order: it may operate and its Rift serves `move`. */
 export function canMove(host: HostView | undefined): boolean {
   return !!host && canOperate(host) && hasFeature(host, "move");
+}
+
+/**
+ * Whether the phone opens this computer's `localhost` pages through the tunnel: it may operate
+ * and its Rift serves `tunnel` (a view-only device's tunnel is refused).
+ */
+export function canTunnel(host: HostView | undefined): boolean {
+  return !!host && canOperate(host) && hasFeature(host, "tunnel");
 }
 
 /** Whether the phone offers Close pane / Close tab for this computer: it may operate and its Rift serves `close`. */
@@ -931,6 +939,17 @@ export class Fleet {
   speed(key: string, now: number = Date.now()): SpeedSnapshot | null {
     const c = this.clients.get(key);
     return c && c.connState.status === "open" ? c.meter.snapshot(now) : null;
+  }
+
+  /** How a tunnel connection (src/tunnel) reaches `key`: null while its session is down or it serves no tunnel to this phone. */
+  tunnelTarget(key: string): TunnelTarget | null {
+    if (!canTunnel(this.host(key))) return null;
+    return this.clients.get(key)?.tunnelTarget() ?? null;
+  }
+
+  /** The computer whose pane is open, if any. */
+  get paneHost(): string | null {
+    return this.store.peek().pane?.host ?? null;
   }
 
   /** Pings `key` every second while the Connection speed page is open (`on`). */

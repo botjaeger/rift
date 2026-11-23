@@ -1,0 +1,23 @@
+[
+  {"name": "open", "op": "open", "stream": 1, "port": 5173, "hex": "01000000011435"},
+  {"name": "open-high-stream", "op": "open", "stream": 4294967295, "port": 65535, "hex": "01ffffffffffff"},
+  {"name": "opened", "op": "opened", "stream": 7, "hex": "0200000007"},
+  {"name": "data", "op": "data", "stream": 2, "data": "GET / HTTP/1.1\r\n", "hex": "0300000002474554202f20485454502f312e310d0a"},
+  {"name": "ack", "op": "ack", "stream": 2, "bytes": 16, "hex": "040000000200000010"},
+  {"name": "ack-window", "op": "ack", "stream": 2, "bytes": 262144, "hex": "040000000200040000"},
+  {"name": "end", "op": "end", "stream": 3, "hex": "0500000003"},
+  {"name": "reset-refused", "op": "reset", "stream": 4, "reason": 1, "hex": "060000000401"},
+  {"name": "reset-aborted", "op": "reset", "stream": 4, "reason": 5, "hex": "060000000405"},
+  {"name": "ping", "op": "ping", "hex": "07"},
+  {"name": "pong", "op": "pong", "hex": "08"},
+  {"name": "bad-empty", "error": "empty frame", "hex": ""},
+  {"name": "bad-stream-zero", "error": "stream 0", "hex": "0200000000"},
+  {"name": "bad-port-zero", "error": "port 0", "hex": "01000000010000"},
+  {"name": "bad-open-length", "error": "bad length", "hex": "010000000114"},
+  {"name": "bad-data-empty", "error": "bad length", "hex": "0300000002"},
+  {"name": "bad-ack-zero", "error": "bad ack", "hex": "040000000200000000"},
+  {"name": "bad-ack-past-window", "error": "bad ack", "hex": "040000000200040001"},
+  {"name": "bad-reason", "error": "bad reason", "hex": "060000000409"},
+  {"name": "bad-op", "error": "unknown op", "hex": "0900000001"},
+  {"name": "bad-ping-length", "error": "bad length", "hex": "0700"}
+]

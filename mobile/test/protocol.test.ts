@@ -126,7 +126,7 @@ describe("handshake fixtures", () => {
     });
   });
 
-  it.each(["client.json", "client-pair.json"])("%s is a client hello", (name) => {
+  it.each(["client.json", "client-pair.json", "client-tunnel.json"])("%s is a client hello", (name) => {
     const c = handshake.find((f) => f.name === name)!.json;
     expect(isClientHello(c)).toBe(true);
   });
@@ -134,6 +134,7 @@ describe("handshake fixtures", () => {
   it("rejects malformed hellos", () => {
     expect(isGatewayHello({ v: 2, host: "h", os: "macos" })).toBe(false);
     expect(isClientHello({ v: 2, name: "n", platform: "ios", pair: 5 })).toBe(false);
+    expect(isClientHello({ v: 2, name: "n", platform: "ios", role: "session" })).toBe(false);
     expect(isClientHello({ v: "2", name: "n", platform: "ios" })).toBe(false);
   });
 });

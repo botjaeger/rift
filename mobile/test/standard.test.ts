@@ -320,7 +320,7 @@ describe("a row's line says what a pane does, in words (the New Lists board: all
 describe("the standard is wired into every page and sheet", () => {
   const src = (p: string) => readFileSync(new URL(`../src/${p}`, import.meta.url), "utf8");
   const routes = [...readdirSync(new URL("../src/app", import.meta.url)).filter((f) => f.endsWith(".tsx") && !f.startsWith("_") && !f.startsWith("+")).map((f) => `app/${f}`), "app/host/[key]/index.tsx"];
-  const SHEETS = ["attach", "block", "chips", "confirm", "connection", "diff", "new-pane", "new-tab", "pane-chips", "whats-new"];
+  const SHEETS = ["attach", "block", "chips", "confirm", "connection", "diff", "local-page", "new-pane", "new-tab", "pane-chips", "whats-new"];
   // the root page keeps its large title; Settings' pages draw PageHeader through SettingsPage
   const PAGE_VIA = { "app/index.tsx": "FirstRun", "app/settings.tsx": "SettingsPage", "app/settings-ntfy.tsx": "SettingsPage", "app/computer.tsx": "SettingsPage", "app/appearance.tsx": "SettingsPage" } as Record<string, string>;
   it("pages draw PageHeader, sheets SheetHeader", () => {
@@ -328,7 +328,7 @@ describe("the standard is wired into every page and sheet", () => {
       const name = r.slice(4, -4);
       const text = src(r);
       if (name === "connection") expect(src("ui/ConnectionSheet.tsx")).toContain("<SheetFrame");
-      else if (["new-tab", "new-pane", "attach", "block", "confirm", "whats-new"].includes(name)) expect(text, r).toContain("<SheetFrame");
+      else if (["new-tab", "new-pane", "attach", "block", "confirm", "whats-new", "local-page"].includes(name)) expect(text, r).toContain("<SheetFrame");
       // Change folder is a SheetFrame, the chips' other menus the header over one scroll view
       else if (name === "chips") expect(text, r).toMatch(/<SheetFrame\s+board="folder"[\s\S]*<SheetHeader/);
       else if (SHEETS.includes(name)) expect(text, r).toContain("<SheetHeader");

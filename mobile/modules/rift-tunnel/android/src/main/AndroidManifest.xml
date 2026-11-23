@@ -1,0 +1,17 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <!-- openTab looks for the browser that shows custom tabs -->
+  <queries>
+    <intent>
+      <action android:name="android.support.customtabs.action.CustomTabsService" />
+    </intent>
+    <intent>
+      <action android:name="android.intent.action.VIEW" />
+      <data android:scheme="http" />
+    </intent>
+  </queries>
+  <application>
+    <!-- Bound by the browser while its custom tab shows a page the app serves (openTab's
+         KEEP_ALIVE): that keeps the app's network open while it is behind the tab. -->
+    <service android:name="dev.botjaeger.rift.tunnel.KeepAliveService" android:exported="true" />
+  </application>
+</manifest>

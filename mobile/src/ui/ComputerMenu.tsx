@@ -18,7 +18,8 @@ export function landingPane(host: HostView): number | null {
 /**
  * The computer menu (the pane header's name): every paired computer with how it is reached, the
  * one on screen checked; a connected one opens on its active tab. Then Connection (how this phone
- * reaches the one on screen) and All portals.
+ * reaches the one on screen), Open a local page (when it serves the tunnel to this phone) and
+ * All portals.
  */
 export function ComputerMenu({
   hosts,
@@ -27,6 +28,7 @@ export function ComputerMenu({
   top,
   onOpen,
   onConnection,
+  onLocalPage,
   onPortals,
   onDismiss,
 }: {
@@ -36,6 +38,8 @@ export function ComputerMenu({
   top: number;
   onOpen: (host: string, pane: number) => void;
   onConnection: () => void;
+  /** Absent: the row is not shown (the computer serves no tunnel to this phone, or the app has no listener). */
+  onLocalPage?: () => void;
   onPortals: () => void;
   /** The computer on screen was picked: the menu closes. */
   onDismiss: () => void;
@@ -91,6 +95,19 @@ export function ComputerMenu({
             {/* the computer is named in the row above: the line says what the sheet holds */}
             <Text style={styles.hint} numberOfLines={1}>
               How it is reached, and how fast
+            </Text>
+          </View>
+        </Pressable>
+      ) : null}
+      {here && onLocalPage ? (
+        <Pressable accessibilityRole="menuitem" accessibilityLabel={`Open a local page of ${here.record.name}`} onPress={onLocalPage} style={({ pressed }) => [styles.row, styles.rule, pressed && styles.pressed]}>
+          <View style={styles.dotBox}>
+            <Icon name="globe" size={glyph(18, 15)} color={colors.text} />
+          </View>
+          <View style={styles.text}>
+            <Text style={styles.title}>Open a local page</Text>
+            <Text style={styles.hint} numberOfLines={1}>
+              A localhost port, in the browser
             </Text>
           </View>
         </Pressable>

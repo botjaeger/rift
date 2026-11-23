@@ -845,6 +845,7 @@ fn hello(pair: Option<&str>) -> ClientHello {
         name: "Test Phone".into(),
         platform: "ios".into(),
         pair: pair.map(String::from),
+        role: None,
     }
 }
 
@@ -1034,7 +1035,7 @@ fn pairing_then_reconnecting_gets_welcome_and_topology() {
     assert_eq!(
         welcome,
         json!({"t":"welcome","v":2,"host":"test-host","os":"linux","version":"9.9.9",
-               "device":d.id,"permission":"operate","features":["screen","text","output","push_failures","push_ntfy","git","notify_off","chips","waiting","complete","running","open","close","move","fit","prompt_chips","closing","scroll","upload","upload_files","paste","mouse","clipboard","history","stitch","dirs_path"],
+               "device":d.id,"permission":"operate","features":["screen","text","output","push_failures","push_ntfy","git","notify_off","chips","waiting","complete","running","open","close","move","fit","prompt_chips","closing","scroll","upload","upload_files","paste","mouse","clipboard","history","stitch","dirs_path","tunnel"],
                // where it listens now (a specific address: that one)
                "addresses":[env.addr.to_string()]})
     );
@@ -5920,4 +5921,426 @@ fn a_program_that_jumps_further_than_the_tall_screen_is_found_again() {
     let new = text.iter().take_while(|t| !t.is_empty()).count();
     assert_eq!(text[..new], doc[page_top..page_top + new]);
     assert!(st.held.is_empty());
+}
+
+// --- the tunnel to local ports (feature `tunnel`) ---
+
+use rift_remote::protocol::Role;
+use rift_remote::tunnel::{Frame, MAX_DATA, MAX_STREAMS, ResetReason, WINDOW};
+
+fn tunnel_hello() -> ClientHello {
+    ClientHello {
+        role: Some(Role::Tunnel),
+        ..hello(None)
+    }
+}
+
+fn tput(ch: &mut Ch, f: Frame) {
+    assert!(ch.send_bytes(&f.encode()));
+}
+
+/// Next tunnel frame within 10 s.
+fn tframe(ch: &mut Ch) -> Frame {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(Instant::now() < deadline, "no tunnel frame within 10 s");
+        match ch.recv() {
+            Recv::Msg(m) => return Frame::decode(&m).unwrap_or_else(|e| panic!("{e}: {m:?}")),
+            Recv::Idle | Recv::Alive | Recv::Partial => {}
+            other => panic!("expected a frame, got {other:?}"),
+        }
+    }
+}
+
+/// A local server on 127.0.0.1 that answers each connection with its
+/// request's first line and `body` bytes, then closes.
+fn local_server(body: usize) -> u16 {
+    use std::io::{BufRead, BufReader, Write};
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for s in l.incoming().flatten() {
+            std::thread::spawn(move || {
+                let mut line = String::new();
+                let mut r = BufReader::new(s.try_clone().unwrap());
+                let _ = r.read_line(&mut line);
+                let mut w = s;
+                let _ = w.write_all(format!("echo:{line}").as_bytes());
+                let _ = w.write_all(&vec![b'z'; body]);
+            });
+        }
+    });
+    port
+}
+
+/// A port nothing listens on.
+fn closed_port() -> u16 {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    l.local_addr().unwrap().port()
+}
+
+/// An operate phone opens a stream to a local server: its request reaches
+/// the server, the reply comes back with acks keeping it within the window,
+/// and both ends close it. The welcome advertises the feature.
+#[test]
+fn a_tunnel_carries_a_local_servers_reply() {
+    let env = start(|_| {});
+    let (key, _session, welcome) = env.pair(Permission::Operate);
+    assert!(
+        welcome["features"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("tunnel"))
+    );
+    let port = local_server(600_000);
+    let mut ch = env.handshake(&key, &tunnel_hello()).unwrap();
+    tput(&mut ch, Frame::Open { stream: 1, port });
+    assert_eq!(tframe(&mut ch), Frame::Opened { stream: 1 });
+    tput(
+        &mut ch,
+        Frame::Data {
+            stream: 1,
+            data: b"GET / HTTP/1.1\n".to_vec(),
+        },
+    );
+    tput(&mut ch, Frame::End { stream: 1 });
+    let (mut got, mut acked_by_gw, mut unacked) = (Vec::new(), 0u32, 0u64);
+    loop {
+        match tframe(&mut ch) {
+            Frame::Data { stream: 1, data } => {
+                assert!(data.len() <= MAX_DATA);
+                unacked += data.len() as u64;
+                assert!(unacked <= u64::from(WINDOW), "past the window: {unacked}");
+                got.extend_from_slice(&data);
+                // acknowledge as a phone writing them on would
+                tput(
+                    &mut ch,
+                    Frame::Ack {
+                        stream: 1,
+                        bytes: data.len() as u32,
+                    },
+                );
+                unacked -= data.len() as u64;
+            }
+            Frame::Ack { stream: 1, bytes } => acked_by_gw += bytes,
+            Frame::End { stream: 1 } => break,
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    let head = b"echo:GET / HTTP/1.1\n";
+    assert_eq!(&got[..head.len()], head);
+    assert_eq!(got.len(), head.len() + 600_000);
+    // the gateway acknowledged the request once written
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while acked_by_gw < 15 && Instant::now() < deadline {
+        tput(&mut ch, Frame::Ping);
+        match tframe(&mut ch) {
+            Frame::Ack { stream: 1, bytes } => acked_by_gw += bytes,
+            Frame::Pong => {}
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    assert_eq!(acked_by_gw, 15);
+}
+
+/// A phone that never acknowledges gets one window of a long reply, no
+/// more; an ack lets that much more through.
+#[test]
+fn a_tunnel_stream_stops_at_the_window() {
+    let env = start(|_| {});
+    let (key, _session, _) = env.pair(Permission::Operate);
+    let port = local_server(4 * WINDOW as usize);
+    let mut ch = env.handshake(&key, &tunnel_hello()).unwrap();
+    tput(&mut ch, Frame::Open { stream: 5, port });
+    assert_eq!(tframe(&mut ch), Frame::Opened { stream: 5 });
+    tput(
+        &mut ch,
+        Frame::Data {
+            stream: 5,
+            data: b"x\n".to_vec(),
+        },
+    );
+    let take = |ch: &mut Ch, quiet: Duration| -> u64 {
+        let mut n = 0u64;
+        let mut last = Instant::now();
+        while last.elapsed() < quiet {
+            match ch.recv() {
+                Recv::Msg(m) => {
+                    if let Frame::Data { data, .. } = Frame::decode(&m).unwrap() {
+                        n += data.len() as u64;
+                    }
+                    last = Instant::now();
+                }
+                Recv::Idle | Recv::Alive | Recv::Partial => {}
+                other => panic!("{other:?}"),
+            }
+        }
+        n
+    };
+    assert_eq!(take(&mut ch, Duration::from_millis(800)), u64::from(WINDOW));
+    tput(
+        &mut ch,
+        Frame::Ack {
+            stream: 5,
+            bytes: 1000,
+        },
+    );
+    assert_eq!(take(&mut ch, Duration::from_millis(800)), 1000);
+}
+
+/// A port nothing listens on is refused; a stream id in use, data before
+/// `opened` and data past the window reset the stream; the connection
+/// goes on.
+#[test]
+fn a_tunnel_refuses_what_it_cannot_carry() {
+    let env = start(|_| {});
+    let (key, _session, _) = env.pair(Permission::Operate);
+    let mut ch = env.handshake(&key, &tunnel_hello()).unwrap();
+    tput(
+        &mut ch,
+        Frame::Open {
+            stream: 1,
+            port: closed_port(),
+        },
+    );
+    assert_eq!(
+        tframe(&mut ch),
+        Frame::Reset {
+            stream: 1,
+            reason: ResetReason::Refused
+        }
+    );
+    // a server that never reads
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    let _held = std::thread::spawn(move || {
+        let conns: Vec<_> = l.incoming().take(2).flatten().collect();
+        std::thread::sleep(Duration::from_secs(20));
+        drop(conns);
+    });
+    // an id in use: reset, and the stream that had it is gone (no `opened`
+    // for it comes after: the next frame is stream 3's)
+    tput(&mut ch, Frame::Open { stream: 2, port });
+    tput(&mut ch, Frame::Open { stream: 2, port });
+    // the first may connect before the second arrives (fast on Linux): its
+    // `opened` then comes first, the reset after it either way
+    let mut f = tframe(&mut ch);
+    if f == (Frame::Opened { stream: 2 }) {
+        f = tframe(&mut ch);
+    }
+    assert_eq!(
+        f,
+        Frame::Reset {
+            stream: 2,
+            reason: ResetReason::Protocol
+        }
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    tput(&mut ch, Frame::Open { stream: 3, port });
+    assert_eq!(tframe(&mut ch), Frame::Opened { stream: 3 });
+    // data after the phone's own `end` (data past the window is the unit test
+    // `data_past_the_window_resets_the_stream`: here it hangs on the kernel's
+    // buffer sizes, which swallow megabytes on Linux)
+    tput(&mut ch, Frame::End { stream: 3 });
+    tput(
+        &mut ch,
+        Frame::Data {
+            stream: 3,
+            data: b"late".to_vec(),
+        },
+    );
+    loop {
+        match tframe(&mut ch) {
+            Frame::Ack { stream: 3, .. } => {}
+            f => {
+                assert_eq!(
+                    f,
+                    Frame::Reset {
+                        stream: 3,
+                        reason: ResetReason::Protocol
+                    }
+                );
+                break;
+            }
+        }
+    }
+    tput(&mut ch, Frame::Ping);
+    loop {
+        match tframe(&mut ch) {
+            Frame::Pong => break,
+            Frame::Ack { .. } | Frame::Reset { .. } | Frame::Opened { .. } => {}
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
+/// At most MAX_STREAMS streams at once: the next is reset `limit`.
+#[test]
+fn a_tunnel_holds_a_bounded_number_of_streams() {
+    let env = start(|_| {});
+    let (key, _session, _) = env.pair(Permission::Operate);
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let conns: Vec<_> = l.incoming().take(MAX_STREAMS).flatten().collect();
+        std::thread::sleep(Duration::from_secs(30));
+        drop(conns);
+    });
+    let mut ch = env.handshake(&key, &tunnel_hello()).unwrap();
+    let mut opened = 0;
+    let mut limited = Vec::new();
+    for s in 1..=MAX_STREAMS as u32 + 1 {
+        tput(&mut ch, Frame::Open { stream: s, port });
+        // within the open rate
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    for _ in 0..=MAX_STREAMS {
+        match tframe(&mut ch) {
+            Frame::Opened { .. } => opened += 1,
+            Frame::Reset { stream, reason } => limited.push((stream, reason)),
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(opened, MAX_STREAMS);
+    assert_eq!(limited, [(MAX_STREAMS as u32 + 1, ResetReason::Limit)]);
+}
+
+/// A view-only device gets no tunnel; revoking an operate device ends its
+/// tunnel. A dev server bound to `::1` only is reached too.
+#[test]
+fn a_tunnel_is_for_operate_devices_only() {
+    let env = start(|_| {});
+    let (view, _s1, _) = env.pair(Permission::View);
+    let refused = env.refused(&view, &tunnel_hello());
+    assert_eq!(code(&refused), ("error", "forbidden"));
+    let (key, _s2, welcome) = env.pair(Permission::Operate);
+    let mut ch = env.handshake(&key, &tunnel_hello()).unwrap();
+    if let Ok(l6) = TcpListener::bind("[::1]:0") {
+        let port = l6.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let _c = l6.accept();
+            std::thread::sleep(Duration::from_secs(5));
+        });
+        tput(&mut ch, Frame::Open { stream: 9, port });
+        assert_eq!(tframe(&mut ch), Frame::Opened { stream: 9 });
+    }
+    let id = welcome["device"].as_str().unwrap();
+    assert!(registry::revoke(&env.dir, id).unwrap());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "tunnel still open after a revoke"
+        );
+        match ch.recv() {
+            Recv::Closed => break,
+            Recv::Msg(_) | Recv::Idle | Recv::Alive | Recv::Partial => {}
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
+/// A local server that ends its side at once and reads afterwards still gets everything the
+/// phone sent before its `end`: a stream ended both ways lets its writer finish, only a reset
+/// cuts it.
+#[test]
+fn a_tunnel_stream_ended_both_ways_delivers_what_was_sent() {
+    use std::io::Read;
+    let env = start(|_| {});
+    let (key, _session, _) = env.pair(Permission::Operate);
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    let (got_tx, got_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (mut s, _) = l.accept().unwrap();
+        s.shutdown(std::net::Shutdown::Write).unwrap();
+        // reads only once the phone has ended too
+        std::thread::sleep(Duration::from_millis(1500));
+        let mut all = Vec::new();
+        let _ = s.read_to_end(&mut all);
+        let _ = got_tx.send(all.len());
+    });
+    let mut ch = env.handshake(&key, &tunnel_hello()).unwrap();
+    tput(&mut ch, Frame::Open { stream: 1, port });
+    assert_eq!(tframe(&mut ch), Frame::Opened { stream: 1 });
+    // the server's end arrives first
+    assert_eq!(tframe(&mut ch), Frame::End { stream: 1 });
+    // within the window, as a phone does, until the writes stall (the server's buffers full):
+    // what the gateway still holds when the phone ends must reach the server
+    let (mut sent, mut acked) = (0u64, 0u64);
+    let mut quiet = Instant::now();
+    while quiet.elapsed() < Duration::from_millis(400) {
+        if sent - acked + MAX_DATA as u64 <= u64::from(WINDOW) {
+            tput(
+                &mut ch,
+                Frame::Data {
+                    stream: 1,
+                    data: vec![b'q'; MAX_DATA],
+                },
+            );
+            sent += MAX_DATA as u64;
+        }
+        if let Recv::Msg(m) = ch.recv()
+            && let Frame::Ack { bytes, .. } = Frame::decode(&m).unwrap()
+        {
+            acked += u64::from(bytes);
+            quiet = Instant::now();
+        }
+    }
+    assert!(
+        sent > acked,
+        "the writes never stalled: {sent} sent, all acknowledged"
+    );
+    tput(&mut ch, Frame::End { stream: 1 });
+    let got = got_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(got as u64, sent);
+}
+
+/// Many small frames at once (a page's WebSocket messages), well within the window, all reach
+/// the local server: the window counts bytes, never frames.
+#[test]
+fn a_tunnel_stream_takes_a_burst_of_small_frames() {
+    use std::io::Read;
+    let env = start(|_| {});
+    let (key, _session, _) = env.pair(Permission::Operate);
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    let (got_tx, got_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (mut s, _) = l.accept().unwrap();
+        // slow to start reading, as a busy server is
+        std::thread::sleep(Duration::from_millis(300));
+        let mut all = Vec::new();
+        let _ = s.read_to_end(&mut all);
+        let _ = got_tx.send(all.len());
+    });
+    let mut ch = env.handshake(&key, &tunnel_hello()).unwrap();
+    tput(&mut ch, Frame::Open { stream: 1, port });
+    assert_eq!(tframe(&mut ch), Frame::Opened { stream: 1 });
+    for _ in 0..200 {
+        tput(
+            &mut ch,
+            Frame::Data {
+                stream: 1,
+                data: vec![b'm'],
+            },
+        );
+    }
+    tput(&mut ch, Frame::End { stream: 1 });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        match ch.recv() {
+            Recv::Msg(m) => {
+                let f = Frame::decode(&m).unwrap();
+                assert!(!matches!(f, Frame::Reset { .. }), "reset: {f:?}");
+            }
+            Recv::Closed => break,
+            _ => {}
+        }
+        if let Ok(n) = got_rx.try_recv() {
+            assert_eq!(n, 200);
+            return;
+        }
+    }
+    panic!("the server never got the burst");
 }

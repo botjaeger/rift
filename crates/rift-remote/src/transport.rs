@@ -296,8 +296,17 @@ impl<S: Read + Write> Channel<S> {
     /// [`Channel::send`] in chunks of at most `chunk` bytes (≤
     /// [`MAX_CHUNK`]); tests and interop tools use small ones.
     pub fn send_chunked(&mut self, json: &str, chunk: usize) -> bool {
-        let Ok(frames) = seal_with(&mut self.noise, json.as_bytes(), chunk.clamp(1, MAX_CHUNK))
-        else {
+        self.send_message(json.as_bytes(), chunk)
+    }
+
+    /// Send one binary message (a tunnel frame), chunked and encrypted
+    /// like a JSON one. False when the socket or the cipher failed.
+    pub fn send_bytes(&mut self, msg: &[u8]) -> bool {
+        self.send_message(msg, MAX_CHUNK)
+    }
+
+    fn send_message(&mut self, msg: &[u8], chunk: usize) -> bool {
+        let Ok(frames) = seal_with(&mut self.noise, msg, chunk.clamp(1, MAX_CHUNK)) else {
             return false;
         };
         for f in frames {

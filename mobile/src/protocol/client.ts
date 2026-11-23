@@ -244,6 +244,16 @@ export interface ClientOptions {
   retry?: boolean;
 }
 
+/** [RiftClient.tunnelTarget]: how a tunnel connection reaches the session's computer. */
+export interface TunnelTarget {
+  path: Endpoint;
+  identity: KeyPair;
+  gatewayKey: Uint8Array;
+  hello: () => Omit<ClientHello, "v">;
+  randomBytes: RandomBytes;
+  socket: SocketFactory;
+}
+
 /** Backoff before reconnect round `attempt` (0-based): 0.5 s doubling to 10 s, equal jitter. */
 export function backoffDelay(attempt: number, random: () => number = Math.random): number {
   const ceiling = Math.min(BACKOFF_CAP_MS, BACKOFF_BASE_MS * 2 ** Math.min(attempt, 30));
@@ -404,6 +414,23 @@ export class RiftClient {
     this.random = opts.random ?? Math.random;
     this.retry = opts.retry ?? true;
     this.state = { ...this.state, paths: this.freshPaths() };
+  }
+
+  /**
+   * What a tunnel connection (src/tunnel) needs to reach the same computer the same way: the
+   * path this session is on and the keys. Null while the session is not connected.
+   */
+  tunnelTarget(): TunnelTarget | null {
+    const path = this.state.path;
+    if (!this.authed || this.state.status !== "open" || !path) return null;
+    return {
+      path,
+      identity: this.identity,
+      gatewayKey: this.gatewayKey,
+      hello: this.hello,
+      randomBytes: this.randomBytes,
+      socket: this.makeSocket,
+    };
   }
 
   private freshPaths(): PathStatus[] {

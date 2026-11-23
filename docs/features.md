@@ -1128,7 +1128,12 @@ Each becomes a `rift://action/new_tab` link (`new_window` with
   saves the terminal's modes (alternate screen, mouse reporting, bracketed
   paste, keyboard protocol) and the shell's screen under the program before
   the restart, restores them before the replay when the replay starts inside
-  the program's run, and makes the program draw its screen once more.
+  the program's run, and makes the program draw its screen once more. It also
+  saves the program's screen as shown and how much output it had read: the
+  pane comes back at that size with that picture, and the replay goes on
+  from that point, so a program that repaints only what changes and ignores
+  being told the same size twice (an agent's renderer) comes back whole,
+  not as its last changes on an empty screen.
 - Panes: split right/down, directional focus (⌥⌘arrows), keyboard resize
   (⌃⌘arrows), drag resize, zoom toggle (⇧⌘⏎), close (⌃⇧W/⌘W or the title
   bar's × — last pane closes the tab, last tab exits).
@@ -2015,7 +2020,7 @@ on the desktop (also for shells a phone started while no window is open).
   one computer paired, an agent's question answers in place on its tab. A cold
   start reopens the pane shown last. The pane's header names the computer: a
   tap opens the computer menu (every paired computer with where it is, the one on screen
-  ticked, *Connection*, *All portals*); *Connection* lists each path in one line (*192.168.1.15 ·
+  ticked, *Connection*, *Open a local page* where the computer serves it, *All portals*); *Connection* lists each path in one line (*192.168.1.15 ·
   in use · 2 ms*, the one in use ticked), *Connection speed* (a page with the live round trip,
   traffic each way, screen updates per second, and the measured delay from typing or scrolling,
   after a second without input, to the next screen update) and *Test again*
@@ -2116,6 +2121,18 @@ on the desktop (also for shells a phone started while no window is open).
   (`git checkout`) and the code review panel's changed files, each with its
   diff; the names are shell-quoted; it shows the folder and branch the
   desktop computes for its own chips (feature `git`).
+- **The computer's local pages on the phone** (feature `tunnel`). A tap on a
+  `localhost` link in a pane (`http://localhost:5173`, `127.0.0.1`, `0.0.0.0`,
+  `[::1]`, any port) opens that page of the computer in the phone's browser
+  sheet (Safari on iPhone, the default browser's custom tab on Android), over
+  the same connection as the pane, Wi-Fi or relay. The computer menu's *Open a
+  local page* lists the pages the open pane printed (a dev server's "Local:"
+  line) and takes any port. The app listens on the phone's own loopback, on the
+  same port number when it is free; each connection the browser makes there is
+  carried to that port on the computer's loopback, never to another machine.
+  Only a phone paired with full control (a view-only phone is refused), and
+  only from a computer whose Rift serves it; the listener stops when the sheet
+  closes. Live reload over a WebSocket works like any other connection.
 - **Themes on the phone.** The phone draws with the computer's theme (feature
   `theme`: the welcome carries the theme the windows use, and a change in
   Settings, `config.toml` or the system's light or dark reaches the phone
