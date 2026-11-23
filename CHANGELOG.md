@@ -8,6 +8,28 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.34.0 — 2026-11-23
+
+Open the pages your computer serves on localhost from your phone, and
+full-screen programs survive an update restart whole.
+
+### New
+
+- **Your computer's local pages on your phone** — a dev server's
+  `http://localhost:5173` (or any port) opens in your phone's browser, over the
+  same connection as your panes, at home or through the relay. It reaches only
+  your computer, and only phones paired with full control. Needs the phone app
+  0.10.0.
+
+### Fixed
+
+- **Full-screen programs after an update** — Claude Code and other full-screen
+  programs no longer come back with empty rows after Rift restarts for an
+  update: the screen comes back as you left it.
+- **Copying while another app uses the clipboard** — a copy no longer fails with
+  "Could not copy" when a clipboard manager or another app touches the
+  clipboard at the same moment.
+
 ## 0.33.1 — 2026-11-23
 
 ### Fixed

@@ -6,6 +6,18 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.10.0 — 2026-11-23
+
+Open the pages your computer serves on localhost, right from your phone.
+
+### New
+
+- **Your computer's local pages** — tap a `localhost` link in a pane (a dev
+  server's "Local: http://localhost:5173/"), or pick *Open a local page* in the
+  computer menu, and the page opens in your browser, live reload included. It
+  works at home and through the relay, for phones paired with full control, with
+  Rift 0.34.0 or later on the computer.
+
 ## 0.9.0 · update 13 — 2026-11-22
 
 Links in command output open with a tap, Change folder browses folders, and copying says it worked.
