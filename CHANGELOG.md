@@ -8,6 +8,12 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.33.1 — 2026-11-23
+
+### Fixed
+
+- **Reconnect works with a click** — When a pane running Claude Code (or another program that uses the mouse) lost the session service, clicking Reconnect did nothing. The click now reaches the button, and Restart works the same way after a program ends. You can also select the pane's last output again.
+
 ## 0.33.0 — 2026-11-22
 
 Lets the phone app browse your folders.
