@@ -6,6 +6,15 @@ build (`## <version> — <YYYY-MM-DD>`) or an over-the-air update to one
 message its download carries. Items use `### New`, `### Improved` or
 `### Fixed` sections of `- **Title** — text`.
 
+## 0.10.0 · update 2 — 2026-11-23
+
+Local pages stay open on iPhone.
+
+### Fixed
+
+- **Open a local page** — on iPhone, the page opened from "Open a local page"
+  no longer closes again right away.
+
 ## 0.10.0 · update 1 — 2026-11-23
 
 Long Claude Code replies show whole when you scroll up.
