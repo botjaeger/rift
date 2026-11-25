@@ -8,6 +8,33 @@ Format: `## <version> — <YYYY-MM-DD>`, an optional one-paragraph summary, then
 `### New`, `### Improved` or `### Fixed` sections of `- **Title** — text`
 items.
 
+## 0.35.0 — 2026-11-25
+
+Rift comes to Windows as a beta download, and what you type while a shell is
+still starting is no longer lost.
+
+### New
+
+- **Rift for Windows (beta)** — a zip for Windows 10 (1809) or newer: unzip it
+  and run Rift.exe. The tab strip is the title bar, with Windows' own
+  minimise, maximise and close buttons, snap layouts and window dragging.
+  PowerShell and Command Prompt get command blocks, your installed shells are
+  in the new-tab menu with their own icons, and window transparency works. A
+  shield marked "Admin" shows when Rift runs as
+  administrator. Not in the beta yet: updating from inside Rift, shells that
+  outlive Rift, the phone app and `rift-terminal ctl`.
+- **Ctrl shortcuts on Linux** — every action that only had a ⌘ shortcut now has
+  a Ctrl one on Linux too (the same keys as on Windows), and shortcuts show as
+  words: Ctrl+Shift+P instead of ⌃⇧P.
+
+### Fixed
+
+- **Typing while a shell starts** — what you type before the shell's first
+  prompt now waits in the command line instead of disappearing, and a command
+  you already sent with Enter runs as soon as the shell is ready.
+- **A tab's hover card** — no longer repeats the shell's own path as the
+  program's title.
+
 ## 0.34.0 — 2026-11-23
 
 Open the pages your computer serves on localhost from your phone, and
