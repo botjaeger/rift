@@ -87,6 +87,7 @@ impl Page {
             Page::General => "Shell and session behavior.",
             Page::Actions => "Named command sequences and shortcuts. Saving never runs an action.",
             Page::Profiles => {
+                // shown through words(): "Alt+↑ Alt+↓" off macOS
                 "The shells and programs tabs open with. Drag a row (or ⌥↑ ⌥↓) to reorder."
             }
             Page::Appearance => "Fonts, cursor, window and theme. Changes apply as you make them.",
@@ -306,6 +307,12 @@ impl DevicePath {
             DevicePath::Relay => "Connected through the relay",
         }
     }
+}
+
+/// Settings prose that names keys with macOS glyphs, as this platform
+/// writes them ("⌃Tab switches" is "Ctrl+Tab switches" off macOS).
+fn words(text: &str) -> std::borrow::Cow<'_, str> {
+    rift_core::keybindings::words_for(text, rift_core::keybindings::Platform::current())
 }
 
 /// A device's reported platform as people write it (`ios` is "iOS");
@@ -1295,6 +1302,9 @@ pub fn render(
     } else {
         (state.page.label().to_string(), state.page.subtitle())
     };
+    // "⌥↑ ⌥↓" reads "Alt+↑ Alt+↓" off macOS
+    let subtitle = words(subtitle);
+    let subtitle = subtitle.as_ref();
     let body_top = top + 28.0;
     // everything from the title down scrolls and clips to the body
     let text_start = layer.texts.len();
@@ -5226,7 +5236,7 @@ fn appearance_page(form: &mut Form, config: &Config) {
     let y = form.y;
     form.segment(
         y,
-        "⌃Tab switches",
+        &words("⌃Tab switches"),
         &["In order", "Last used first"],
         usize::from(config.tab_switch_order == rift_core::TabSwitchOrder::Mru),
         "tab_switch_order",
@@ -5519,7 +5529,11 @@ fn terminal_page(form: &mut Form, config: &Config) {
     form.segment_desc(
         y,
         "Clicking a link",
-        "Show where it goes first, or open it at once, file paths in their default app (⌘-click always opens)",
+        // ⌘-click, Ctrl-click off macOS (`input::primary`)
+        &format!(
+            "Show where it goes first, or open it at once, file paths in their default app ({}-click always opens)",
+            rift_core::keybindings::Platform::current().primary_name()
+        ),
         &["Show it", "Open it"],
         usize::from(config.link_click.trim() == "open"),
         "link_click",
@@ -5541,7 +5555,7 @@ fn terminal_page(form: &mut Form, config: &Config) {
         } else {
             "Ctrl-scroll zooms the font"
         },
-        "With ⇧ it changes the window opacity",
+        &words("With ⇧ it changes the window opacity"),
         config.wheel_zoom,
         "wheel_zoom",
     );
@@ -5562,7 +5576,7 @@ fn terminal_page(form: &mut Form, config: &Config) {
         y,
         &TextRow {
             label: "Word delimiters",
-            desc: "Characters that also end a word, for double-click and ⌥← ⌥→",
+            desc: &words("Characters that also end a word, for double-click and ⌥← ⌥→"),
             value: &config.word_delimiters,
             placeholder: "None",
             id: "word_delimiters",
@@ -5698,7 +5712,7 @@ fn features_page(form: &mut Form, config: &Config) {
     let y = form.y;
     form.segment_desc(
         y,
-        "⌃R, ⌃T and ⌥C run",
+        &words("⌃R, ⌃T and ⌥C run"),
         "fzf or atuin, where the shell binds them",
         &["The shell's", "Rift's"],
         usize::from(config.shell_widgets == rift_core::ShellWidgets::Rift),
@@ -5715,7 +5729,7 @@ fn features_page(form: &mut Form, config: &Config) {
     form.segment_desc(
         y,
         "Tab key",
-        "ghost text goes word by word; ⌃Space completes",
+        &words("ghost text goes word by word; ⌃Space completes"),
         &["Completions", "Ghost text"],
         usize::from(config.tab_behavior == rift_core::TabBehavior::Autosuggestion),
         "tab_behavior",
@@ -5894,10 +5908,12 @@ fn features_page(form: &mut Form, config: &Config) {
         },
     );
     let y = form.y;
+    // ⌘⏎, Ctrl+Enter off macOS (`composer::composer_key`)
+    let (enter, cmd_enter) = (words("⏎"), rift_core::keybindings::primary_hint("enter"));
     form.segment(
         y,
         "Rich input sends with",
-        &["⏎", "⌘⏎"],
+        &[&enter, &cmd_enter],
         match config.rich_input_submit {
             rift_core::RichInputSubmit::Enter => 0,
             rift_core::RichInputSubmit::CmdEnter => 1,
@@ -6414,6 +6430,7 @@ pub fn filtered_bindings(keymap: &Keymap, filter: &str) -> Vec<(String, String, 
                 || action.replace('_', " ").contains(&q)
                 || action.contains(&q)
                 || chips.concat().to_lowercase().contains(&q)
+                || chips.join("+").to_lowercase().contains(&q)
         })
         .collect()
 }
@@ -6521,7 +6538,7 @@ fn keybindings_page(
             );
         }
         // the action name stops before the shortcut caps / recording hint
-        let hint = "Press a shortcut · Esc cancels · ⌫ unbinds";
+        let hint = &*words("Press a shortcut · Esc cancels · ⌫ unbinds");
         let caps_w: f32 = chips
             .iter()
             .map(|k| {

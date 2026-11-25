@@ -265,6 +265,8 @@ pub fn key_cap(
     x: f32,
     cy: f32,
 ) -> f32 {
+    // a cap written as a macOS glyph reads as a word off macOS (⏎ → Enter)
+    let key = rift_core::keybindings::cap_for(key, rift_core::keybindings::Platform::current());
     let kw = engine.measure(key, 10.5, FONT_SANS, Weight::MEDIUM);
     let w = (kw + 10.0).max(18.0);
     layer.bordered(
@@ -295,7 +297,13 @@ pub fn key_hints(
     right: f32,
 ) {
     let mut kx = x;
+    let platform = rift_core::keybindings::Platform::current();
     for (keys, label) in hints {
+        // caps are written as macOS glyphs: words off macOS (⏎ → Enter)
+        let keys: Vec<&str> = keys
+            .iter()
+            .map(|k| rift_core::keybindings::cap_for(k, platform))
+            .collect();
         let lw = engine.measure(label, 11.5, FONT_SANS, Weight::NORMAL);
         let keys_w: f32 = keys
             .iter()
@@ -615,6 +623,78 @@ pub fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Shortcut text written with macOS glyphs (⌃ ⌥ ⇧ ⌘) reads as words
+    /// off macOS: a literal must go through `words` / `cap_for` / `hint`,
+    /// be a key cap drawn by `key_hints` / `key_cap`, or sit in a
+    /// macOS-only branch. A new bare "⌘S" fails here.
+    #[test]
+    fn glyph_shortcuts_are_translated_off_macos() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    out.push(p);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        walk(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
+        let mut bare = Vec::new();
+        for f in files {
+            let src = std::fs::read_to_string(&f).unwrap();
+            let lines: Vec<&str> = src.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                let t = line.trim_start();
+                if t.starts_with("#[cfg(test)]") {
+                    break; // tests assert on the text itself
+                }
+                if t.starts_with("//") {
+                    continue;
+                }
+                // chips joined by hand read "CtrlShiftD" off macOS
+                if line.contains(".chips().concat()") {
+                    bare.push(format!(
+                        "{}:{}: {t} (use Binding::label)",
+                        f.display(),
+                        i + 1
+                    ));
+                }
+                // the glyphs inside a string literal
+                let in_literal = line
+                    .split('"')
+                    .skip(1)
+                    .step_by(2)
+                    .any(|s| s.contains(['⌃', '⌥', '⇧', '⌘']));
+                if !in_literal {
+                    continue;
+                }
+                // on the line or the one before (a wrapped call, or a
+                // comment naming where it is translated)
+                let translated = lines[i.saturating_sub(1)..=i].iter().any(|l| {
+                    ["words(", "cap_for(", "hint(", "(&["]
+                        .iter()
+                        .any(|w| l.contains(w))
+                });
+                let mac_branch = lines[i.saturating_sub(3)..=i]
+                    .iter()
+                    .any(|l| l.contains("cfg!(target_os = \"macos\")"));
+                if !translated && !mac_branch {
+                    bare.push(format!("{}:{}: {}", f.display(), i + 1, t));
+                }
+            }
+        }
+        assert!(
+            bare.is_empty(),
+            "untranslated glyph shortcuts:\n{}",
+            bare.join("\n")
+        );
+    }
 
     fn c(insert: &str, source: &'static str) -> Completion {
         Completion {

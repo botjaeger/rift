@@ -32,6 +32,60 @@ impl App {
         shown(self.config.tab_layout, self.config.tab_bar, fullscreen)
     }
 
+    /// Windows: the window buttons the strip draws, while it is the title
+    /// bar (`crate::win_frame`). `None` elsewhere, in the drop-down window
+    /// (no frame) and while the strip is hidden (Windows' caption is back).
+    pub(super) fn caption_buttons(&self) -> Option<crate::win_frame::Caption> {
+        #[cfg(windows)]
+        if self.win.dropdown.is_none()
+            && self.strip_shown()
+            && let Some(window) = &self.win.window
+            && window.fullscreen().is_none()
+        {
+            return Some(crate::win_frame::caption(window));
+        }
+        None
+    }
+
+    /// Windows: after a frame is laid out, tell the window frame which
+    /// parts of the strip are Rift's (`self.win.hits`) and the rest the
+    /// caption, and give the frame the theme's colours.
+    #[cfg(windows)]
+    pub(super) fn sync_caption(&self, w: f32, scale: f32) {
+        use crate::win_frame::{Regions, button_rects, to_physical};
+        let Some(window) = &self.win.window else {
+            return;
+        };
+        if self.win.dropdown.is_some() {
+            return;
+        }
+        // full screen has no window frame: no buttons, no resize band
+        let regions = if self.strip_shown() && window.fullscreen().is_none() {
+            let bar = tabbar::bar_h();
+            Regions {
+                strip_h: (bar * scale).round() as i32,
+                buttons: button_rects(w, bar).map(|r| to_physical(r, scale)),
+                controls: self
+                    .win
+                    .hits
+                    .iter()
+                    .filter(|h| h.rect[1] < bar && !matches!(h.target, ClickTarget::WindowDrag))
+                    .map(|h| to_physical(h.rect, scale))
+                    .collect(),
+            }
+        } else {
+            Regions::default()
+        };
+        crate::win_frame::set_regions(window, regions);
+        let c = self.theme.bg_chrome;
+        let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+        crate::win_frame::set_theme(
+            window,
+            !self.theme.is_light(),
+            [byte(c.r), byte(c.g), byte(c.b)],
+        );
+    }
+
     /// Height the strip takes from the top of the window.
     pub(super) fn bar_h(&self) -> f32 {
         if self.strip_shown() {

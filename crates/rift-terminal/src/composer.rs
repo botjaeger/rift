@@ -165,10 +165,11 @@ pub fn composer_key(
     match key {
         Key::Named(NamedKey::Escape) if mods.is_empty() => Some(ComposerKey::Close),
         Key::Named(NamedKey::Enter) => {
-            if mods.shift_key() || mods.alt_key() || mods.control_key() {
-                Some(ComposerKey::Newline)
-            } else if mods.super_key() {
+            // ⌘⏎ sends (Ctrl+Enter off macOS); any other modifier: a newline
+            if crate::input::primary_only(mods) && !mods.shift_key() {
                 Some(ComposerKey::Send)
+            } else if mods.shift_key() || mods.alt_key() || mods.control_key() || mods.super_key() {
+                Some(ComposerKey::Newline)
             } else {
                 Some(match submit {
                     RichInputSubmit::Enter => ComposerKey::Send,
@@ -181,10 +182,21 @@ pub fn composer_key(
 }
 
 /// The hint row: what sends, what breaks the line, what closes.
-pub fn hint(submit: RichInputSubmit) -> &'static str {
+pub fn hint(submit: RichInputSubmit) -> String {
+    use rift_core::keybindings::{Platform, cap_for, hint as keys, primary_hint};
+    let esc = cap_for("esc", Platform::current());
     match submit {
-        RichInputSubmit::Enter => "⏎ send   ⇧⏎ new line   esc close",
-        RichInputSubmit::CmdEnter => "⌘⏎ send   ⏎ new line   esc close",
+        RichInputSubmit::Enter => format!(
+            "{} send   {} new line   {esc} close",
+            keys("enter"),
+            keys("shift+enter")
+        ),
+        // ⌘⏎, Ctrl+Enter off macOS (`composer_key`)
+        RichInputSubmit::CmdEnter => format!(
+            "{} send   {} new line   {esc} close",
+            primary_hint("enter"),
+            keys("enter")
+        ),
     }
 }
 
@@ -239,7 +251,16 @@ mod tests {
             Some(ComposerKey::Newline)
         );
         assert_eq!(
-            composer_key(&enter, ModifiersState::SUPER, c),
+            // ⌘⏎, Ctrl+Enter off macOS
+            composer_key(
+                &enter,
+                if cfg!(target_os = "macos") {
+                    ModifiersState::SUPER
+                } else {
+                    ModifiersState::CONTROL
+                },
+                c
+            ),
             Some(ComposerKey::Send)
         );
         let esc = Key::Named(NamedKey::Escape);

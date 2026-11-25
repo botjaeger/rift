@@ -174,11 +174,14 @@ To run a release:
 - **macOS** 11 or newer (Apple silicon or Intel).
 - **Linux** x86_64 with a Vulkan, OpenGL or software (Mesa) GPU driver, on
   X11 or Wayland.
-- A shell: zsh, bash, fish or PowerShell. Command blocks need one of these;
-  any other shell still runs as a plain terminal.
-
-Windows (10 1809 or newer) builds from source and is being ported; there is
-no Windows release yet ([development notes](docs/development.md#windows-in-progress)).
+- **Windows** 10 (1809) or newer, x64 (Windows on ARM runs it too): a beta.
+  Unzip `Rift-VERSION-windows-x86_64.zip` and run `Rift.exe`; it is not
+  signed yet, so the first launch asks once (More info › Run anyway). Not in
+  the beta: updates from inside Rift (download the next zip), shells that
+  outlive Rift, the phone app and `rift-terminal ctl`
+  ([development notes](docs/development.md#windows-in-progress)).
+- A shell: zsh, bash, fish, PowerShell or Command Prompt. Command blocks
+  need one of these; any other shell still runs as a plain terminal.
 
 To build from source, additionally:
 

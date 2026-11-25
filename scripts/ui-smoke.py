@@ -46,6 +46,12 @@ def remove_launchd_jobs():
             pass
 if sys.platform == "darwin":
     atexit.register(remove_launchd_jobs)
+# shortcut text as the app writes it: glyphs on macOS, words elsewhere
+MAC = sys.platform == "darwin"
+# the gestures' modifier (input::primary): ⌘ on macOS, Ctrl elsewhere
+P = "cmd" if MAC else "ctrl"
+PRIMARY_CLICK = "⌘ Click" if MAC else "Ctrl Click"
+SHIFT_RIGHT = "⇧→" if MAC else "Shift+→"
 print(f"UI artifacts: {scratch}", flush=True)
 cfg = scratch / "cfg" / "rift"
 data = scratch / "data" / "rift"
@@ -1964,8 +1970,11 @@ for sub in ("cfg/rift", "data"):
 (ca / "cfg/rift/config.toml").write_text(
     'shell = "/bin/bash"\nrestore_session = false\ndurable_sessions = false\n'
     'sync_os_theme = false\n')
-ca_keys = ["cmd+left", "cmd+up", "cmd+right", "cmd+down", "R7 left", "R3 alt+left",
-           "shift+cmd+up", "cmd+up"]
+# ⌘↑ / ⌘↓ in the command are Ctrl+Home / Ctrl+End off macOS (Ctrl+↑ / ↓
+# select blocks there); ⌘← / ⌘→ are the editor's Super keys everywhere
+CMD_START, CMD_END = ("cmd+up", "cmd+down") if MAC else ("ctrl+home", "ctrl+end")
+ca_keys = ["cmd+left", CMD_START, "cmd+right", CMD_END, "R7 left", "R3 alt+left",
+           f"shift+{CMD_START}", f"{P}+up"]
 ca_steps = ["resize 1200 800", "wait_prompt", "type echo a\\n", "wait 400", "type echo b\\n",
             "wait 400", "type echo one", "key shift+enter", "type echo two",
             "key shift+enter", "type echo three", f"dump {ca}/0.txt"]
@@ -1974,8 +1983,8 @@ for i, k in enumerate(ca_keys, 1):
                  f"dump {ca}/{i}.txt"]
 # walking the blocks (one selected) from the first line of a multi-line
 # command: ⌘↓ steps to the next block, never into the command
-ca_steps += ["key cmd+up", f"dump {ca}/10.txt", "key cmd+down", f"dump {ca}/11.txt"]
-ca_steps += ["key ctrl+u", "type ab", "keyrepeat 2 cmd+up", f"dump {ca}/9.txt", "quit"]
+ca_steps += [f"key {P}+up", f"dump {ca}/10.txt", f"key {P}+down", f"dump {ca}/11.txt"]
+ca_steps += ["key ctrl+u", "type ab", f"keyrepeat 2 {P}+up", f"dump {ca}/9.txt", "quit"]
 (ca / "t.rift").write_text("\n".join(ca_steps) + "\n")
 with (ca / "app.log").open("w") as log:
     rc = subprocess.run([str(binary), "--script", str(ca / "t.rift"), "--headless"],
@@ -2975,7 +2984,7 @@ def fl_at(i, needle):
 fl_steps = []
 for i, needle in [(0, "main"), (1, "App"), (2, "App"), (3, "x.ts"), (4, "x.py"), (5, "m.py"),
                   (6, "lib"), (8, "nope")]:
-    fl_steps += ["mods cmd", f"click {fl_at(i, needle)}", "mods none", "wait 300"]
+    fl_steps += [f"mods {P}", f"click {fl_at(i, needle)}", "mods none", "wait 300"]
 fl_steps += [f"rclick {fl_at(1, 'App')}", "wait 200", f"dump {fl}/rpath.txt",
              "key down", "key down", "key enter", "wait 200", f"dump {fl}/rpath-copied.txt",
              f"rclick {fl_at(7, 'example')}", "wait 200", f"dump {fl}/rurl.txt",
@@ -3184,7 +3193,7 @@ def run_link(mode):
         (lk / f"{mode}.log").read_text().count("headless: not opening https://example.com/x")
 (hover, click, drag), opened = run_link("prompt")
 assert "tooltip=Some(" not in hover, hover
-assert 'tooltip=Some("https://example.com/x ⌘ Click")' in click, click
+assert f'tooltip=Some("https://example.com/x {PRIMARY_CLICK}")' in click, click
 assert "selection=true" in drag and opened == 0, (drag, opened)
 (hover, click, drag), opened = run_link("open")
 assert "Headless: not opening https://example.com/x" in click and opened == 1, (click, opened)
@@ -3234,7 +3243,7 @@ fp_log = run_fp("click", [f"move {fp_row[0]}", "wait 100", f"dump {fp}/hover.txt
 assert "mouse_cursor=Pointer" in (fp / "hover.txt").read_text()
 assert fp_log.count(f"headless: not opening {fp_whole}\n") == 2, fp_log[-3000:]
 assert fp_log.count("headless: not opening") == 2, fp_log[-3000:]
-run_fp("cmd", ["mods cmd", f"click {fp_row[1]}", "mods none", "wait 800",
+run_fp("cmd", [f"mods {P}", f"click {fp_row[1]}", "mods none", "wait 800",
                f"dump {fp}/viewer.txt", "key cmd+f", "wait 200", f"dump {fp}/find.txt"])
 fp_viewer = (fp / "viewer.txt").read_text()
 assert f'viewer=Some("{fp_whole}")' in fp_viewer, fp_viewer[:2000]
@@ -3280,8 +3289,8 @@ opened = run_alt_link("prompt", [
     f"dump {lk}/alt-beside.txt"])
 hover = (lk / "alt-hover.txt").read_text()
 assert "alt=true" in hover and "mouse_cursor=Pointer" in hover, hover
-assert 'tooltip=Some("https://example.com/alt ⌘ Click")' in hover, hover
-assert 'tooltip=Some("https://example.com/alt ⌘ Click")' in (lk / "alt-click.txt").read_text()
+assert f'tooltip=Some("https://example.com/alt {PRIMARY_CLICK}")' in hover, hover
+assert f'tooltip=Some("https://example.com/alt {PRIMARY_CLICK}")' in (lk / "alt-click.txt").read_text()
 # only the click beside the link was reported (the program echoes it)
 beside = (lk / "alt-beside.txt").read_text()
 echo = re.search(r"^ +\| link https://example\.com/alt ok(.*)$", beside, re.M)[1]
@@ -3887,7 +3896,7 @@ assert gc_ghost("hint-typed") == "atus", gc_ghost("hint-typed")
 assert 'Button "Accept suggestion key: →"' in gct("hint-typed"), gct("hint-typed")[-3000:]
 # the ✕ is off by default
 assert "Ignore this suggestion" not in gct("hint-typed")
-assert 'menu_items=["→", "Tab", "⇧→", "Custom…"] menu_selected=Some(0)' in gct("hint-menu"), \
+assert f'menu_items=["→", "Tab", "{SHIFT_RIGHT}", "Custom…"] menu_selected=Some(0)' in gct("hint-menu"), \
     re.search(r"^menu_items=.*$", gct("hint-menu"), re.M)
 assert 'Menu "Accept suggestion key"' in gct("hint-menu") \
     and 'MenuItemRadio "→" toggled=True' in gct("hint-menu") \
@@ -3899,7 +3908,7 @@ assert gc_editor("hint-tab-accepts") == "git status", gc_editor("hint-tab-accept
 # ⇧→: written as the binding; it takes the ghost, and selects with none to take
 gc_run("shift", [
     "type git st", "wait 600",
-    "a11y click Accept suggestion key: →", "wait 200", "a11y click ⇧→", "wait 600",
+    "a11y click Accept suggestion key: →", "wait 200", f"a11y click {SHIFT_RIGHT}", "wait 600",
     f"dump {gc}/shift-picked.txt",
     "key shift+right", "wait 300", f"dump {gc}/shift-accepts.txt",
     "key ctrl+u", "type abc", "wait 300", "key left", "key left", "key shift+right", "type X",
@@ -3907,7 +3916,7 @@ gc_run("shift", [
 ])
 assert gc_toml().get("keybindings", {}).get("accept_autosuggestion") == "shift+right", gc_toml()
 assert gc_toml().get("tab_behavior", "completions") == "completions", gc_toml()
-assert 'Button "Accept suggestion key: ⇧→"' in gct("shift-picked"), gct("shift-picked")[-3000:]
+assert f'Button "Accept suggestion key: {SHIFT_RIGHT}"' in gct("shift-picked"), gct("shift-picked")[-3000:]
 assert gc_editor("shift-accepts") == "git status", gc_editor("shift-accepts")
 assert gc_editor("shift-selects") == "aXc", gc_editor("shift-selects")
 # the hint off: no chip
@@ -6815,7 +6824,8 @@ tabs = pfd_tabs("tabs")
 assert [t[:2] for t in tabs] == [smoke_tab] * 4, tabs
 assert [t[2].rsplit("/", 1)[-1] for t in tabs] == ["dir c", "dir c", "dir a", "dir a"], tabs
 pfd_pal = (pfd / "palette.txt").read_text()
-assert 'ListBoxOption "New tab: smoke, ⌃ ⇧ 1"' in pfd_pal, pfd_pal[-2500:]
+pfd_keys = "⌃ ⇧ 1" if MAC else "Ctrl Shift 1"
+assert f'ListBoxOption "New tab: smoke, {pfd_keys}"' in pfd_pal, pfd_pal[-2500:]
 assert re.search(r'ListBoxOption "Split right: smoke"( |$)', pfd_pal, re.M), pfd_pal[-2500:]
 win = (pfd / "window.txt").read_text()
 assert re.search(r"^windows=2 ", win, re.M), win[:600]
@@ -6996,7 +7006,7 @@ tg_run("groups", [
     f"dump {tg}/pinned.txt",
     "key cmd+w", "wait 300", f"dump {tg}/pin-confirm.txt", "key escape", "wait 200",
     # pinned 114..158, then 200 px tabs
-    "mods cmd", "click 250 17", "click 450 17", "mods none", "wait 200",
+    f"mods {P}", "click 250 17", "click 450 17", "mods none", "wait 200",
     f"dump {tg}/picked.txt",
     "rclick 450 17", "wait 200", "a11y click Group picked tabs", "wait 300",
     f"dump {tg}/grouped.txt",
@@ -7165,9 +7175,9 @@ for sub in ("cfg/rift", "data"):
 (pm / "t.rift").write_text("\n".join([
     "resize 1000 600", "wait_prompt", "type printf '\\\\e[?1000h\\\\e[?1006h'; exit 3\\n", "wait 1200",
     f"dump {pm}/kept.txt",
-    # the bar is centred at the pane's foot (640 wide, 36 high, 10 up):
-    # Restart sits left of Close
-    "click 690 572", "wait_prompt", "wait 500", f"dump {pm}/clicked.txt", "quit"]) + "\n")
+    # a real click on the bar's Restart, found by its label (the bar's
+    # layout follows its shortcut text, which differs per platform)
+    "click_on Restart", "wait_prompt", "wait 500", f"dump {pm}/clicked.txt", "quit"]) + "\n")
 with (pm / "app.log").open("w") as log:
     rc = subprocess.run([str(binary), "--script", str(pm / "t.rift"), "--headless"],
                         env=dict(env, XDG_CONFIG_HOME=str(pm / "cfg"), XDG_DATA_HOME=str(pm / "data"),
@@ -8177,7 +8187,7 @@ run_own("multi-cursor", "", [
     f"dump {mc}/selected.txt", "type bar", "wait 100", f"dump {mc}/typed.txt",
     "key escape", "wait 100", f"dump {mc}/one.txt",
     "key cmd+a", "key backspace", "type echo a", "key shift+enter", "type echo b",
-    "key cmd+up", "key ctrl+shift+down", "type !", "wait 100", f"dump {mc}/lines.txt"])
+    f"key {CMD_START}", "key ctrl+shift+down", "type !", "wait 100", f"dump {mc}/lines.txt"])
 mct = lambda name: (mc / f"{name}.txt").read_text()
 assert 'editor_selection=Some("foo") carets=[(14, Some(11))]' in mct("selected"), mct("selected")
 assert 'editor="cp bar.txt bar.bak"' in mct("typed") and "carets=[(14, None)]" in mct("typed"), \
@@ -8279,7 +8289,8 @@ pane2 = split.split("  pane 2 ", 1)[1]
 assert re.search(r'^    block 0 state=done .*cmd="echo in-new-pane" exit=Some\(0\)', pane2, re.M), pane2[:3000]
 assert 'stopped at step 1 (open \\"no such layout\\")' in uat("broken"), uat("broken")[-3000:]
 assert "never-ran" not in uat("broken"), uat("broken")[-3000:]
-assert 'ListBoxOption "Action: Say, ⌃ ⌥ S"' in uat("palette"), uat("palette")[-3000:]
+uat_keys = "⌃ ⌥ S" if MAC else "Ctrl Alt S"
+assert f'ListBoxOption "Action: Say, {uat_keys}"' in uat("palette"), uat("palette")[-3000:]
 assert "): the pane is read-only" in uat("ro"), uat("ro")[-3000:]
 ua_pane1 = lambda name: uat(name).split("  pane 1 ", 1)[1].split("\n  pane ", 1)[0]
 assert ' editor="keep-me" cursor=5 ' in ua_pane1("ro").split("\n", 1)[0], ua_pane1("ro")[:2000]
@@ -9020,12 +9031,13 @@ zsh_path = str(sp_bin["zsh"])
 sp_run("one", [
     *sp_save("s0"),
     "a11y click Add a profile", *sp_save("add"),
-    "a11y click Name: New profile", "key cmd+backspace", "type work", "key enter", *sp_save("name"),
+    "a11y click Name: New profile", f"key {P}+backspace", "type work", "key enter",
+    *sp_save("name"),
     # a name already taken: refused under the form, nothing written
-    "a11y click Name: work", "key cmd+backspace", "type mine", "key enter", *sp_save("taken"),
+    "a11y click Name: work", f"key {P}+backspace", "type mine", "key enter", *sp_save("taken"),
     "shot {sp}/taken.png".format(sp=sp), "key escape",
     # an empty command: refused too
-    f"a11y click Command: {zsh_path}", "key cmd+backspace", "key enter", *sp_save("empty"),
+    f"a11y click Command: {zsh_path}", f"key {P}+backspace", "key enter", *sp_save("empty"),
     "key escape",
     "a11y click Arguments: None", "type -c 'echo hi'", "key enter", *sp_save("args"),
     "a11y click Environment: None", "type A=1 B='x y'", "key enter", *sp_save("env"),
@@ -9121,7 +9133,7 @@ def sr_run(name, page, steps, cfg=SR_CFG):
     assert rc == 0, died(f"settings-parity {name} run failed", sr / f"{name}.log")
     return tomllib.loads((sr / "cfg/rift/config.toml").read_text())
 def text_step(label, value):
-    return [f"a11y click {label}", "key cmd+backspace", f"type {value}", "key enter", "wait 200"]
+    return [f"a11y click {label}", f"key {P}+backspace", f"type {value}", "key enter", "wait 200"]
 got = sr_run("general", "General", [
     *text_step("Shell path: /bin/bash", "/bin/sh"),
     "a11y click Keep shells running through updates",
@@ -9143,7 +9155,8 @@ got = sr_run("appearance", "Appearance", [
     "a11y click Open new windows: Maximized",
     "a11y click Increase Window width, 1180 px", "a11y click Decrease Window height, 760 px",
     "a11y click Keep windows on top", "a11y click Resize in whole cells",
-    "a11y click Show the size while resizing", "a11y click ⌃Tab switches: Last used first",
+    "a11y click Show the size while resizing",
+    f"a11y click {'⌃Tab' if MAC else 'Ctrl+Tab'} switches: Last used first",
 ])
 want = {"font_weight": 500, "bold_font_weight": 600, "bold_is_bright": True, "minimum_contrast": 1.5,
         "font_features": ["ss01", "-calt"], "ambiguous_width": "wide", "window_padding_top": 16,
@@ -9152,7 +9165,8 @@ want = {"font_weight": 500, "bold_font_weight": 600, "bold_is_bright": True, "mi
         "resize_overlay": True, "tab_switch_order": "mru"}
 assert {k: got.get(k) for k in want} == want, {k: got.get(k) for k in want}
 got = sr_run("input", "Input", [
-    "a11y click Vim's unnamed register: System clipboard", "a11y click ⌃R, ⌃T and ⌥C run: Rift's",
+    "a11y click Vim's unnamed register: System clipboard",
+    f"a11y click {'⌃R, ⌃T and ⌥C' if MAC else 'Ctrl+R, Ctrl+T and Alt+C'} run: Rift's",
     "a11y click Tab key: Ghost text", "a11y click Open completions as you type",
     "a11y click Show the accept-key hint", "a11y click Show the ignore button",
     *text_step("More subshell commands: None", "'^nix shell'"),
@@ -9290,7 +9304,7 @@ d = cx_run("windows", [
     "key cmd+,", "wait 500", "a11y click Profiles", "wait 300", "a11y click Edit b", "wait 300",
     "new_window", "wait 800", "key cmd+,", "wait 500", "a11y click Profiles", "wait 300",
     "a11y click Edit a", "wait 300", "a11y click Delete a", "wait 300", "key enter", "wait 500",
-    "window 0", "wait 500", "a11y click Name: b", "key cmd+backspace", "type bee", "key enter",
+    "window 0", "wait 500", "a11y click Name: b", f"key {P}+backspace", "type bee", "key enter",
     "wait 500", "dump {d}/a.txt"], PROFS)
 assert 'settings_profiles=["bee", "c"] default_profile=None profile_open=Some(0)' in cx_dump(d, "a"), \
     re.search(r"^settings_profiles=.*$", cx_dump(d, "a"), re.M)
@@ -9484,7 +9498,9 @@ TS_TABS = [
 ]
 ts_dot = ts_run("dot", "dot", [
     *TS_TABS, "dump {d}/a.txt", "shot {d}/a.png",
-    "mods none", "mods cmd", "wait 150", "dump {d}/early.txt", "wait 400", "dump {d}/b.txt",
+    # tab_select_1's modifiers: ⌘ on macOS, Ctrl (Ctrl+1) elsewhere
+    "mods none", "mods cmd" if MAC else "mods ctrl", "wait 150", "dump {d}/early.txt",
+    "wait 400", "dump {d}/b.txt",
     "mods none", "wait 200", "dump {d}/c.txt",
     "key alt+cmd+right", "wait 400", "dump {d}/d.txt"])
 style, h, hints, tabs = ts_strip(ts_dot("a"))
@@ -9496,7 +9512,8 @@ assert 'Tab "flow, needs you in another pane' in ts_dot("a"), ts_dot("a")[-3000:
 # ⌘ held: nothing for the first moment, then every tab's number
 assert ts_strip(ts_dot("early"))[2] is False, ts_strip(ts_dot("early"))
 _, _, hints, tabs = ts_strip(ts_dot("b"))
-assert hints and [t[1] for t in tabs.values()] == ["⌘1", "⌘2", "⌘3", "⌘4", "⌘5"], tabs
+assert hints and [t[1] for t in tabs.values()] == [
+    f"⌘{n}" if MAC else f"Ctrl+{n}" for n in range(1, 6)], tabs
 _, _, hints, tabs = ts_strip(ts_dot("c"))
 assert not hints and {t[1] for t in tabs.values()} == {"-"}, tabs
 # the agent's pane focused: the tab is named for it, the status its own
@@ -10019,6 +10036,32 @@ ux_run("quit", ["type sleep 100\\n", "wait 700", "key cmd+w", "wait 400", f"dump
                 "key escape", "wait 200", "key ctrl+c", "wait 300"])
 q = (ux / "q.txt").read_text()
 assert 'AlertDialog "Close the last tab and quit?"' in q, q[-3000:]
+
+# typed-ahead: what is typed while the shell still starts waits in the
+# command line for its first prompt (even a shell that drops typed-ahead
+# input, as a fast-prompt zshrc does, loses nothing), and a command entered
+# then runs at that prompt.
+ta = scratch / "typed-ahead"
+if shutil.which("zsh"):
+    (ta / "home").mkdir(parents=True, exist_ok=True)
+    (ta / "target").mkdir(exist_ok=True)
+    (ta / "home" / ".zshrc").write_text("sleep 1.5\nwhile read -t 0 -k 1 _junk; do :; done\n")
+    def ta_run(name, steps):
+        (ta / f"{name}.rift").write_text("\n".join(
+            ["wait 300", *steps, "wait 4500", f"dump {ta}/{name}.txt", "quit"]) + "\n")
+        with (ta / f"{name}.log").open("w") as log:
+            rc = subprocess.run([str(binary), "--script", str(ta / f"{name}.rift"), "--headless"],
+                                env=dict(env, HOME=str(ta / "home"), SHELL=shutil.which("zsh"),
+                                         XDG_CONFIG_HOME=str(ta / "cfg"), XDG_DATA_HOME=str(ta / "data")),
+                                stdout=log, stderr=log, timeout=90).returncode
+        assert rc == 0, died(f"typed-ahead {name} run failed", ta / f"{name}.log")
+        return (ta / f"{name}.txt").read_text()
+    t = ta_run("text", ["type echo early"])
+    assert 'editor="echo early"' in t, t[-2000:]
+    t = ta_run("enter", [f"type cd {ta / 'target'}\\n"])
+    assert re.search(r'block 0 state=done .*cmd="cd [^"]*target"', t), t[-2000:]
+else:
+    print("typed-ahead: skipped (no zsh)", flush=True)
 
 # settings-collections: the four structured editors save real TOML, validate
 # on their UI, and feed actual action, masking and tab-color consumers.

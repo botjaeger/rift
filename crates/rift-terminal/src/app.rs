@@ -629,6 +629,22 @@ const BELL_FLASH: Duration = Duration::from_millis(120);
 const BELL_SOUND_GAP: Duration = Duration::from_millis(150);
 /// How long the boot placeholder waits for a prompt after the first output.
 const BOOT_GRACE: Duration = Duration::from_millis(1500);
+/// Longest the placeholder waits for a shell's first readable text after
+/// its first bytes (`screen_has_text`).
+const BOOT_TEXT_WAIT: Duration = Duration::from_secs(10);
+
+/// The pane's screen shows a character other than blanks (its shell has
+/// printed something a person can read, not only escape sequences).
+fn screen_has_text(session: &rift_pty::Session) -> bool {
+    use rift_pty::alacritty_terminal::grid::Dimensions;
+    use rift_pty::alacritty_terminal::index::{Column, Line};
+    let term = session.term.lock();
+    let grid = term.grid();
+    (0..grid.screen_lines() as i32).any(|l| {
+        let row = &grid[Line(l)];
+        (0..grid.columns()).any(|c| !matches!(row[Column(c)].c, ' ' | '\0'))
+    })
+}
 /// Padding inside a split pane (design 02).
 const PANE_PAD: f32 = SIDE_PAD;
 /// Title bar of a split pane (Warp pane header): title, ⋮ menu, × close.
@@ -881,8 +897,10 @@ pub struct App {
     persist_session: bool,
     /// New shells may run in the session service (`durable_sessions`, and
     /// a scripted run only with `RIFT_PERSIST_SESSION`: tests leave no
-    /// service behind).
+    /// service behind; never on Windows, which has none yet).
     durable_allowed: bool,
+    /// Windows: Rift runs as administrator (the strip's shield).
+    elevated: bool,
     /// Settings › Permissions has a probe running (it ends in
     /// `UserEvent::Permissions`).
     permissions_probing: bool,
@@ -961,6 +979,9 @@ struct WindowState {
     mouse: (f32, f32),
     any_running: bool,
     editor_active: bool,
+    /// Panes whose command typed while their shell started is due now
+    /// (their first prompt came; `take_typed_ahead`).
+    typed_ahead_ready: Vec<PaneId>,
     /// Earliest end of a pane's boot-placeholder grace (repaint then).
     boot_until: Option<Instant>,
     drag: Option<DragState>,
@@ -1327,7 +1348,9 @@ fn welcome_entries(keymap: &rift_core::Keymap) -> Vec<crate::views::welcome::Ent
             icon: Icon::History,
             title: "Command history",
             detail: "Search everything you ran",
-            keys: vec!["⌃".into(), "R".into()],
+            keys: rift_core::Binding::parse("ctrl+r")
+                .map(|b| b.chips())
+                .unwrap_or_default(),
         },
         Entry {
             icon: Icon::Folder,
@@ -2162,6 +2185,7 @@ impl WindowState {
             mouse: (0.0, 0.0),
             any_running: false,
             editor_active: false,
+            typed_ahead_ready: Vec::new(),
             boot_until: None,
             drag: None,
             palette: PaletteState::default(),
@@ -2321,8 +2345,10 @@ impl App {
         // used to overwrite it)
         let persist_session =
             script.is_none() || std::env::var_os("RIFT_PERSIST_SESSION").is_some();
+        // Windows has no session service yet (rift_pty::uds): its shells are
+        // local, not a failed attempt to reach one
         let durable_allowed =
-            script.is_none() || std::env::var_os("RIFT_PERSIST_SESSION").is_some();
+            cfg!(unix) && (script.is_none() || std::env::var_os("RIFT_PERSIST_SESSION").is_some());
         App {
             win: Box::new(WindowState::new(true)),
             parked: Vec::new(),
@@ -2399,6 +2425,7 @@ impl App {
             shell_env: None,
             persist_session,
             durable_allowed,
+            elevated: rift_core::sys::is_elevated(),
             permissions_probing: false,
             update: UpdateUi::default(),
             remote: RemoteUi::default(),
@@ -2563,6 +2590,10 @@ impl App {
         if let Some(w) = &self.win.window {
             crate::translucency::apply(w, self.config.blur());
             place_traffic_lights(w);
+        }
+        #[cfg(windows)]
+        if let Some(w) = &self.win.window {
+            crate::win_frame::set_backdrop(w, self.config.blur() > 1);
         }
         // a strip `tab_bar` hides takes the window buttons with it
         self.track_strip(None);
@@ -4174,9 +4205,10 @@ impl App {
             .flatten();
     }
 
-    /// cmd+click on a detected URL opens it. Returns true when handled.
+    /// ⌘-click (Ctrl+click off macOS) on a detected URL opens it. Returns
+    /// true when handled.
     fn try_open_url(&mut self, pane_id: PaneId) -> bool {
-        if !self.win.modifiers.super_key() {
+        if !input::primary(self.win.modifiers) {
             return false;
         }
         let (target, at) = match self.url_under_mouse(pane_id) {
@@ -4722,7 +4754,7 @@ impl App {
             });
         let over_path = overlay.is_none()
             && !over_link
-            && (self.win.modifiers.super_key()
+            && (input::primary(self.win.modifiers)
                 || (self.config.link_click.trim() == "open" && !self.win.modifiers.shift_key()))
             && self
                 .pane_under_mouse()
@@ -5182,9 +5214,10 @@ impl App {
             self.refresh_search(true);
             return;
         }
-        // cmd chords: ⌘G / ⇧⌘G cycle matches, ⌘A selects the query;
-        // everything else is swallowed (never appended to the query as text)
-        if mods.super_key() {
+        // cmd chords: ⌘G / ⇧⌘G cycle matches, ⌘A selects the query (Ctrl
+        // off macOS); everything else is swallowed (never appended to the
+        // query as text)
+        if input::primary(mods) {
             if let Key::Character(s) = &event.logical_key
                 && s.to_ascii_lowercase() == "a"
             {
@@ -5215,7 +5248,11 @@ impl App {
                     pane.view_offset = 0;
                 }
             }
-            Key::Named(NamedKey::Enter) => {
+            // F3 / ⇧F3: Warp's find next / previous on Windows and Linux
+            Key::Named(NamedKey::Enter) | Key::Named(NamedKey::F3)
+                if event.logical_key == Key::Named(NamedKey::Enter)
+                    || !cfg!(target_os = "macos") =>
+            {
                 self.refresh_search_if_stale();
                 if shift {
                     self.win.search.prev();
@@ -5700,7 +5737,11 @@ impl App {
                 line.push_str(" · focused");
             }
             lines.push(line);
-            let program = rift_core::notifications::agent_session_title(&p.title);
+            let mut program = rift_core::notifications::agent_session_title(&p.title);
+            // Windows' default console title, the shell's own path: noise
+            if crate::tab_status::is_program_path(program, &self.pane_program(p)) {
+                program = "";
+            }
             match (p.agent_status, program.is_empty()) {
                 (Some(a), true) => lines.push(format!("  {}", a.describe())),
                 (Some(a), false) => lines.push(format!("  {}: {program}", a.describe())),
@@ -5766,7 +5807,7 @@ impl App {
                 && let Some(b) = self.keymap.preferred(&format!("tab_select_{n}"))
                 && let Some(slot) = out.get_mut(i)
             {
-                *slot = Some(b.chips().concat());
+                *slot = Some(b.label());
             }
         }
         out
@@ -7260,12 +7301,8 @@ impl App {
             Key::Named(NamedKey::PageUp) => self.win.history.move_by(-8),
             Key::Named(NamedKey::PageDown) => self.win.history.move_by(8),
             Key::Named(NamedKey::Tab) => self.take_history(HistoryUse::Edit),
-            Key::Named(NamedKey::Enter)
-                if mods.super_key()
-                    && !mods.shift_key()
-                    && !mods.control_key()
-                    && !mods.alt_key() =>
-            {
+            // ⌘⏎, Ctrl+Enter off macOS
+            Key::Named(NamedKey::Enter) if input::primary_only(mods) && !mods.shift_key() => {
                 self.take_history(HistoryUse::RunInSplit)
             }
             Key::Named(NamedKey::Enter)
@@ -10232,7 +10269,10 @@ impl App {
             unread: self.unread_attention(),
             update: self.update_chip().is_some(),
             remote: self.remote_chip(),
-            no_window_buttons: self.win.dropdown.is_some(),
+            // Windows draws its own window buttons (`caption`)
+            no_window_buttons: cfg!(windows) || self.win.dropdown.is_some(),
+            caption: self.caption_buttons(),
+            admin: self.elevated && self.win.dropdown.is_none(),
             left: toolbar_left,
             right: toolbar_right,
             palette_open: self.win.palette.open,
@@ -10554,6 +10594,8 @@ impl App {
         let mut info_chips = Vec::new();
         let mut any_running = false;
         let mut editor_active = false;
+        // panes whose typed-ahead command runs at their first prompt
+        let mut typed_ahead_ready: Vec<PaneId> = Vec::new();
         let mut boot_until: Option<Instant> = None;
         let mut editor_anchor = (0.0f32, 0.0f32);
         let mut editor_zone = [0.0f32; 4];
@@ -10718,10 +10760,6 @@ impl App {
             };
             let is_active_pane = pr.id == tab.active_pane && !viewer_has_focus;
             let editor_vis = Self::editor_visible(pane);
-            if is_active_pane {
-                // the rich-input composer over a program owns the keys too
-                editor_active = editor_vis || pane.composer.open;
-            }
             // soft-wrap width of this pane's command editor
             let editor_area_w = if split {
                 pr.rect[2] - PANE_PAD * 2.0
@@ -10744,12 +10782,22 @@ impl App {
             // replayed transcript). The shell's first bytes (title, OSC 7)
             // arrive before its prompt marker; hiding the placeholder then
             // flashed the grid cursor at the top. Shells without integration
-            // never mark a prompt: their raw output shows after BOOT_GRACE.
+            // never mark a prompt: their raw output shows after BOOT_GRACE,
+            // counted from the first text on the screen (Windows' ConPTY
+            // clears the screen and sets a title at once; Windows PowerShell
+            // then takes seconds to its prompt, which left a blank screen)
             let booting = pane.session.blocks.lock().unwrap().last().is_none()
                 && if pane
                     .session
                     .saw_output
                     .load(std::sync::atomic::Ordering::Acquire)
+                    && (pane.first_output.is_some() || screen_has_text(&pane.session) || {
+                        // nothing readable yet: wait, but not forever
+                        let bytes = *pane.first_bytes.get_or_insert_with(Instant::now);
+                        let until = bytes + BOOT_TEXT_WAIT;
+                        boot_until = Some(boot_until.map_or(until, |u: Instant| u.min(until)));
+                        Instant::now() >= until
+                    })
                 {
                     let first = *pane.first_output.get_or_insert_with(Instant::now);
                     let until = first + BOOT_GRACE;
@@ -10761,6 +10809,31 @@ impl App {
                 } else {
                     true
                 };
+            if is_active_pane {
+                // the rich-input composer over a program owns the keys too,
+                // and so does the command line while the shell starts: what
+                // is typed then waits there for the first prompt (sent raw,
+                // the shell echoed it and kept it out of the command line)
+                editor_active = editor_vis || pane.composer.open || booting;
+            }
+            // the shell's first prompt: a command entered while it started
+            // runs now; a shell that never marks a prompt (no integration)
+            // gets what was typed as plain input once its output shows
+            if editor_vis && pane.submit_when_ready {
+                pane.submit_when_ready = false;
+                typed_ahead_ready.push(pane.session.id);
+            } else if !booting
+                && !editor_vis
+                && pane.session.blocks.lock().unwrap().last().is_none()
+                && (pane.submit_when_ready || !pane.editor.buffer.is_empty())
+            {
+                let mut bytes = pane.editor.buffer.clone().into_bytes();
+                if std::mem::take(&mut pane.submit_when_ready) {
+                    bytes.push(b'\r');
+                }
+                pane.editor.clear();
+                pane.session.write(&bytes);
+            }
 
             // a split pane's content sits below its title bar
             let body = if split {
@@ -11428,7 +11501,7 @@ impl App {
             if let Some(code) = pane.exited {
                 let close_keys = keymap_ref
                     .preferred("close_pane")
-                    .map(|b| b.chips().concat())
+                    .map(|b| b.label())
                     .unwrap_or_default();
                 let parts = crate::views::exited::render(
                     scene.layer(2),
@@ -12458,14 +12531,15 @@ impl App {
             // a commit or push spins in the review panel
             || self.win.review.busy.is_some();
         self.win.editor_active = editor_active;
+        self.win.typed_ahead_ready = typed_ahead_ready;
         self.win.boot_until = boot_until;
         self.win.editor_anchor = editor_anchor;
         self.win.editor_cols = active_ed_cols;
     }
 
-    /// The shortcut of `action`, as key caps (`⇧⌘G`).
+    /// The shortcut of `action`, as key caps (`⇧⌘G`; `Ctrl+Alt+G` off macOS).
     fn tip_keys(&self, action: &str) -> Option<String> {
-        self.keymap.preferred(action).map(|b| b.chips().concat())
+        self.keymap.preferred(action).map(|b| b.label())
     }
 
     /// What a click target does, or its full label; `None` for targets that
@@ -12489,6 +12563,8 @@ impl App {
             ),
             ClickTarget::TabNew => ("New tab".into(), self.tip_keys("new_tab")),
             ClickTarget::TabProfiles => ("Open a profile".into(), None),
+            // its card is built in the tooltip pass (`Tip::card`)
+            ClickTarget::AdminBadge => return None,
             ClickTarget::GhostKey(_) => ("Change keybinding".into(), None),
             ClickTarget::GhostIgnore(_) => ("Ignore this suggestion".into(), None),
             ClickTarget::SettingsEditPrompt => ("Edit prompt".into(), None),
@@ -12542,9 +12618,15 @@ impl App {
                     Scope::Results => "Past runs by their output, with where and when they ran",
                 }
                 .into(),
-                s("⌃R"),
+                Some(rift_core::keybindings::hint("ctrl+r")),
             ),
-            ClickTarget::HistoryClose => ("Close".into(), s("esc")),
+            ClickTarget::HistoryClose => (
+                "Close".into(),
+                s(rift_core::keybindings::cap_for(
+                    "esc",
+                    rift_core::keybindings::Platform::current(),
+                )),
+            ),
             ClickTarget::SettingsReset(_) | ClickTarget::SettingsKeybindReset(_) => {
                 ("Reset to default".into(), None)
             }
@@ -12687,9 +12769,11 @@ impl App {
         }
         // a link names its target and what opens it (as in Warp)
         let open_with = if self.config.link_click.trim() == "open" {
-            "Click"
+            "Click".to_string()
         } else {
-            "⌘ Click"
+            // the primary modifier (`try_open_url`): ⌘, or Ctrl off macOS
+            let key = rift_core::keybindings::Platform::current().primary_name();
+            format!("{key} Click")
         };
         for pane in self
             .win
@@ -12699,7 +12783,7 @@ impl App {
             .flat_map(|t| &t.panes)
         {
             for (rect, url) in &pane.url_hits {
-                tips.push(Tip::new(*rect, url.clone(), Some(open_with.into())));
+                tips.push(Tip::new(*rect, url.clone(), Some(open_with.clone())));
             }
         }
         // Elapsed: when its clock started, with the date after a day; over
@@ -12727,6 +12811,16 @@ impl App {
             // a prompt chip's card: what it shows and what a click does
             if let ClickTarget::Chip(_, chip) = hit.target {
                 tips.push(Tip::card(hit.rect, chip.label(), chip.about()));
+                continue;
+            }
+            // the admin shield's card: what running as administrator means
+            if let ClickTarget::AdminBadge = hit.target {
+                tips.push(Tip::card(
+                    hit.rect,
+                    "Running as administrator",
+                    "Every shell in this window can change the whole computer. \
+                     Start Rift normally to drop it.",
+                ));
                 continue;
             }
             // a tab's card: every pane's path and state, the program's title
@@ -12981,6 +13075,14 @@ impl App {
         let built = Instant::now();
         self.build_scene(lw, lh);
         scene_timing::record(built.elapsed());
+        // a command entered while its shell started runs at its first prompt
+        for id in std::mem::take(&mut self.win.typed_ahead_ready) {
+            let active = self.active_pane_id() == Some(id);
+            self.editor_key_on(id, EditorKey::Submit, active);
+            window.request_redraw();
+        }
+        #[cfg(windows)]
+        self.sync_caption(lw, scale);
         self.tooltip_pass(lw, lh);
         self.track_resize_overlay();
         self.draw_resize_overlay(lw, lh);
@@ -14174,7 +14276,11 @@ impl App {
             };
             let function_key = key.len() > 1 && !matches!(key.as_str(), "space" | "enter" | "tab");
             if plain && !function_key {
-                self.toast("Shortcuts need ⌘, ⌃ or ⌥ (or a function/navigation key)".into());
+                self.toast(if cfg!(target_os = "macos") {
+                    "Shortcuts need ⌘, ⌃ or ⌥ (or a function/navigation key)".into()
+                } else {
+                    "Shortcuts need Ctrl or Alt (or a function/navigation key)".into()
+                });
                 return true;
             }
             let binding = rift_core::keybindings::Binding {
@@ -14217,7 +14323,7 @@ impl App {
             self.config.keybindings.insert(action.clone(), chord);
             self.save_config();
             self.apply_config();
-            let shown = binding.chips().concat();
+            let shown = binding.label();
             self.toast_done(format!("{action} → {shown}{note}"));
             return true;
         }
@@ -14795,6 +14901,13 @@ impl App {
                 pane.view_offset = 0;
                 edited = false;
             }
+            // the shell is still starting (no prompt yet): the command runs
+            // at its first prompt (`take_typed_ahead`), never as raw bytes
+            // the shell would echo and keep for itself
+            EditorKey::Submit if pane.session.blocks.lock().unwrap().last().is_none() => {
+                pane.submit_when_ready = true;
+                edited = false;
+            }
             EditorKey::Submit => {
                 pane.correction = None;
                 let cmd = pane.editor.submit();
@@ -15109,9 +15222,8 @@ impl App {
             return;
         };
         let unsaved = matches!(c.action, ConfirmAction::ConfigUnsaved(_));
-        // ⌘ (Super), and Ctrl too off macOS
-        let primary = self.win.modifiers.super_key()
-            || (self.win.modifiers.control_key() && !cfg!(target_os = "macos"));
+        // ⌘, Ctrl off macOS
+        let primary = input::primary(self.win.modifiers);
         match event.logical_key {
             Key::Named(NamedKey::Escape) => self.cancel_confirm(),
             // "Save changes?": ⌘⌫ discards (macOS's Don't Save)
@@ -15977,7 +16089,8 @@ impl App {
             Key::Named(NamedKey::Escape) => self.win.rename = None,
             Key::Named(NamedKey::Enter) => self.commit_rename(i),
             Key::Named(NamedKey::Backspace) => {
-                if self.win.modifiers.super_key() || self.win.modifiers.alt_key() {
+                // ⌘⌫ (Ctrl+Backspace off macOS) or ⌥⌫ clears
+                if input::primary(self.win.modifiers) || self.win.modifiers.alt_key() {
                     buf.clear();
                 } else {
                     crate::state::pop_grapheme(buf);
@@ -16096,6 +16209,31 @@ impl App {
     /// One key press (real or scripted). Routes overlays, app actions,
     /// the owned editor and raw PTY passthrough.
     pub(crate) fn on_key(
+        &mut self,
+        event: &input::KeyPress,
+        event_loop: &ActiveEventLoop,
+        window: &Window,
+    ) {
+        // Windows' AltGr arrives as Ctrl+Alt: a character it typed (€, ą) is
+        // text for every handler, so they see the press without Ctrl+Alt
+        let held = self.win.modifiers;
+        let altgr = input::altgr_typed(
+            rift_core::keybindings::Platform::current(),
+            held,
+            event.unmodified.as_ref(),
+            &event.logical_key,
+            event.text.as_deref(),
+        );
+        if altgr {
+            self.win.modifiers = input::without_altgr(held);
+        }
+        self.on_key_held(event, event_loop, window);
+        if altgr && self.win.modifiers == input::without_altgr(held) {
+            self.win.modifiers = held;
+        }
+    }
+
+    fn on_key_held(
         &mut self,
         event: &input::KeyPress,
         event_loop: &ActiveEventLoop,
@@ -16410,14 +16548,23 @@ impl App {
         }
         // ⌘↑ / ⌘↓ (⇧ selects) move to the start / end of a multi-line
         // command while there are lines that way; on its first / last line
-        // they stay the block-selection shortcuts
+        // they stay the block-selection shortcuts. Off macOS: Ctrl+Home /
+        // Ctrl+End (Ctrl+↑ / ↓ select blocks, Ctrl+Shift+↑ / ↓ add carets)
+        let (to_start, to_end) = if cfg!(target_os = "macos") {
+            (
+                winit::keyboard::NamedKey::ArrowUp,
+                winit::keyboard::NamedKey::ArrowDown,
+            )
+        } else {
+            (
+                winit::keyboard::NamedKey::Home,
+                winit::keyboard::NamedKey::End,
+            )
+        };
         if self.win.editor_active
-            && self.win.modifiers.super_key()
-            && !self.win.modifiers.control_key()
-            && !self.win.modifiers.alt_key()
-            && let winit::keyboard::Key::Named(
-                named @ (winit::keyboard::NamedKey::ArrowUp | winit::keyboard::NamedKey::ArrowDown),
-            ) = event.logical_key
+            && input::primary_only(self.win.modifiers)
+            && let winit::keyboard::Key::Named(named) = event.logical_key
+            && (named == to_start || named == to_end)
             && let Some(pane) = self
                 .win
                 .tabs
@@ -16427,7 +16574,7 @@ impl App {
             // stepping through them
             && pane.selected_block.is_none()
         {
-            let up = named == winit::keyboard::NamedKey::ArrowUp;
+            let up = named == to_start;
             let ed = &mut pane.editor;
             if (up && ed.below_first_line()) || (!up && ed.above_last_line()) {
                 let motion: fn(&mut crate::state::EditorState) = if up {
@@ -17640,10 +17787,10 @@ impl App {
                     p.session.blocks.lock().unwrap().toggle_collapsed(*id);
                 }
             }
-            // ⌘-click / ⇧-click pick tabs for "Group tabs"
+            // ⌘-click (Ctrl+click off macOS) / ⇧-click pick tabs for "Group tabs"
             Some(ClickTarget::TabSelect(i))
                 if *i < self.win.tabs.len()
-                    && (self.win.modifiers.super_key() || self.win.modifiers.shift_key()) =>
+                    && (input::primary(self.win.modifiers) || self.win.modifiers.shift_key()) =>
             {
                 self.pick_tab(*i, self.win.modifiers.shift_key());
             }
@@ -17923,6 +18070,8 @@ impl App {
                     .map_or(self.win.mouse, |h| (h.rect[0], h.rect[1] + h.rect[3] + 2.0));
                 self.open_context_menu(*pane, *id, at);
             }
+            // the admin shield only explains itself (its tooltip)
+            Some(ClickTarget::AdminBadge) => {}
             Some(ClickTarget::TrafficLight(i)) => match i {
                 0 => self.request_close(CloseScope::Window, event_loop),
                 _ if self.headless => {}
@@ -19029,7 +19178,8 @@ impl App {
         // file path when a click opens it (⌘, or `link_click = "open"`)
         if button == crate::mouse::LEFT
             && (self.url_under_mouse(pane).is_some()
-                || ((self.win.modifiers.super_key() || self.config.link_click.trim() == "open")
+                || ((input::primary(self.win.modifiers)
+                    || self.config.link_click.trim() == "open")
                     && self.path_under_mouse(pane).is_some()))
         {
             // a drag from it still belongs to the program (`hand_link_drag`)
@@ -19881,6 +20031,15 @@ impl App {
                 self.on_left(ElementState::Pressed, event_loop, window);
                 self.on_left(ElementState::Released, event_loop, window);
             }
+            Step::ClickOn(label) => match self.script_a11y_center(&label, window) {
+                Some((x, y)) => {
+                    log::info!("script: click_on {label:?} at {x:.1},{y:.1}");
+                    self.on_cursor_moved((x, y), window);
+                    self.on_left(ElementState::Pressed, event_loop, window);
+                    self.on_left(ElementState::Released, event_loop, window);
+                }
+                None => log::warn!("script: click_on: no control labelled {label:?}"),
+            },
             Step::DoubleClick(x, y) => {
                 self.on_cursor_moved((x, y), window);
                 for _ in 0..2 {
@@ -22128,6 +22287,21 @@ impl App {
 
     /// Script `a11y`: send `action` to the node labelled `label`, through
     /// the same handler an assistive technology's request reaches.
+    /// The centre (logical px) of the control the accessibility tree
+    /// labels `label`, an actionable one first (`click_on`).
+    fn script_a11y_center(&mut self, label: &str, window: &Window) -> Option<(f32, f32)> {
+        let snapshot = self.a11y_snapshot(window.scale_factor());
+        let built = crate::a11y::build(&snapshot);
+        let (_, node) = built
+            .update
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.label() == Some(label) && n.bounds().is_some())
+            .max_by_key(|(id, _)| built.targets.contains_key(id))?;
+        let b = node.bounds()?;
+        Some((((b.x0 + b.x1) / 2.0) as f32, ((b.y0 + b.y1) / 2.0) as f32))
+    }
+
     fn script_a11y_action(
         &mut self,
         action: accesskit::Action,
@@ -24364,7 +24538,8 @@ impl App {
                 }
             }
             Key::Named(NamedKey::Backspace) => {
-                if mods.super_key() || mods.alt_key() {
+                // ⌘⌫ (Ctrl+Backspace off macOS) or ⌥⌫ clears
+                if input::primary(mods) || mods.alt_key() {
                     draft.clear();
                 } else {
                     draft.pop();

@@ -1,0 +1,188 @@
+--- chunk 16
+[?9001h[?1004h
+--- resize 113x40
+--- chunk 165
+[?25l[2J[m[H
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[H]0;C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe[?25h
+--- chunk 77
+]0;Administrator: C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe
+--- chunk 81
+]7;file://WIN-RO1J30OHGPM/C%3A/Users/claude]133;APS C:\Users\claude> ]133;B
+--- resize 113x36
+--- chunk 219
+[?25l[HPS C:\Users\claude>[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K[1;21H[?25h
+--- submit echo one two
+--- resize 113x40
+--- chunk 239
+[?25l[HPS C:\Users\claude>[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K[1;21H[?25h
+--- chunk 6
+[?25l
+--- chunk 19
+[93mecho [37mone 
+--- chunk 40
+[m[93m[1;21Hecho [37mone two
+[?25h
+--- chunk 40
+[m]133;C;cmdline_url=echo%20one%20two
+--- chunk 3
+one
+--- chunk 7
+
+two
+
+--- chunk 91
+]133;D;0]7;file://WIN-RO1J30OHGPM/C%3A/Users/claude]133;APS C:\Users\claude> ]133;B
+--- resize 113x36
+--- chunk 270
+[?25l[HPS C:\Users\claude> [93mecho [37mone two[K[m
+one[K
+two[K
+PS C:\Users\claude>[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K[4;21H[?25h
+--- chunk 21
+]133;C;cmdline_url=
+--- chunk 16
+[?9001l[?1004l

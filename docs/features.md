@@ -779,7 +779,8 @@ configuration with a toast.
 Named launch settings (`[[profiles]]` in config.toml, Windows Terminal
 profiles): program, arguments, start directory, environment, tab title and
 colour. The shells in `/etc/shells` are profiles too (`zsh`, `fish`, …;
-`discover_shells`). `default_profile` is what ⌘T, + and splits open, and
+`discover_shells`); on Windows, PowerShell 7, Windows PowerShell, Command
+Prompt, Git Bash and each WSL distribution. `default_profile` is what ⌘T, + and splits open, and
 every other new tab too (the first tab, ⌘N, links, `rift-terminal <path>`,
 `ctl open`, the phone, the drop-down window): its directory unless a folder
 was named, its title and colour. Duplicate tab keeps the source's folder,
@@ -1416,7 +1417,10 @@ name of the app does (`shift`, then `runway`), Rift keeps using that directory.
 
 `Starting zsh…` placeholder on the prompt chips' row until the shell's first prompt; no terminal
 cursor shows while it is up. For a shell without integration, the placeholder leaves and the
-cursor shows 1.5 s after its first byte. Session restore
+cursor shows 1.5 s after its first byte. What is typed meanwhile goes to the command line and
+is there at the first prompt (a shell's own startup no longer swallows it); a command entered
+then runs at that prompt. A shell without integration gets the typed text, and the Enter, once
+its placeholder leaves. Session restore
 respawns tabs at their saved cwds. The shell's history is imported at launch
 (and again, replacing the imported history, when `shell` changes in
 `config.toml`) for the history pane and the palette's History mode, from the configured shell's own file: zsh

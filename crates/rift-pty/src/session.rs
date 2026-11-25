@@ -1025,6 +1025,7 @@ impl Reader {
                         Ok(0) => break,
                         Ok(n) => {
                             self.saw_output.store(true, Ordering::Release);
+                            pty_trace(&format!("chunk {n}"), Some(&buf[..n]));
                             if let Some(marked) =
                                 self.take_output(&mut parser, &mut scanner, &buf[..n])
                             {
@@ -1616,6 +1617,9 @@ impl Session {
             xtversion: format!("Rift({})", env!("CARGO_PKG_VERSION")),
             osc52: clipboard.osc52(),
             ambiguous_wide,
+            // ConPTY repaints the whole screen after a resize: a taller pane
+            // keeps its history where it is (`windows_first_prompt…` test)
+            grow_from_history: !cfg!(windows),
             ..TermConfig::default()
         };
         let replier = Replier::new(writer.clone());
@@ -2052,6 +2056,7 @@ impl Session {
             return;
         }
         self.size = size;
+        pty_trace(&format!("resize {}x{}", size.cols, size.rows), None);
         let ws = WindowSize {
             num_lines: size.rows as u16,
             num_cols: size.cols as u16,
@@ -2873,6 +2878,32 @@ struct FeedCtx {
     /// Output positions and the history they had built, for an update
     /// restart ([`crate::kept`]; durable sessions only).
     marks: Mutex<crate::kept::Marks>,
+}
+
+/// `RIFT_PTY_TRACE=<file>` (debugging): every chunk a pane's shell sent, as
+/// `--- chunk N`, its N bytes and a newline, and every resize as
+/// `--- resize CxR`, appended to that file. The session tests replay such a
+/// capture (`replay_trace`; `fixtures/conpty-first-prompt.trace` came from
+/// Windows). It holds everything the shell printed: never set it in a
+/// session whose output is private.
+fn pty_trace(head: &str, bytes: Option<&[u8]>) {
+    use std::io::Write as _;
+    static PATH: std::sync::OnceLock<Option<std::ffi::OsString>> = std::sync::OnceLock::new();
+    let Some(path) = PATH.get_or_init(|| std::env::var_os("RIFT_PTY_TRACE")) else {
+        return;
+    };
+    let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    else {
+        return;
+    };
+    let _ = writeln!(f, "--- {head}");
+    if let Some(bytes) = bytes {
+        let _ = f.write_all(bytes);
+        let _ = writeln!(f);
+    }
 }
 
 /// Parse one chunk of terminal output: split it at shell markers, feed each
@@ -3953,6 +3984,79 @@ mod tests {
         let bytes = "\x1b]133;A\x07$ \x1b]133;B\x07ls 漢字\r\n\x1b]133;C\x07\x1b]133;D;0\x07";
         feed(&mut p, &mut s, bytes.as_bytes(), &c);
         assert_eq!(c.blocks.lock().unwrap().snapshot()[0].command, "ls 漢字");
+    }
+
+    /// Replays a captured session (`pty_trace`): `--- chunk N` headers
+    /// followed by N raw bytes and a newline, `--- resize CxR` lines, and
+    /// `--- submit <command>` where the app's editor submitted one (added by
+    /// hand: the trace cannot see it).
+    fn replay_trace(c: &FeedCtx, trace: &[u8]) {
+        let mut p = vte::ansi::Processor::new();
+        let mut s = OscScanner::new();
+        let mut at = 0;
+        while at < trace.len() {
+            let end = trace[at..].iter().position(|b| *b == b'\n').unwrap() + at;
+            let head = std::str::from_utf8(&trace[at..end]).unwrap();
+            at = end + 1;
+            if let Some(n) = head.strip_prefix("--- chunk ") {
+                let n: usize = n.parse().unwrap();
+                feed(&mut p, &mut s, &trace[at..at + n], c);
+                at += n + 1;
+            } else if let Some(size) = head.strip_prefix("--- resize ") {
+                let (cols, rows) = size.split_once('x').unwrap();
+                resize_term(
+                    &mut c.term.lock(),
+                    GridSize {
+                        cols: cols.parse().unwrap(),
+                        rows: rows.parse().unwrap(),
+                    },
+                    &c.scrolled,
+                    &c.blocks,
+                    &c.graphics,
+                    &c.marks,
+                );
+            } else if let Some(command) = head.strip_prefix("--- submit ") {
+                // the app's editor submitted it (as `App` does on Enter)
+                c.blocks
+                    .lock()
+                    .unwrap()
+                    .stamp_submit(None, false, None, command);
+            } else {
+                panic!("trace line {head:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn windows_first_prompt_block_starts_on_its_prompt_line() {
+        // PowerShell under ConPTY, captured on Windows 11: the clear screen
+        // leaves a blank line in the history, then the editor hiding grows
+        // the pane and ConPTY repaints from the top. The first command's
+        // block must still start on the line holding its prompt, so its
+        // first output line ("one") is not taken for the command line.
+        for rows in [40, 24, 36, 41] {
+            let mut c = ctx(113, rows);
+            c.term = Arc::new(FairMutex::new(term_with(
+                113,
+                rows,
+                TermConfig {
+                    grow_from_history: false,
+                    ..TermConfig::default()
+                },
+            )));
+            replay_trace(&c, include_bytes!("../fixtures/conpty-first-prompt.trace"));
+            let all = c.blocks.lock().unwrap().snapshot();
+            assert_eq!(all.len(), 2, "{rows} rows: the command and the next prompt");
+            let b = all[0].clone();
+            assert_eq!(b.command, "echo one two", "{rows} rows");
+            assert!(
+                abs_text(&c, b.prompt_start).starts_with("PS C:\\Users\\claude>"),
+                "{rows} rows: prompt line {:?}, next {:?}",
+                abs_text(&c, b.prompt_start),
+                abs_text(&c, b.prompt_start + 1)
+            );
+            assert_eq!(abs_text(&c, b.output_start.unwrap()), "one", "{rows} rows");
+        }
     }
 
     #[test]

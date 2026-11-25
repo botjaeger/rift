@@ -19,6 +19,9 @@
 //! resize 900 600           # logical window size
 //! move 400 300             # pointer to logical coords
 //! click 400 300            # left click (move + press + release)
+//! click_on Restart         # left click at the centre of the control
+//!                          # the accessibility tree labels so
+//!                          # (layout-proof; a real pointer click)
 //! dblclick 400 300         # double click (word selection)
 //! rclick 400 300           # right click (block context menu)
 //! mclick 400 300           # middle click (paste, or reported to the program)
@@ -98,6 +101,9 @@ pub enum Step {
     Resize(u32, u32),
     Move(f32, f32),
     Click(f32, f32),
+    /// A left click at the centre of the control the accessibility tree
+    /// names `label` (a real pointer click, unlike `a11y click`).
+    ClickOn(String),
     DoubleClick(f32, f32),
     RightClick(f32, f32),
     MiddleClick(f32, f32),
@@ -278,6 +284,7 @@ pub fn parse(src: &str) -> Result<Vec<Step>, String> {
                 let v = nums(2)?;
                 Step::Move(v[0], v[1])
             }
+            "click_on" if !rest.is_empty() => Step::ClickOn(rest.trim().to_string()),
             "click" => {
                 let v = nums(2)?;
                 Step::Click(v[0], v[1])

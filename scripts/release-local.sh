@@ -10,7 +10,8 @@
 # working tree may hold anything): the two
 # macOS targets natively (Intel cross-compiled, as in CI), Linux x86_64 in
 # docker (packaging/linux-verify.Dockerfile on linux/amd64, emulated on Apple
-# silicon). Run scripts/gates.sh all on that commit first: this builds, it
+# silicon), and the Windows x86_64 beta zip cross-built with mingw-w64
+# (packaging/make-windows-zip.sh). Run scripts/gates.sh all on that commit first: this builds, it
 # does not check.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -68,6 +69,13 @@ docker run --rm --init --platform linux/amd64 -v "$PWD:/src" -w /src \
         packaging/make-tarball.sh --no-build --target-dir /src/$LINUX_TARGET"
 mkdir -p "$DIST/linux-x86_64"
 mv "$LINUX_TARGET"/*.deb "$LINUX_TARGET"/*.AppImage "$LINUX_TARGET"/*.tar.gz "$DIST/linux-x86_64/"
+
+# Windows (beta): cross-built here with mingw-w64, not signed, and not in
+# latest.json (the updater does not run on Windows yet)
+rm -f target/Rift-*-windows-*.zip
+packaging/make-windows-zip.sh --target-dir target
+mkdir -p "$DIST/windows-x86_64"
+mv target/Rift-*-windows-*.zip "$DIST/windows-x86_64/"
 
 mkdir -p "$DIST/latest-json"
 python3 scripts/release-manifest.py "$VERSION" "$DIST" -o "$DIST/latest-json/latest.json"

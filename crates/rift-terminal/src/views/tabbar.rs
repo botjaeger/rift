@@ -440,6 +440,12 @@ pub struct PanelButtons {
     /// them; macOS shows none on a window without a title bar).
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub no_window_buttons: bool,
+    /// Windows: the strip is the title bar and draws minimise, maximise
+    /// and close at its right end (`crate::win_frame`); `None` elsewhere.
+    pub caption: Option<crate::win_frame::Caption>,
+    /// Windows: Rift runs as administrator (`rift_core::sys::is_elevated`):
+    /// a shield, with "Admin" while there is room, starts the strip.
+    pub admin: bool,
     /// The toolbar's buttons left of the tabs and at the right end, in
     /// order (`Config::toolbar`).
     pub left: Vec<ToolbarItem>,
@@ -567,6 +573,94 @@ pub fn draw_plus_minus(layer: &mut Layer, c: [f32; 2], color: Color) {
     layer.rect([gx + 5.25, gy], [1.5, 8.0], color, 0.5);
     layer.rect([gx + 2.0, gy + 3.25], [8.0, 1.5], color, 0.5);
     layer.rect([gx + 2.0, gy + 10.5], [8.0, 1.5], color, 0.5);
+}
+
+/// Narrowest strip that keeps the word "Admin" beside the shield.
+pub const ADMIN_WORD_MIN_W: f32 = 720.0;
+
+/// Windows, elevated: the shield and "Admin" in the theme's warning colour
+/// at the strip's start, as Windows Terminal puts its shield there, with a
+/// divider after it. Returns its rect (the hover explains it).
+fn admin_badge(
+    layer: &mut Layer,
+    engine: &mut TextEngine,
+    theme: &Theme,
+    x: f32,
+    bar: f32,
+    word: bool,
+) -> [f32; 4] {
+    let ink = theme.warning;
+    let mut right = x + 10.0;
+    super::icons::draw(layer, Icon::Shield, [right + 7.0, bar / 2.0], 14.0, ink);
+    right += 14.0;
+    if word {
+        let tw = engine.measure("Admin", 12.0, FONT_SANS, Weight::SEMIBOLD);
+        let buf = make_text(engine, "Admin", 12.0, FONT_SANS, Weight::SEMIBOLD);
+        layer.text(buf, right + 5.0, (bar - 15.6) / 2.0, ink);
+        right += 5.0 + tw;
+    }
+    right += 10.0;
+    layer.rect([right, 0.0], [1.0, bar - 1.0], theme.border, 0.0);
+    [x, 0.0, right + 1.0 - x, bar]
+}
+
+/// Windows: minimise, maximise (restore when maximised) and close at the
+/// strip's right end, as Windows 11 draws them: 46 px wide, the strip's
+/// height, a 10 px glyph; the hovered one lifts, close turns red. Windows
+/// itself handles their clicks (`crate::win_frame`), so they push no hits.
+fn window_buttons(
+    layer: &mut Layer,
+    theme: &Theme,
+    caption: crate::win_frame::Caption,
+    w: f32,
+    bar: f32,
+) {
+    use crate::win_frame::Button;
+    let red = Color::hex("#c42b1c").unwrap();
+    for (b, r) in Button::ALL
+        .iter()
+        .zip(crate::win_frame::button_rects(w, bar))
+    {
+        let hover = caption.hover == Some(*b);
+        let pressed = hover && caption.pressed == Some(*b);
+        let (fill, ink) = match (b, hover) {
+            (Button::Close, true) => (
+                Some(if pressed { red.with_alpha(0.85) } else { red }),
+                Color::WHITE,
+            ),
+            (_, true) => (
+                Some(theme.text_ui.with_alpha(if pressed { 0.16 } else { 0.10 })),
+                theme.text_ui,
+            ),
+            (_, false) => (None, theme.text_ui),
+        };
+        if let Some(fill) = fill {
+            layer.rect([r[0], r[1]], [r[2], r[3]], fill, 0.0);
+        }
+        // a 10 px glyph centred in the button, 1 px strokes on the pixel grid
+        let (cx, cy) = ((r[0] + r[2] / 2.0).round(), (r[1] + r[3] / 2.0).round());
+        let (x0, y0, x1, y1) = (cx - 5.0, cy - 5.0, cx + 5.0, cy + 5.0);
+        let square = |layer: &mut Layer, x0: f32, y0: f32, x1: f32, y1: f32| {
+            layer.line([x0, y0 + 0.5], [x1, y0 + 0.5], 1.0, ink);
+            layer.line([x0, y1 - 0.5], [x1, y1 - 0.5], 1.0, ink);
+            layer.line([x0 + 0.5, y0], [x0 + 0.5, y1], 1.0, ink);
+            layer.line([x1 - 0.5, y0], [x1 - 0.5, y1], 1.0, ink);
+        };
+        match b {
+            Button::Minimize => layer.line([x0, cy + 0.5], [x1, cy + 0.5], 1.0, ink),
+            Button::Maximize if caption.maximized => {
+                // restore: a square with a second one behind it
+                square(layer, x0, y0 + 2.0, x1 - 2.0, y1);
+                layer.line([x0 + 2.0, y0 + 0.5], [x1, y0 + 0.5], 1.0, ink);
+                layer.line([x1 - 0.5, y0], [x1 - 0.5, y1 - 2.0], 1.0, ink);
+            }
+            Button::Maximize => square(layer, x0, y0, x1, y1),
+            Button::Close => {
+                layer.line([x0, y0], [x1, y1], 1.0, ink);
+                layer.line([x1, y0], [x0, y1], 1.0, ink);
+            }
+        }
+    }
 }
 
 /// Draw one toolbar button starting at `x` and report its click target;
@@ -702,7 +796,19 @@ pub fn render(
     // tree's `+added −removed`); `toolbar_left` / `toolbar_right` choose
     let size = 26.0;
     let by = (bar - size) / 2.0;
-    let mut lx = TABS_X + 2.0;
+    // Windows draws no traffic lights (its title bar has the window buttons):
+    // the strip starts at the edge
+    let mut lead = if cfg!(windows) { 8.0 } else { TABS_X };
+    // Windows, elevated: the shield (and "Admin" while there is room) first
+    if panels.admin {
+        let rect = admin_badge(layer, engine, theme, lead, bar, w >= ADMIN_WORD_MIN_W);
+        hits.push(Hit {
+            rect,
+            target: ClickTarget::AdminBadge,
+        });
+        lead = rect[0] + rect[2];
+    }
+    let mut lx = lead + 2.0;
     for item in &panels.left {
         // a narrow window keeps room for a tab and + (later buttons go)
         if lx + TOOLBAR_ITEM_W > w - MIN_TAB_W - 40.0 {
@@ -712,12 +818,17 @@ pub fn render(
         lx = rect[0] + rect[2] + 4.0;
     }
     let tabs_x = if panels.left.is_empty() {
-        TABS_X + 2.0
+        lead + 2.0
     } else {
         lx + 4.0
     };
-    // right to left from the strip's end
+    // right to left from the strip's end (Windows: left of its window
+    // buttons)
     let mut right_x = w - 10.0;
+    if let Some(caption) = panels.caption {
+        window_buttons(layer, theme, caption, w, bar);
+        right_x -= 3.0 * crate::win_frame::BUTTON_W;
+    }
     for item in panels.right.iter().rev() {
         let width = TOOLBAR_ITEM_W;
         // never over the tabs: the leftmost ones go first in a narrow window

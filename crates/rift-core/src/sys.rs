@@ -94,6 +94,43 @@ pub fn process_alive(pid: u32) -> bool {
     }
 }
 
+/// Windows: this process holds administrator rights (started as
+/// administrator, or any administrator's process while UAC is off), so every
+/// shell it opens can change the whole computer. Elsewhere false.
+///
+/// The Administrators group enabled in the process's own token is what
+/// gives those rights: `TokenElevation` alone also says yes for a token a
+/// basic-user `runas /trustlevel` made while UAC is off, which has the group
+/// only to deny with.
+pub fn is_elevated() -> bool {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::BOOL;
+        use windows_sys::Win32::Security::{
+            CheckTokenMembership, CreateWellKnownSid, SECURITY_MAX_SID_SIZE,
+            WinBuiltinAdministratorsSid,
+        };
+        let mut sid = [0u8; SECURITY_MAX_SID_SIZE as usize];
+        let mut size = SECURITY_MAX_SID_SIZE;
+        let mut member: BOOL = 0;
+        // SAFETY: a buffer of the documented maximum SID size; a null token
+        // means this thread's (impersonation) or process's own token
+        unsafe {
+            CreateWellKnownSid(
+                WinBuiltinAdministratorsSid,
+                std::ptr::null_mut(),
+                sid.as_mut_ptr().cast(),
+                &mut size,
+            ) != 0
+                && CheckTokenMembership(std::ptr::null_mut(), sid.as_mut_ptr().cast(), &mut member)
+                    != 0
+                && member != 0
+        }
+    }
+    #[cfg(not(windows))]
+    false
+}
+
 /// The home directory as `$HOME` gives it. Windows sets no `HOME` (Git Bash
 /// and MSYS do, to the same place): the user's profile folder there.
 pub fn home_os() -> Option<std::ffi::OsString> {

@@ -48,7 +48,25 @@ impl Gpu {
         height: u32,
     ) -> Result<Gpu, String> {
         // no display handle: Metal (macOS) and Vulkan (Linux) don't need one
-        let desc = wgpu::InstanceDescriptor::new_without_display_handle().with_env();
+        #[allow(unused_mut)]
+        let mut desc = wgpu::InstanceDescriptor::new_without_display_handle().with_env();
+        // Windows: a DirectX 12 swapchain made from the window itself cannot
+        // be translucent (`window_opacity`); one made from a DirectComposition
+        // visual over the window can (`WGPU_DX12_PRESENTATION_SYSTEM` still
+        // chooses, for a debugger that needs the other)
+        #[cfg(windows)]
+        {
+            if std::env::var_os("WGPU_DX12_PRESENTATION_SYSTEM").is_none() {
+                desc.backend_options.dx12.presentation_system =
+                    wgpu::wgt::Dx12SwapchainKind::DxgiFromVisual;
+            }
+            // DirectX 12 only (unless `WGPU_BACKEND` says otherwise): a
+            // Vulkan or GL surface has no DirectComposition path, so a
+            // machine with a Vulkan driver would lose the translucency
+            if std::env::var_os("WGPU_BACKEND").is_none() {
+                desc.backends = wgpu::Backends::DX12;
+            }
+        }
         let instance = wgpu::Instance::new(desc);
         let surface = instance
             .create_surface(target)
@@ -61,7 +79,8 @@ impl Gpu {
         }))
         .map_err(|e| format!("no compatible GPU adapter: {e}"))?;
 
-        log::info!("wgpu adapter = {:?}", adapter.get_info().name);
+        let info = adapter.get_info();
+        log::info!("wgpu adapter = {:?} ({:?})", info.name, info.backend);
 
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("rift device"),
@@ -111,13 +130,24 @@ impl Gpu {
         // translucent window grounds (config `window_opacity`) need the
         // compositor to honor the surface alpha. Metal treats PostMultiplied
         // as premultiplied anyway (see `premultiplied`).
-        let alpha_mode = [
-            wgpu::CompositeAlphaMode::PostMultiplied,
-            wgpu::CompositeAlphaMode::PreMultiplied,
-        ]
-        .into_iter()
-        .find(|m| caps.alpha_modes.contains(m))
-        .unwrap_or(wgpu::CompositeAlphaMode::Auto);
+        // Windows: a DirectComposition swapchain takes premultiplied alpha
+        // only (the call fails for post-multiplied, whatever the
+        // capabilities list)
+        let order = if cfg!(windows) {
+            [
+                wgpu::CompositeAlphaMode::PreMultiplied,
+                wgpu::CompositeAlphaMode::PostMultiplied,
+            ]
+        } else {
+            [
+                wgpu::CompositeAlphaMode::PostMultiplied,
+                wgpu::CompositeAlphaMode::PreMultiplied,
+            ]
+        };
+        let alpha_mode = order
+            .into_iter()
+            .find(|m| caps.alpha_modes.contains(m))
+            .unwrap_or(wgpu::CompositeAlphaMode::Auto);
         let premultiplied =
             cfg!(target_os = "macos") || alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied;
         let max_dim = device.limits().max_texture_dimension_2d;

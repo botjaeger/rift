@@ -11,6 +11,9 @@ import tempfile
 import time
 import tomllib
 
+# clearing a text field: ⌘⌫ on macOS, Ctrl+Backspace elsewhere (input::primary)
+P = "cmd" if sys.platform == "darwin" else "ctrl"
+
 
 def main():
     started = time.monotonic()
@@ -38,7 +41,7 @@ def main():
         return [f"a11y click {label}", "wait 80"]
 
     def field(label, value):
-        return [*click(label), "key cmd+backspace", f"paste {encoded(value)}", "key enter", "wait 80"]
+        return [*click(label), f"key {P}+backspace", f"paste {encoded(value)}", "key enter", "wait 80"]
 
     def capture(name):
         return ["wait 200", f"dump {root}/{name}.txt", f"shot {root}/{name}.png",
@@ -111,7 +114,7 @@ def main():
         *field("Sample text", "fixture=MARKER123 harmless"), *capture("secret-preview"),
         # the preview follows the typing (before Enter) and shows this pattern
         # alone: a built-in would mask the token
-        *click("Sample text"), "key cmd+backspace",
+        *click("Sample text"), f"key {P}+backspace",
         f"paste {encoded('token=abcdef123456 fixture=MARKER9')}", *capture("secret-live"),
         "key enter", "wait 80",
         *click("Save secret pattern"), *capture("secret-saved"),

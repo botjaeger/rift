@@ -59,7 +59,8 @@ impl AcceptKey {
         match self {
             AcceptKey::Right => "→",
             AcceptKey::Tab => "Tab",
-            AcceptKey::ShiftRight => "⇧→",
+            AcceptKey::ShiftRight if cfg!(target_os = "macos") => "⇧→",
+            AcceptKey::ShiftRight => "Shift+→",
             AcceptKey::Custom => "Custom…",
         }
     }
@@ -95,7 +96,7 @@ fn accept_binding(config: &Config) -> Option<rift_core::keybindings::Binding> {
 pub fn accept_key_text(config: &Config) -> String {
     match AcceptKey::current(config) {
         AcceptKey::Custom => accept_binding(config)
-            .map(|b| b.chips().concat())
+            .map(|b| b.label())
             .unwrap_or_else(|| "→".into()),
         k => k.label().into(),
     }
@@ -1039,11 +1040,17 @@ mod tests {
         c.keybindings
             .insert("accept_autosuggestion".into(), "shift+right".into());
         assert_eq!(AcceptKey::current(&c), AcceptKey::ShiftRight);
-        assert_eq!(accept_key_text(&c), "⇧→");
+        assert_eq!(
+            accept_key_text(&c),
+            rift_core::keybindings::hint("shift+right")
+        );
         c.keybindings
             .insert("accept_autosuggestion".into(), "ctrl+alt+l".into());
         assert_eq!(AcceptKey::current(&c), AcceptKey::Custom);
-        assert_eq!(accept_key_text(&c), "⌃⌥L");
+        assert_eq!(
+            accept_key_text(&c),
+            rift_core::keybindings::hint("ctrl+alt+l")
+        );
         // `none` or a value that is no key binds nothing
         for v in ["none", "", "ctrl+nokey"] {
             c.keybindings

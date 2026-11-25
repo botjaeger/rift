@@ -147,6 +147,9 @@ pub struct BlockStore {
     /// wins over the text read back from the screen, which loses combining
     /// marks and turns continuation prompts (PS2) into command text.
     submitted: Option<String>,
+    /// When `submitted` was: a shell that never sends 133;C (cmd.exe) has
+    /// its command's time measured from the submission to the next prompt.
+    submitted_at: Option<Instant>,
     /// A background block is open before the waiting prompt: more output
     /// before the next prompt extends it.
     background_open: bool,
@@ -253,6 +256,11 @@ impl BlockStore {
         // said it started (bash 3.2's DEBUG trap misses `cmd &`; a syntax
         // error): it is a block of what it printed, with no exit status
         let submitted = if redrawn { None } else { self.submitted.take() };
+        let submitted_at = if redrawn {
+            None
+        } else {
+            self.submitted_at.take()
+        };
         self.background_open = false;
         self.answer_pending = false;
         let after_resize = std::mem::take(&mut self.resized_at_prompt);
@@ -269,7 +277,8 @@ impl BlockStore {
             last.end = Some(abs);
             last.state = BlockState::Done {
                 exit: None,
-                duration: Duration::ZERO,
+                duration: submitted_at
+                    .map_or(Duration::ZERO, |at| now.saturating_duration_since(at)),
             };
             last.finished_at = Some(wall);
             last.replayed = replaying;
@@ -497,6 +506,7 @@ impl BlockStore {
             .is_some_and(|b| b.state == BlockState::Prompt)
         {
             self.submitted = Some(command.to_string());
+            self.submitted_at = Some(self.now());
         }
     }
 
@@ -523,6 +533,7 @@ impl BlockStore {
         let now = self.now();
         self.typed_ahead = false;
         let submitted = self.submitted.take();
+        self.submitted_at = None;
         if let Some(last) = self.blocks.back_mut()
             && last.state == BlockState::Prompt
         {
@@ -924,6 +935,30 @@ mod tests {
         s.on_prompt_start(8);
         s.on_output_start(9, "date".into());
         assert_eq!(s.last().unwrap().command, "date");
+    }
+
+    #[test]
+    fn a_command_without_a_start_marker_times_from_its_submission() {
+        // cmd.exe's prompt carries A, B and D but no 133;C: the block a new
+        // prompt closes takes the time since the editor submitted it (not
+        // 0 ms, which reads as a real measurement)
+        let t0 = Instant::now();
+        let mut s = BlockStore::default();
+        s.set_clock(Some(t0));
+        s.on_prompt_start(0);
+        s.on_command_start(0, 20);
+        s.stamp_submit(None, false, None, "dir /s");
+        s.set_clock(Some(t0 + Duration::from_millis(1500)));
+        s.on_prompt_start(9);
+        let b = s.snapshot()[0].clone();
+        assert_eq!(b.command, "dir /s");
+        assert_eq!(
+            b.state,
+            BlockState::Done {
+                exit: None,
+                duration: Duration::from_millis(1500)
+            }
+        );
     }
 
     #[test]

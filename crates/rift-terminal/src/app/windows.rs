@@ -147,14 +147,31 @@ impl App {
             .with_title("Rift")
             .with_window_icon(crate::icon::window_icon(self.config.app_icon))
             // always transparent so `window_opacity` can change live
-            .with_transparent(true)
-            .with_inner_size(match frame {
-                Some(f) => LogicalSize::new(f.width, f.height),
-                None => {
-                    let (w, h) = self.config.window_size();
-                    LogicalSize::new(w, h)
+            .with_transparent(true);
+        match frame {
+            Some(f) => attrs = attrs.with_inner_size(LogicalSize::new(f.width, f.height)),
+            None => {
+                let (w, h) = self.config.window_size();
+                attrs = attrs.with_inner_size(LogicalSize::new(w, h));
+                // never larger than the screen it opens on (a small display,
+                // a VM): at most 90% of it each way, centred on it; a headless
+                // run shows no window and keeps the configured size
+                if let Some(m) = event_loop.primary_monitor().filter(|_| !self.headless) {
+                    let scale = m.scale_factor();
+                    let s = m.size().to_logical::<f64>(scale);
+                    let (fw, fh) = (w.min(s.width * 0.9), h.min(s.height * 0.9));
+                    if (fw, fh) != (w, h) {
+                        let at = m.position().to_logical::<f64>(scale);
+                        attrs = attrs
+                            .with_inner_size(LogicalSize::new(fw, fh))
+                            .with_position(winit::dpi::LogicalPosition::new(
+                                at.x + (s.width - fw) / 2.0,
+                                at.y + (s.height - fh) / 2.0,
+                            ));
+                    }
                 }
-            });
+            }
+        }
         if let Some(f) = frame {
             attrs = attrs
                 .with_position(winit::dpi::LogicalPosition::new(f.x, f.y))
@@ -190,6 +207,14 @@ impl App {
                 crate::icon::set_dock_icon(self.config.app_icon);
             }
         }
+        // Windows: the GPU draws through a DirectComposition visual
+        // (rift_renderer::gpu); without its own redirection surface under
+        // that visual, a translucent ground shows the desktop, not grey
+        #[cfg(windows)]
+        {
+            use winit::platform::windows::WindowAttributesExtWindows;
+            attrs = attrs.with_no_redirection_bitmap(true);
+        }
         // X11 WM_CLASS / Wayland app_id "rift" matches rift.desktop, so
         // docks, taskbars and switchers show its hicolor icon
         #[cfg(all(unix, not(target_os = "macos")))]
@@ -212,6 +237,28 @@ impl App {
             &window,
             self.proxy.clone(),
         ));
+        // Windows: the tab strip takes over the title bar (not the drop-down
+        // window, which has no frame at all), before the window first shows:
+        // Windows' caption never flashes. The first frame sets the strip's
+        // real regions (`sync_caption`)
+        #[cfg(windows)]
+        if !dropdown {
+            crate::win_frame::install(&window);
+            if self.strip_shown() {
+                let scale = window.scale_factor() as f32;
+                let w = window.inner_size().width as f32 / scale;
+                let bar = tabbar::bar_h();
+                crate::win_frame::set_regions(
+                    &window,
+                    crate::win_frame::Regions {
+                        strip_h: (bar * scale).round() as i32,
+                        buttons: crate::win_frame::button_rects(w, bar)
+                            .map(|r| crate::win_frame::to_physical(r, scale)),
+                        controls: Vec::new(),
+                    },
+                );
+            }
+        }
         // the drop-down window shows when it slides in
         if !self.headless && !dropdown {
             window.set_visible(true);

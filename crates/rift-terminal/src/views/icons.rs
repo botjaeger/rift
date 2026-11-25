@@ -43,6 +43,8 @@ pub enum Icon {
     Launch,
     Info,
     Lock,
+    /// A shield (Windows: Rift runs as administrator).
+    Shield,
     /// `!` (a failed action).
     Alert,
     /// A phone (an action from a paired phone).
@@ -325,5 +327,21 @@ pub fn draw(layer: &mut Layer, icon: Icon, c: [f32; 2], size: f32, color: Color)
                 ],
             );
         }
+        Icon::Shield => poly(
+            layer,
+            &[
+                (8.0, 1.5),
+                (13.5, 3.5),
+                (13.5, 7.5),
+                (12.6, 10.6),
+                (10.6, 13.0),
+                (8.0, 14.5),
+                (5.4, 13.0),
+                (3.4, 10.6),
+                (2.5, 7.5),
+                (2.5, 3.5),
+                (8.0, 1.5),
+            ],
+        ),
     }
 }

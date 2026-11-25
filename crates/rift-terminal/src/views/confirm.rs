@@ -425,9 +425,13 @@ pub fn render(
     let hint_w =
         |engine: &mut TextEngine, k: &str| engine.measure(k, 11.5, FONT_SANS, Weight::NORMAL);
     let label_w = engine.measure(dialog.confirm_label, 13.0, FONT_SANS, Weight::MEDIUM);
-    let confirm_w = 14.0 + label_w + 8.0 + hint_w(engine, "⏎") + 14.0;
+    // ⏎ and esc: Enter and Esc off macOS
+    let platform = rift_core::keybindings::Platform::current();
+    let enter_key = rift_core::keybindings::cap_for("⏎", platform);
+    let esc_key = rift_core::keybindings::cap_for("esc", platform);
+    let confirm_w = 14.0 + label_w + 8.0 + hint_w(engine, enter_key) + 14.0;
     let cancel_lw = engine.measure(dialog.cancel_label, 13.0, FONT_SANS, Weight::MEDIUM);
-    let cancel_w = 14.0 + cancel_lw + 8.0 + hint_w(engine, "esc") + 14.0;
+    let cancel_w = 14.0 + cancel_lw + 8.0 + hint_w(engine, esc_key) + 14.0;
     let confirm = [x + modal_w - pad - confirm_w, by, confirm_w, BUTTON_H];
     let cancel = [confirm[0] - 8.0 - cancel_w, by, cancel_w, BUTTON_H];
 
@@ -446,7 +450,7 @@ pub fn render(
         theme.text_ui,
     );
     layer.text(
-        text(engine, "esc", 11.5, FONT_SANS, Weight::NORMAL),
+        text(engine, esc_key, 11.5, FONT_SANS, Weight::NORMAL),
         cancel[0] + 14.0 + cancel_lw + 8.0,
         label_y + 1.5,
         theme.text_muted,
@@ -479,7 +483,7 @@ pub fn render(
         ink,
     );
     layer.text(
-        text(engine, "⏎", 11.5, FONT_SANS, Weight::NORMAL),
+        text(engine, enter_key, 11.5, FONT_SANS, Weight::NORMAL),
         confirm[0] + 14.0 + label_w + 8.0,
         label_y + 1.5,
         ink.with_alpha(0.7),
@@ -500,11 +504,7 @@ pub fn render(
     let mut check = [0.0; 4];
     if let Some(label) = dialog.extra_label {
         let lw = engine.measure(label, 13.0, FONT_SANS, Weight::MEDIUM);
-        let hint = if cfg!(target_os = "macos") {
-            "⌘⌫"
-        } else {
-            "Ctrl+⌫"
-        };
+        let hint = &rift_core::keybindings::primary_hint("backspace");
         let ew = 14.0 + lw + 8.0 + hint_w(engine, hint) + 14.0;
         check = [x + pad, by, ew, BUTTON_H];
         layer.bordered(

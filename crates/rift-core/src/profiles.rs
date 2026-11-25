@@ -157,6 +157,10 @@ pub fn validate(profiles: &[Profile]) -> Result<(), String> {
 /// `PATH` finds when several share a name, else the first listed. Each is a
 /// profile named after its basename.
 pub fn discover(shells_file: &Path, path_var: Option<&OsStr>) -> Vec<Profile> {
+    // Windows has no shells file: the known shells and WSL distributions
+    if cfg!(windows) {
+        return windows_discover(&RealHost::new(path_var));
+    }
     let Ok(text) = std::fs::read_to_string(shells_file) else {
         return Vec::new();
     };
@@ -197,6 +201,254 @@ pub fn discover(shells_file: &Path, path_var: Option<&OsStr>) -> Vec<Profile> {
             Profile::shell(&name, chosen)
         })
         .collect()
+}
+
+/// What discovery asks of a Windows machine, so the rules run against a
+/// fake one in tests (and on any host).
+pub trait WindowsHost {
+    /// An environment variable (`ProgramFiles`, `SystemRoot`, `ComSpec`).
+    fn var(&self, name: &str) -> Option<String>;
+    /// Whether the file exists.
+    fn exists(&self, path: &str) -> bool;
+    /// `exe` (`pwsh.exe`) found through `PATH`.
+    fn find_on_path(&self, exe: &str) -> Option<String>;
+    /// The names of the directories in `dir`.
+    fn subdirs(&self, dir: &str) -> Vec<String>;
+    /// The raw output of `<wsl> -l -q`; `None` when it cannot run or fails.
+    fn wsl_list(&self, wsl: &str) -> Option<Vec<u8>>;
+}
+
+/// This machine, for [`WindowsHost`].
+pub struct RealHost<'a> {
+    path_var: Option<&'a OsStr>,
+}
+
+impl<'a> RealHost<'a> {
+    pub fn new(path_var: Option<&'a OsStr>) -> RealHost<'a> {
+        RealHost { path_var }
+    }
+}
+
+impl WindowsHost for RealHost<'_> {
+    fn var(&self, name: &str) -> Option<String> {
+        std::env::var(name).ok().filter(|v| !v.trim().is_empty())
+    }
+
+    fn exists(&self, path: &str) -> bool {
+        // an app execution alias is a reparse point `metadata` may refuse
+        let p = Path::new(path);
+        p.exists() || std::fs::symlink_metadata(p).is_ok()
+    }
+
+    fn find_on_path(&self, exe: &str) -> Option<String> {
+        std::env::split_paths(self.path_var?)
+            .filter(|d| d.is_absolute())
+            .map(|d| d.join(exe))
+            .find(|p| self.exists(&p.to_string_lossy()))
+            .map(|p| p.to_string_lossy().into_owned())
+    }
+
+    fn subdirs(&self, dir: &str) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .filter_map(|e| e.file_name().into_string().ok())
+            .collect()
+    }
+
+    fn wsl_list(&self, wsl: &str) -> Option<Vec<u8>> {
+        // `wsl -l` does not start the VM, but a broken install can hang: a
+        // thread and a deadline keep the start-up from waiting on it
+        let wsl = wsl.to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut cmd = std::process::Command::new(wsl);
+            cmd.args(["-l", "-q"])
+                .stdin(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+            }
+            let _ = tx.send(cmd.output());
+        });
+        let out = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .ok()?
+            .ok()?;
+        out.status.success().then_some(out.stdout)
+    }
+}
+
+fn win_join(dir: &str, name: &str) -> String {
+    format!(r"{}\{name}", dir.trim_end_matches('\\'))
+}
+
+fn win_parent(path: &str) -> Option<&str> {
+    path.rfind('\\')
+        .map(|i| &path[..i])
+        .filter(|p| !p.is_empty())
+}
+
+fn win_root(host: &dyn WindowsHost) -> Option<String> {
+    host.var("SystemRoot").or_else(|| host.var("windir"))
+}
+
+/// PowerShell 7: `pwsh.exe` on `PATH` (a Store app-execution alias only when
+/// no installed copy exists: the alias is not a file Rift can start), else
+/// the newest `%ProgramFiles%\PowerShell\<version>\pwsh.exe`.
+pub fn windows_pwsh7(host: &dyn WindowsHost) -> Option<String> {
+    let on_path = host.find_on_path("pwsh.exe");
+    let alias = |p: &str| p.to_ascii_lowercase().contains(r"\windowsapps\");
+    if let Some(p) = on_path.as_deref().filter(|p| !alias(p)) {
+        return Some(p.to_string());
+    }
+    let installed = host.var("ProgramFiles").and_then(|pf| {
+        let root = win_join(&pf, "PowerShell");
+        // a bigger number before a smaller one, `7` before `7-preview`
+        let key = |d: &str| {
+            let major: u32 = d
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse()
+                .unwrap_or(0);
+            (major, !d.contains('-'))
+        };
+        let mut dirs = host.subdirs(&root);
+        dirs.sort_by_key(|d| std::cmp::Reverse(key(d)));
+        dirs.into_iter()
+            .map(|d| win_join(&win_join(&root, &d), "pwsh.exe"))
+            .find(|p| host.exists(p))
+    });
+    installed.or(on_path)
+}
+
+/// Windows PowerShell 5.1.
+pub fn windows_ps5(host: &dyn WindowsHost) -> Option<String> {
+    let p = win_join(
+        &win_root(host)?,
+        r"System32\WindowsPowerShell\v1.0\powershell.exe",
+    );
+    host.exists(&p).then_some(p)
+}
+
+/// The Command Prompt: `%ComSpec%`, else `%SystemRoot%\System32\cmd.exe`.
+pub fn windows_cmd(host: &dyn WindowsHost) -> Option<String> {
+    let comspec = host.var("ComSpec").filter(|c| host.exists(c));
+    comspec.or_else(|| {
+        let p = win_join(&win_root(host)?, r"System32\cmd.exe");
+        host.exists(&p).then_some(p)
+    })
+}
+
+/// Git for Windows' bash: `%ProgramFiles%\Git\bin\bash.exe`, else the
+/// `..\bin\bash.exe` of the `git.exe` on `PATH` (`Git\cmd\git.exe`).
+pub fn windows_git_bash(host: &dyn WindowsHost) -> Option<String> {
+    let fixed = host
+        .var("ProgramFiles")
+        .map(|pf| win_join(&pf, r"Git\bin\bash.exe"))
+        .filter(|p| host.exists(p));
+    fixed.or_else(|| {
+        let git = host.find_on_path("git.exe")?;
+        let root = win_parent(win_parent(&git)?)?;
+        let p = win_join(root, r"bin\bash.exe");
+        host.exists(&p).then_some(p)
+    })
+}
+
+/// The distribution names in the output of `wsl.exe -l -q`: UTF-16LE with a
+/// possible byte order mark and CRLF line ends (UTF-8 when `WSL_UTF8` is
+/// set), stray NULs tolerated. Skips Docker Desktop's own distributions, a
+/// repeated name, and any line with whitespace in it (a distribution name
+/// has none: such a line is a message, not a name).
+pub fn parse_wsl_list(raw: &[u8]) -> Vec<String> {
+    let raw = raw.strip_prefix(&[0xFF, 0xFE]).unwrap_or(raw);
+    let text = if raw.contains(&0) {
+        let units: Vec<u16> = raw
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
+            .collect();
+        String::from_utf16_lossy(&units)
+    } else {
+        String::from_utf8_lossy(raw).into_owned()
+    };
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines().take(256) {
+        let name: String = line
+            .chars()
+            .filter(|&c| c != '\0' && c != '\u{feff}')
+            .collect();
+        let name = name.trim();
+        let name = name.strip_suffix("(Default)").map_or(name, str::trim_end);
+        if name.is_empty()
+            || name.len() > 64
+            || name.chars().any(|c| c.is_whitespace() || c.is_control())
+            || name.to_ascii_lowercase().starts_with("docker-desktop")
+            || out.iter().any(|n| n == name)
+        {
+            continue;
+        }
+        out.push(name.to_string());
+    }
+    out
+}
+
+/// A generated profile running `program` with `args`.
+fn windows_shell(name: &str, program: String, args: &[&str]) -> Profile {
+    Profile {
+        args: args.iter().map(|a| a.to_string()).collect(),
+        ..Profile::shell(name, Path::new(&program))
+    }
+}
+
+/// The shells of a Windows machine, the default first: PowerShell 7,
+/// Windows PowerShell, Command Prompt, Git Bash, then each WSL
+/// distribution. A profile's `command` is the program's path (its icon is
+/// that file's).
+pub fn windows_discover(host: &dyn WindowsHost) -> Vec<Profile> {
+    let mut out = Vec::new();
+    if let Some(p) = windows_pwsh7(host) {
+        out.push(windows_shell("PowerShell 7", p, &[]));
+    }
+    if let Some(p) = windows_ps5(host) {
+        out.push(windows_shell("Windows PowerShell", p, &[]));
+    }
+    if let Some(p) = windows_cmd(host) {
+        out.push(windows_shell("Command Prompt", p, &[]));
+    }
+    if let Some(p) = windows_git_bash(host) {
+        out.push(windows_shell("Git Bash", p, &[]));
+    }
+    let wsl = host.find_on_path("wsl.exe").or_else(|| {
+        let p = win_join(&win_root(host)?, r"System32\wsl.exe");
+        host.exists(&p).then_some(p)
+    });
+    if let Some(wsl) = wsl
+        && let Some(raw) = host.wsl_list(&wsl)
+    {
+        for distro in parse_wsl_list(&raw) {
+            out.push(windows_shell(
+                &format!("{distro} (WSL)"),
+                wsl.clone(),
+                &["-d", &distro],
+            ));
+        }
+    }
+    out
+}
+
+/// The program a new pane runs when nothing names one: PowerShell 7, else
+/// Windows PowerShell, else the Command Prompt.
+pub fn windows_default(host: &dyn WindowsHost) -> Option<String> {
+    windows_pwsh7(host)
+        .or_else(|| windows_ps5(host))
+        .or_else(|| windows_cmd(host))
 }
 
 /// The profiles to offer: config.toml's, minus the `hidden` and the
@@ -435,6 +687,223 @@ pub fn basename(program: &str) -> &str {
     match name.len().checked_sub(4) {
         Some(i) if name.is_char_boundary(i) && name[i..].eq_ignore_ascii_case(".exe") => &name[..i],
         _ => name,
+    }
+}
+
+#[cfg(test)]
+mod windows_discovery_tests {
+    use super::*;
+    use std::collections::{HashMap, HashSet};
+
+    /// A fake machine: variables, files, `PATH` hits, directories, the
+    /// output of `wsl -l -q`.
+    #[derive(Default)]
+    struct Fake {
+        vars: HashMap<&'static str, &'static str>,
+        files: HashSet<&'static str>,
+        path: HashMap<&'static str, &'static str>,
+        dirs: Vec<(&'static str, Vec<&'static str>)>,
+        wsl: Option<Vec<u8>>,
+    }
+
+    impl WindowsHost for Fake {
+        fn var(&self, name: &str) -> Option<String> {
+            self.vars.get(name).map(|v| v.to_string())
+        }
+        fn exists(&self, path: &str) -> bool {
+            self.files.contains(path)
+        }
+        fn find_on_path(&self, exe: &str) -> Option<String> {
+            self.path.get(exe).map(|v| v.to_string())
+        }
+        fn subdirs(&self, dir: &str) -> Vec<String> {
+            self.dirs
+                .iter()
+                .find(|(d, _)| *d == dir)
+                .map(|(_, v)| v.iter().map(|s| s.to_string()).collect())
+                .unwrap_or_default()
+        }
+        fn wsl_list(&self, _: &str) -> Option<Vec<u8>> {
+            self.wsl.clone()
+        }
+    }
+
+    const PS5: &str = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
+    const CMD: &str = r"C:\Windows\System32\cmd.exe";
+    const WSL: &str = r"C:\Windows\System32\wsl.exe";
+
+    fn win11() -> Fake {
+        Fake {
+            vars: HashMap::from([
+                ("SystemRoot", r"C:\Windows"),
+                ("ComSpec", CMD),
+                ("ProgramFiles", r"C:\Program Files"),
+            ]),
+            files: HashSet::from([PS5, CMD]),
+            ..Fake::default()
+        }
+    }
+
+    fn utf16(s: &str, bom: bool) -> Vec<u8> {
+        let mut out = if bom { vec![0xFF, 0xFE] } else { vec![] };
+        out.extend(s.encode_utf16().flat_map(u16::to_le_bytes));
+        out
+    }
+
+    fn names(p: &[Profile]) -> Vec<&str> {
+        p.iter().map(|p| p.name.as_str()).collect()
+    }
+
+    #[test]
+    fn wsl_list_parses_utf16_with_bom_crlf_and_nuls() {
+        let raw = utf16("Ubuntu\r\nDebian\r\n", true);
+        assert_eq!(parse_wsl_list(&raw), ["Ubuntu", "Debian"]);
+        // no BOM, no trailing line end
+        assert_eq!(parse_wsl_list(&utf16("kali-linux", false)), ["kali-linux"]);
+        // a stray NUL pair and a BOM in the middle of the text
+        let raw = utf16("Ubuntu\r\n\0\u{feff}Arch\r\n", false);
+        assert_eq!(parse_wsl_list(&raw), ["Ubuntu", "Arch"]);
+        // UTF-8 (WSL_UTF8=1), `(Default)` of the long listing, a repeat
+        assert_eq!(
+            parse_wsl_list(b"Ubuntu (Default)\nDebian\nDebian\n"),
+            ["Ubuntu", "Debian"]
+        );
+    }
+
+    #[test]
+    fn wsl_list_skips_docker_desktop_messages_and_empty_output() {
+        let raw = utf16(
+            "docker-desktop\r\nDocker-Desktop-data\r\nUbuntu-22.04\r\n",
+            true,
+        );
+        assert_eq!(parse_wsl_list(&raw), ["Ubuntu-22.04"]);
+        assert!(parse_wsl_list(b"").is_empty());
+        assert!(parse_wsl_list(&utf16("\r\n\r\n", true)).is_empty());
+        assert!(parse_wsl_list(&[0xFF, 0xFE]).is_empty());
+        // a message on stdout is not a distribution
+        let msg = utf16(
+            "Windows Subsystem for Linux has no installed distributions.\r\n",
+            true,
+        );
+        assert!(parse_wsl_list(&msg).is_empty());
+        // an odd trailing byte does not panic
+        assert_eq!(parse_wsl_list(&[b'A', 0, b'B']), ["A"]);
+    }
+
+    #[test]
+    fn a_fresh_windows_11_offers_windows_powershell_and_the_command_prompt() {
+        let found = windows_discover(&win11());
+        assert_eq!(names(&found), ["Windows PowerShell", "Command Prompt"]);
+        assert_eq!(found[0].command.as_deref(), Some(PS5));
+        assert_eq!(found[1].command.as_deref(), Some(CMD));
+        assert!(found.iter().all(Profile::is_generated));
+        assert_eq!(windows_default(&win11()).as_deref(), Some(PS5));
+    }
+
+    #[test]
+    fn a_dev_machine_lists_every_shell_with_powershell_7_first() {
+        let pwsh = r"C:\Program Files\PowerShell\7\pwsh.exe";
+        let bash = r"C:\Program Files\Git\bin\bash.exe";
+        let mut m = win11();
+        m.files.extend([pwsh, bash, WSL]);
+        m.path.insert("pwsh.exe", pwsh);
+        m.wsl = Some(utf16("Ubuntu\r\ndocker-desktop\r\nDebian\r\n", true));
+        let found = windows_discover(&m);
+        assert_eq!(
+            names(&found),
+            [
+                "PowerShell 7",
+                "Windows PowerShell",
+                "Command Prompt",
+                "Git Bash",
+                "Ubuntu (WSL)",
+                "Debian (WSL)"
+            ]
+        );
+        assert_eq!(found[0].command.as_deref(), Some(pwsh));
+        assert_eq!(found[3].command.as_deref(), Some(bash));
+        assert_eq!(found[4].command.as_deref(), Some(WSL));
+        assert_eq!(found[4].args, ["-d", "Ubuntu"]);
+        assert_eq!(found[5].args, ["-d", "Debian"]);
+        assert!(found[..4].iter().all(|p| p.args.is_empty()));
+        assert_eq!(windows_default(&m).as_deref(), Some(pwsh));
+    }
+
+    #[test]
+    fn powershell_7_off_path_is_the_newest_under_program_files() {
+        let mut m = win11();
+        m.dirs = vec![(
+            r"C:\Program Files\PowerShell",
+            vec!["6", "7", "7-preview", "10"],
+        )];
+        m.files.extend([
+            r"C:\Program Files\PowerShell\7\pwsh.exe",
+            r"C:\Program Files\PowerShell\6\pwsh.exe",
+            r"C:\Program Files\PowerShell\7-preview\pwsh.exe",
+        ]);
+        // 10 has no pwsh.exe: the next newest
+        assert_eq!(
+            windows_pwsh7(&m).as_deref(),
+            Some(r"C:\Program Files\PowerShell\7\pwsh.exe")
+        );
+        m.files.insert(r"C:\Program Files\PowerShell\10\pwsh.exe");
+        assert_eq!(
+            windows_pwsh7(&m).as_deref(),
+            Some(r"C:\Program Files\PowerShell\10\pwsh.exe")
+        );
+    }
+
+    #[test]
+    fn a_store_alias_on_path_yields_to_an_installed_powershell_7() {
+        let alias = r"C:\Users\me\AppData\Local\Microsoft\WindowsApps\pwsh.exe";
+        let real = r"C:\Program Files\PowerShell\7\pwsh.exe";
+        let mut m = win11();
+        m.path.insert("pwsh.exe", alias);
+        m.files.insert(alias);
+        // alone, the alias is still the best there is
+        assert_eq!(windows_pwsh7(&m).as_deref(), Some(alias));
+        m.dirs = vec![(r"C:\Program Files\PowerShell", vec!["7"])];
+        m.files.insert(real);
+        assert_eq!(windows_pwsh7(&m).as_deref(), Some(real));
+    }
+
+    #[test]
+    fn git_bash_is_found_beside_git_on_path() {
+        let mut m = win11();
+        let bash = r"D:\tools\Git\bin\bash.exe";
+        m.path.insert("git.exe", r"D:\tools\Git\cmd\git.exe");
+        assert_eq!(windows_git_bash(&m), None);
+        m.files.insert(bash);
+        assert_eq!(windows_git_bash(&m).as_deref(), Some(bash));
+    }
+
+    #[test]
+    fn the_command_prompt_falls_back_to_system32_without_comspec() {
+        let mut m = win11();
+        m.vars.remove("ComSpec");
+        assert_eq!(windows_cmd(&m).as_deref(), Some(CMD));
+        // a ComSpec that is not there is ignored
+        m.vars.insert("ComSpec", r"Z:\nope\cmd.exe");
+        assert_eq!(windows_cmd(&m).as_deref(), Some(CMD));
+    }
+
+    #[test]
+    fn a_missing_or_failing_wsl_adds_nothing() {
+        let mut m = win11();
+        m.files.insert(WSL);
+        m.wsl = None;
+        assert_eq!(names(&windows_discover(&m)).len(), 2);
+        // wsl.exe absent: its list is not even asked
+        let mut m = win11();
+        m.wsl = Some(utf16("Ubuntu\r\n", true));
+        assert_eq!(names(&windows_discover(&m)).len(), 2);
+    }
+
+    #[test]
+    fn no_shell_at_all_is_an_empty_list_and_no_default() {
+        let m = Fake::default();
+        assert!(windows_discover(&m).is_empty());
+        assert_eq!(windows_default(&m), None);
     }
 }
 

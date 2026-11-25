@@ -203,7 +203,8 @@ impl App {
             }
             Key::Named(NamedKey::Backspace) => {
                 if let Some((_, draft)) = self.win.settings.text_edit.as_mut() {
-                    if mods.super_key() || mods.alt_key() {
+                    // ⌘⌫ (Ctrl+Backspace off macOS) or ⌥⌫ clears
+                    if input::primary(mods) || mods.alt_key() {
                         draft.clear();
                     } else {
                         crate::state::pop_grapheme(draft);

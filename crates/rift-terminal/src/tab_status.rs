@@ -213,9 +213,45 @@ pub fn hint_numbers(shown: usize) -> Vec<Option<u8>> {
         .collect()
 }
 
+/// A program's title that only names the shell's own program: Windows
+/// titles a console with the program's path (`C:\…\powershell.exe`,
+/// prefixed "Administrator: " when elevated). It says nothing the tab
+/// does not, so the tab card leaves it out.
+pub fn is_program_path(title: &str, program: &str) -> bool {
+    let t = title.trim();
+    let t = t.strip_prefix("Administrator: ").unwrap_or(t);
+    let base = |s: &str| {
+        s.rsplit(['\\', '/'])
+            .next()
+            .unwrap_or(s)
+            .trim_end_matches(".exe")
+            .to_ascii_lowercase()
+    };
+    t.eq_ignore_ascii_case(program.trim())
+        || (t.contains(['\\', '/']) && !program.is_empty() && base(t) == base(program))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_console_title_of_the_shells_own_path_is_left_out() {
+        let ps = r"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe";
+        assert!(is_program_path(ps, ps));
+        assert!(is_program_path(&format!("Administrator: {ps}"), ps));
+        // another spelling of the same program's path
+        assert!(is_program_path(
+            r"C:\Windows\system32\WindowsPowerShell\v1.0\powershell.exe",
+            ps
+        ));
+        assert!(is_program_path(r"C:\WINDOWS\system32\cmd.exe", "cmd.exe"));
+        // a title the program set itself stays
+        assert!(!is_program_path("npm run dev", ps));
+        assert!(!is_program_path("Administrator: npm run dev", ps));
+        assert!(!is_program_path(r"C:\tools\vim.exe", ps));
+        assert!(!is_program_path("powershell", ps));
+    }
     use Status::*;
 
     fn sig() -> PaneSignals {

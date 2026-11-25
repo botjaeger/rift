@@ -11,7 +11,7 @@ How to build, test, verify and release Rift. Agent-specific rules are in
 | Rust | 1.98.0, pinned in `rust-toolchain.toml` (rustup installs it and rustfmt + clippy on first use) |
 | macOS | 11 or newer, Xcode Command Line Tools (`xcode-select --install`) |
 | Linux build packages | `libxkbcommon-dev libwayland-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev pkg-config` |
-| Gate tools | `python3` (test gate: `release-manifest.py --self-test`; ui gate); `shellcheck`, `zsh`, `fish` (shell gate); Node 22 + pnpm via `corepack enable` (mobile gate); `docker` (linux and windows gates); `mingw-w64` and `rustup target add x86_64-pc-windows-gnu` (windows gate) |
+| Gate tools | `python3` (test gate: `release-manifest.py --self-test`; ui gate); `shellcheck`, `zsh`, `fish` (shell gate); Node 22 + pnpm via `corepack enable` (mobile and site gates; the site's pnpm fetches the Node 24 it pins); `docker` (linux and windows gates); `mingw-w64` and `rustup target add x86_64-pc-windows-gnu` (windows gate) |
 | Packaging (optional) | `python3` + Pillow (`gen-icon.py`), `dpkg-dev`, `file`, `libfuse2` (AppImage) |
 
 ```sh
@@ -32,13 +32,39 @@ cargo build --release --target x86_64-pc-windows-gnu   # Windows (cross, mingw-w
 ### Windows (in progress)
 
 Rift builds for Windows 10 1809+ (ConPTY) and its platform layer is
-tested under Wine (the `windows` gate); it has not yet been verified on a
-Windows machine. What differs there:
+tested under Wine (the `windows` gate). It runs on Windows 11 (checked in
+a Windows 11 ARM virtual machine, Rift's x64 build under emulation, with
+Microsoft's software renderer): `scripts/win-vm.sh` copies a cross-built
+binary to such a machine over SSH, runs a `--script` file in its desktop
+session and fetches the shots, dump and desktop capture. Releases carry a
+beta download, `Rift-VERSION-windows-x86_64.zip` (`Rift.exe` and the README;
+`packaging/make-windows-zip.sh`, run by `scripts/release-local.sh`): built
+with mingw-w64, the icon and version embedded by `crates/rift-terminal/build.rs`
+(`windres`), not signed, and not in `latest.json` (no updater on Windows yet).
+What differs there:
 
 - Shells: the default is PowerShell 7 (`pwsh`), else Windows PowerShell,
   else `%ComSpec%` (cmd). PowerShell gets command blocks through
-  `shell/rift.ps1` (dot-sourced after the user's profile); cmd and others
-  run as a plain terminal. Enter is sent as CR.
+  `shell/rift.ps1`, run as text after the user's profile (Windows'
+  default execution policy refuses to load a `.ps1` file); cmd gets them
+  through its `PROMPT` (`shell/rift.cmd`, `cmd /k call`; no exit status,
+  and a command's time runs from its submission to the next prompt).
+  Enter is sent as CR.
+- Installed shells: PowerShell 7, Windows PowerShell, Command Prompt, Git
+  Bash and each WSL distribution become profiles (`profiles::discover`),
+  shown in the ⌄ menu with the program's own icon (`shell_icon.rs`).
+- ConPTY repaints the whole screen from its top after every resize, so a
+  pane that grows keeps its history where it is (alacritty's
+  `grow_from_history`, off on Windows); pulled into the screen, it put the
+  first prompt's block a line below its text. `RIFT_PTY_TRACE=<file>`
+  records what a pane's shell sent and every resize, in the form the
+  session tests replay (`fixtures/conpty-first-prompt.trace`).
+- The GPU draws through a DirectComposition visual (wgpu's
+  `DxgiFromVisual`, premultiplied alpha, no redirection surface), so
+  `window_opacity` shows the desktop; `window_blur` above 1 turns on
+  Windows 11's acrylic backdrop (it falls back to a solid colour without a
+  GPU, as in a virtual machine).
+- The tab strip is the title bar (docs/ui.md, "Windows title bar").
 - Panes always run local ConPTY shells: the session service (durable
   sessions), the control socket (`rift-terminal ctl`), updates, the `rift`
   command install and phone captures are Unix-only so far (`rift_pty::uds`
@@ -97,6 +123,7 @@ display-line building). Rendering is verified with the script driver below.
 | `shell` | `shellcheck` on packaging, scripts, git hooks and the bash hooks; `zsh -n` and `fish --no-execute` on the zsh and fish hooks |
 | `docs` | `CLAUDE.md` and `AGENTS.md` are identical; relative Markdown link targets exist (heading anchors are not checked; the vendored crates' upstream docs excepted) |
 | `mobile` | In `mobile/`: `pnpm install --frozen-lockfile`, `pnpm typecheck`, `pnpm lint`, `pnpm test` (vitest; decodes `crates/rift-remote/fixtures/`, the files the Rust protocol tests decode too) |
+| `site` | In `site/`: `pnpm install --frozen-lockfile`, `pnpm test` (the docs transforms and key tables), `pnpm check`, `pnpm build` (syncs the docs pages from `docs/`, reads the latest public release: needs the network) |
 | `release` | `cargo build --release --locked` |
 | `ui` | `scripts/ui-smoke.sh`, which runs `scripts/ui-smoke.py`: isolated scripted input, state assertions and PNG capture, in `RIFT_UI_SHARDS` (default 2) parallel shards (`RIFT_UI_SHARDS=1`: the file serially); `--only NAME[,NAME]` (or `RIFT_UI_ONLY`) runs only the groups holding those sections, in one process; requires Python 3 and a display (or `xvfb-run`) |
 | `ssh` | `scripts/ssh-ui-smoke.py`: actual palette install/cancel, SSH profile timeout/retry, remote blocks and path/shell completions against a disposable Docker SSH server. Scratch keys, HOME and XDG roots; requires Docker and OpenSSH clients. Captures remain in `target/ssh-ui-*`; fixture keys, control masters and container are removed |
@@ -105,7 +132,7 @@ display-line building). Rendering is verified with the script driver below.
 | `linux` | `clippy`, `test`, `doc` and a release build (with `examples/phone` and `rift-relay`) inside the Linux docker image (which also carries PowerShell, for the `rift.ps1` test), then `shell`, the scripted UI regressions and the memory soak (Xvfb, software Vulkan) in `packaging/ci-ubuntu.Dockerfile`, which installs the CI runner's packages from `packaging/ci-apt.txt` |
 
 ```sh
-scripts/gates.sh                 # fmt clippy test doc shell docs mobile
+scripts/gates.sh                 # fmt clippy test doc shell docs mobile site
 scripts/gates.sh all             # + release + ui + ssh + leak + windows + linux
 scripts/gates.sh clippy test     # a subset
 scripts/gates.sh ui --only NAME  # only these ui-smoke.py sections
@@ -118,7 +145,7 @@ gate prints one line (`-- test pass 212s`); its output goes to
 `target/gates/<gate>.log`, and the summary ends with the last 25 lines of
 every failed gate's log. `RIFT_GATES_VERBOSE=1` (and CI) streams every
 gate's output too. Every gate has a wall-clock limit (`limit_for` in the
-script: 5 min for fmt/shell/docs, 15 for test, 20 for clippy/doc/mobile/leak,
+script: 5 min for fmt/shell/docs, 15 for test, 20 for clippy/doc/mobile/site/leak,
 30 for release/ui/ssh, 60 for windows, 90 for linux; `RIFT_GATE_TIMEOUT=<seconds>` overrides
 them): past it, the processes still running are listed in the log (naming
 the hung test binary), stopped, and the gate fails. Interrupting the run
@@ -308,6 +335,7 @@ rift-terminal     winit app, views, input routing, a11y, control socket, script 
   └── rift-remote     mobile wire protocol, Noise XX transport, device registry, WebSocket gateway (over a Source trait), relay client and relay (`rift-relay`)
 
 mobile/           Expo companion (iOS, Android): pnpm, outside the Cargo workspace
+site/             the website (Astro, pnpm): docs pages built from docs/, deployed by .github/workflows/site.yml
 ```
 
 **One process, many windows.** `App` (`app.rs`) holds what every window

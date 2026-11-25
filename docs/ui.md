@@ -21,6 +21,24 @@ pane, history, autocomplete, palette, settings, controls, menus, panels).
   view never acts as titlebar (`mouseDownCanMoveWindow` is NO) and the native
   titlebar is trimmed to the traffic lights, so a double-click on a tab only
   renames it.
+- **Windows title bar.** The tab strip is the title bar, as in Windows
+  Terminal: Windows' caption is removed (the frame, shadow, rounded corners
+  and side and bottom resize borders stay) and the strip draws minimize,
+  maximize / restore and close at its right end, 46 px each, close red on
+  hover (`win_frame.rs`, `tabbar::window_buttons`). The empty strip drags
+  the window and a double-click maximizes it; hovering maximize opens
+  Windows' snap layouts; the top edge resizes (not while maximized);
+  right-click or Alt+Space opens the window menu. The frame follows the
+  theme (dark or light, its chrome colour). With the strip hidden
+  (`tab_bar`), Windows' own caption returns. A first window never opens
+  larger than 90 % of a small screen, and is centred on it then.
+- **Running as administrator (Windows).** When Rift holds administrator
+  rights (started as administrator, or any administrator's Rift while UAC
+  is off), every window's strip starts with a shield and "Admin" in the
+  theme's warning colour, then a divider; below 720 px of strip only the
+  shield stays. Its hover card: "Running as administrator — Every shell in
+  this window can change the whole computer. Start Rift normally to drop
+  it." It cannot be turned off.
 - The window reopens at its last position and size (maximized/fullscreen too)
   when `restore_session` is on; without a saved frame it opens
   `window_width` × `window_height`, and `launch_mode` opens it maximized or
@@ -160,7 +178,8 @@ removes both within a moment.
 - **Tab numbers**: hold ⌘ alone (the modifiers of `tab_select_1`) for
   300 ms and every tab shows its shortcut in the ×'s place, on active and
   inactive tabs: `⌘1`…`⌘8` by place among the shown tabs, `⌘9` on the last
-  (`tab_select_9` is the last tab; tabs 9…n−1 show none). Releasing ⌘ or
+  (`tab_select_9` is the last tab; tabs 9…n−1 show none; Windows and Linux:
+  hold Ctrl, `Ctrl+1`…). Releasing ⌘ or
   pressing any key (a chord such as ⌘C never flashes them) takes them away;
   a rebound `tab_select_N` shows its own chord, an unbound one none. The
   vertical rail shows them in the same place on its rows.
@@ -1617,7 +1636,11 @@ with `…`); the row grows to fit.
   ⌘/⌃/⌥ (or a function/navigation key) becomes the shortcut, Esc cancels,
   ⌫ unbinds; a chord taken by another action moves over with a toast naming
   it. While recording, the row reads `Press a shortcut · Esc cancels · ⌫
-  unbinds`. ⌃⌘K jumps straight here.
+  unbinds`. ⌃⌘K (Ctrl+Shift+, on Windows and Linux) jumps straight here.
+  Off macOS every shortcut on this page, in the palette, menus, the welcome
+  list, footers and tooltips reads as words, one chip per key (Ctrl, Shift,
+  D; Win or Super for ⌘; Enter, Backspace, Esc), and the recording hint as
+  `Press a shortcut · Esc cancels · Backspace unbinds`.
 - **Themes** — *Built-in themes plus `~/.config/rift/themes` (TOML or Warp
   YAML)*: an `All N | Dark N | Light N` filter (a theme file that does not
   load counts under All only) with `Active: <name>` at its right, then a

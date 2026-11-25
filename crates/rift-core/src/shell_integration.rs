@@ -5,6 +5,7 @@ pub const RIFT_ZSH: &str = include_str!("../../../shell/rift.zsh");
 pub const RIFT_BASH: &str = include_str!("../../../shell/rift.bash");
 pub const RIFT_FISH: &str = include_str!("../../../shell/rift.fish");
 pub const RIFT_PS1: &str = include_str!("../../../shell/rift.ps1");
+pub const RIFT_CMD: &str = include_str!("../../../shell/rift.cmd");
 const BASHRC: &str = include_str!("../../../shell/rift-bashrc");
 const BASHRC_CHILD: &str = include_str!("../../../shell/rift-bashrc-child");
 const ZSHENV: &str = include_str!("../../../shell/zdotdir/.zshenv");
@@ -45,6 +46,9 @@ fn write_files() -> std::io::Result<Vec<(String, String)>> {
     write_if_changed(&fish_dir.join("rift.fish"), RIFT_FISH)?;
     // PowerShell: dot-sourced by the `-Command` `shell_args` passes
     write_if_changed(&base.join("rift.ps1"), RIFT_PS1)?;
+    // Command Prompt: run by the `/k call` `shell_args` passes (CRLF: cmd
+    // misreads labels in a batch file with bare LF)
+    write_if_changed(&base.join("rift.cmd"), &batch_text(RIFT_CMD))?;
     write_if_changed(&zdotdir.join(".zshenv"), ZSHENV)?;
     write_if_changed(&zdotdir.join(".zprofile"), ZPROFILE)?;
     write_if_changed(&zdotdir.join(".zshrc"), ZSHRC)?;
@@ -117,19 +121,51 @@ pub fn shell_args(program: &str) -> Vec<String> {
         return vec!["-l".into()];
     }
     // PowerShell runs the user's profile, then the integration (which wraps
-    // the prompt the profile set), and stays interactive
+    // the prompt the profile set), and stays interactive. The integration
+    // runs as text, not as a script file: Windows' default execution policy
+    // (Restricted on Windows PowerShell) refuses to load a .ps1 file.
     if (name.eq_ignore_ascii_case("pwsh") || name.eq_ignore_ascii_case("powershell"))
         && let Some(base) = data_dir()
     {
-        let script = base.join("rift.ps1").to_string_lossy().replace('\'', "''");
         return vec![
             "-NoLogo".into(),
             "-NoExit".into(),
             "-Command".into(),
-            format!(". '{script}'"),
+            powershell_load(&base.join("rift.ps1")),
         ];
     }
+    // the Command Prompt runs the integration from its PROMPT, which `call`
+    // sets before the first prompt (the user's AutoRun and PROMPT first)
+    if name.eq_ignore_ascii_case("cmd")
+        && let Some(base) = data_dir()
+    {
+        return cmd_args(&base.join("rift.cmd"));
+    }
     Vec::new()
+}
+
+/// `cmd.exe`'s arguments that stay interactive (`/k`) after running the
+/// integration script. `call` leads so the quoted path is never taken for
+/// the whole command line (cmd strips quotes around a lone program path).
+fn cmd_args(script: &std::path::Path) -> Vec<String> {
+    vec![
+        "/k".into(),
+        "call".into(),
+        script.to_string_lossy().into_owned(),
+    ]
+}
+
+/// A batch file's text with CRLF line ends, whatever the source has.
+fn batch_text(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\n', "\r\n")
+}
+
+/// The PowerShell command that runs `script` in the session's scope from its
+/// text (read as UTF-8), which no execution policy blocks; quotes in the path
+/// doubled.
+fn powershell_load(script: &std::path::Path) -> String {
+    let path = script.to_string_lossy().replace('\'', "''");
+    format!(". ([ScriptBlock]::Create([IO.File]::ReadAllText('{path}')))")
 }
 
 pub(crate) fn is_executable(path: &std::path::Path) -> bool {
@@ -154,9 +190,12 @@ pub fn resolve_shell(configured: Option<&str>) -> String {
     #[cfg(windows)]
     {
         let path = std::env::var_os("PATH");
-        if let Some(found) = ["pwsh.exe", "powershell.exe"]
-            .iter()
-            .find_map(|p| crate::profiles::find_program(p, path.as_deref(), None))
+        let host = crate::profiles::RealHost::new(path.as_deref());
+        // pwsh on PATH, else installed under %ProgramFiles%, else Windows
+        // PowerShell (the first profile `profiles::discover` lists)
+        if let Some(found) = crate::profiles::find_program("pwsh.exe", path.as_deref(), None)
+            .or_else(|| crate::profiles::windows_pwsh7(&host))
+            .or_else(|| crate::profiles::find_program("powershell.exe", path.as_deref(), None))
         {
             return found;
         }
@@ -234,7 +273,8 @@ mod tests {
         assert_eq!(shell_args("/bin/zsh"), login);
         assert_eq!(shell_args("/opt/homebrew/bin/fish"), login);
         assert!(shell_args("/bin/sh").is_empty());
-        // PowerShell dot-sources the integration, quotes in the path doubled
+        // PowerShell runs the integration's text (no execution policy blocks
+        // it), quotes in the path doubled
         let ps = shell_args("/usr/local/bin/pwsh");
         let script = data_dir().unwrap().join("rift.ps1");
         assert_eq!(
@@ -243,9 +283,81 @@ mod tests {
                 "-NoLogo".to_string(),
                 "-NoExit".into(),
                 "-Command".into(),
-                format!(". '{}'", script.to_string_lossy().replace('\'', "''")),
+                format!(
+                    ". ([ScriptBlock]::Create([IO.File]::ReadAllText('{}')))",
+                    script.to_string_lossy().replace('\'', "''")
+                ),
             ]
         );
+        assert_eq!(
+            powershell_load(std::path::Path::new(r"C:\Users\o'neil\rift.ps1")),
+            r". ([ScriptBlock]::Create([IO.File]::ReadAllText('C:\Users\o''neil\rift.ps1')))"
+        );
+    }
+
+    /// The Command Prompt runs the integration with `/k call <script>`; the
+    /// script is batch text (CRLF); its PROMPT, as cmd expands it, makes
+    /// Rift's scanner see D, the cwd, A, the user's prompt, then B.
+    #[test]
+    fn command_prompt_carries_the_block_markers() {
+        use crate::osc::{Marker, OscScanner};
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(base) = data_dir() {
+            assert_eq!(
+                shell_args("/x/CMD"),
+                ["/k", "call", &*base.join("rift.cmd").to_string_lossy()]
+            );
+        }
+        assert!(
+            cmd_args(std::path::Path::new(r"C:\a b\rift.cmd"))
+                .ends_with(&[r"C:\a b\rift.cmd".to_string()])
+        );
+        assert_eq!(batch_text("a\nb\r\nc\n"), "a\r\nb\r\nc\r\n");
+
+        // the PROMPT line: the user's text sits between A and B; unset, cmd's
+        // default `$P$G`
+        let line = RIFT_CMD
+            .lines()
+            .find(|l| l.starts_with("set \"PROMPT="))
+            .expect("a PROMPT line");
+        assert!(RIFT_CMD.contains("if not defined RIFT_PROMPT set \"RIFT_PROMPT=$P$G\""));
+        let prompt = line
+            .strip_prefix("set \"PROMPT=")
+            .and_then(|l| l.strip_suffix('"'))
+            .unwrap()
+            .replace("%RIFT_PROMPT%", "$P$G");
+        // cmd's expansion: $e is ESC, $P the path, $G ">"
+        let shown = prompt
+            .replace("$e", "\x1b")
+            .replace("$P", r"C:\Users\ann\my dir")
+            .replace("$G", ">");
+        let mut scanner = OscScanner::new();
+        let found: Vec<Marker> = scanner
+            .scan(shown.as_bytes())
+            .into_iter()
+            .filter_map(|s| s.marker)
+            .collect();
+        assert_eq!(
+            found,
+            [
+                Marker::Done { exit: None },
+                Marker::Cwd {
+                    path: r"C:\Users\ann\my dir".into(),
+                    host: String::new()
+                },
+                Marker::PromptStart,
+                Marker::CommandStart,
+            ]
+        );
+        // a user's own prompt text stays whole between A and B
+        assert!(line.find("]133;A").unwrap() < line.find("%RIFT_PROMPT%").unwrap());
+        assert!(line.find("%RIFT_PROMPT%").unwrap() < line.find("]133;B").unwrap());
+        // `rem` lines hold nothing cmd could take for a redirection or pipe
+        for l in RIFT_CMD.lines().filter(|l| l.starts_with("rem")) {
+            assert!(!l.contains(['<', '>', '|', '&']), "{l}");
+        }
     }
 
     /// Runs `script` in `shell` with the hook at `$1`; (stdout, stderr), or

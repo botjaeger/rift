@@ -626,8 +626,10 @@ impl App {
     /// `block`; false without those modifiers.
     pub(super) fn click_block_with_mods(&mut self, pane_id: PaneId, block: BlockId) -> bool {
         let mods = self.win.modifiers;
-        let (cmd, shift) = (mods.super_key(), mods.shift_key());
-        if cmd == shift || mods.control_key() || mods.alt_key() {
+        // ⌘-click, Ctrl+click off macOS; no other chord modifier
+        let (cmd, shift) = (input::primary(mods), mods.shift_key());
+        let chordless = !(mods.control_key() || mods.alt_key() || mods.super_key());
+        if cmd == shift || !(input::primary_only(mods) || chordless) {
             return false;
         }
         let Some(pane) = self.pane_mut_ref(pane_id) else {
@@ -666,6 +668,9 @@ impl App {
             return false;
         }
         let mods = self.win.modifiers;
+        // `select_all`'s key: ⌘A on macOS, Ctrl+Shift+A elsewhere (Warp)
+        let select_all =
+            input::app_action(event, mods, &self.keymap) == Some(input::AppAction::SelectAll);
         let Some(pane) = self
             .win
             .tabs
@@ -679,11 +684,6 @@ impl App {
         };
         pane.settle_block_selection();
         let eligible = selectable_blocks(pane);
-        let select_all = mods.super_key()
-            && !mods.shift_key()
-            && !mods.alt_key()
-            && !mods.control_key()
-            && matches!(&event.logical_key, Key::Character(s) if s.eq_ignore_ascii_case("a"));
         if select_all {
             pane.block_selection = eligible;
             if !pane.block_selection.contains(&anchor) {

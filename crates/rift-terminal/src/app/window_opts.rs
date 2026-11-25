@@ -195,12 +195,8 @@ impl App {
     /// added steps the opacity. True when the wheel was taken.
     pub(super) fn wheel_zoom(&mut self, delta: MouseScrollDelta) -> bool {
         let m = self.win.modifiers;
-        let primary = if cfg!(target_os = "macos") {
-            m.super_key() && !m.control_key()
-        } else {
-            m.control_key() && !m.super_key()
-        };
-        if !self.config.wheel_zoom || !primary || m.alt_key() {
+        // ⌘-scroll on macOS, Ctrl-scroll elsewhere
+        if !self.config.wheel_zoom || !input::primary_only(m) {
             return false;
         }
         let steps = zoom_steps(delta, &mut self.win.wheel_zoom_px);

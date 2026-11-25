@@ -97,43 +97,272 @@ impl Binding {
         s
     }
 
-    /// Display chips, macOS style (spec: shortcuts shown for macOS).
+    /// Display chips, one per key, for the platform this build runs on.
     pub fn chips(&self) -> Vec<String> {
-        let mut out = Vec::new();
-        if self.ctrl {
-            out.push("⌃".into());
+        self.chips_for(Platform::current())
+    }
+
+    /// Display chips, one per key: macOS glyphs (⌃ ⌥ ⇧ ⌘, ⏎ ⌫) on macOS,
+    /// words elsewhere (Ctrl, Alt, Shift, Win or Super, Enter, Backspace).
+    pub fn chips_for(&self, platform: Platform) -> Vec<String> {
+        let mac = platform == Platform::Mac;
+        let mut out: Vec<String> = Vec::new();
+        for (on, glyph, word) in [
+            (self.ctrl, "⌃", "Ctrl"),
+            (self.alt, "⌥", "Alt"),
+            (self.shift, "⇧", "Shift"),
+            (self.cmd, "⌘", platform.super_name()),
+        ] {
+            if on {
+                out.push(if mac { glyph } else { word }.into());
+            }
         }
-        if self.alt {
-            out.push("⌥".into());
-        }
-        if self.shift {
-            out.push("⇧".into());
-        }
-        if self.cmd {
-            out.push("⌘".into());
-        }
-        out.push(match self.key.as_str() {
-            "left" => "←".into(),
-            "right" => "→".into(),
-            "up" => "↑".into(),
-            "down" => "↓".into(),
-            "tab" => "Tab".into(),
-            "pageup" => "PgUp".into(),
-            "pagedown" => "PgDn".into(),
-            "enter" => "⏎".into(),
-            "escape" => "Esc".into(),
-            "home" => "Home".into(),
-            "end" => "End".into(),
-            "backspace" => "⌫".into(),
-            "delete" => "⌦".into(),
-            k => k.to_uppercase(),
+        out.push(match (self.key.as_str(), mac) {
+            ("left", _) => "←".into(),
+            ("right", _) => "→".into(),
+            ("up", _) => "↑".into(),
+            ("down", _) => "↓".into(),
+            ("tab", _) => "Tab".into(),
+            ("pageup", _) => "PgUp".into(),
+            ("pagedown", _) => "PgDn".into(),
+            ("escape", _) => "Esc".into(),
+            ("home", _) => "Home".into(),
+            ("end", _) => "End".into(),
+            ("enter", true) => "⏎".into(),
+            ("backspace", true) => "⌫".into(),
+            ("delete", true) => "⌦".into(),
+            ("enter", false) => "Enter".into(),
+            ("backspace", false) => "Backspace".into(),
+            ("delete", false) => "Del".into(),
+            ("insert", false) => "Ins".into(),
+            ("space", false) => "Space".into(),
+            // "Ctrl++" reads as a typo
+            ("+", false) => "Plus".into(),
+            (k, _) => k.to_uppercase(),
         });
         out
     }
+
+    /// The chord as one string for this platform: `⇧⌘D` on macOS,
+    /// `Ctrl+Shift+D` elsewhere.
+    pub fn label(&self) -> String {
+        self.label_for(Platform::current())
+    }
+
+    /// [`Binding::label`] for `platform`.
+    pub fn label_for(&self, platform: Platform) -> String {
+        let chips = self.chips_for(platform);
+        if platform == Platform::Mac {
+            chips.concat()
+        } else {
+            chips.join("+")
+        }
+    }
 }
 
-/// Default action → binding table (spec §4, Warp-parity layout).
+/// How a fixed chord the app handles itself (not a keymap action) reads on
+/// this platform: `hint("ctrl+r")` is `⌃R` on macOS and `Ctrl+R` elsewhere.
+pub fn hint(chord: &str) -> String {
+    Binding::parse(chord).map(|b| b.label()).unwrap_or_default()
+}
+
+/// A gesture's key with this platform's primary modifier (⌘ on macOS, Ctrl
+/// elsewhere): `primary_hint("enter")` is `⌘⏎` or `Ctrl+Enter`.
+pub fn primary_hint(key: &str) -> String {
+    primary_hint_for(key, Platform::current())
+}
+
+/// [`primary_hint`] for `platform`.
+pub fn primary_hint_for(key: &str, platform: Platform) -> String {
+    let chord = if platform == Platform::Mac {
+        format!("cmd+{key}")
+    } else {
+        format!("ctrl+{key}")
+    };
+    Binding::parse(&chord)
+        .map(|b| b.label_for(platform))
+        .unwrap_or_default()
+}
+
+/// One key cap written as a macOS glyph (`⏎`, `⌃`, `⇥`), as `platform`
+/// names it: unchanged on macOS, a word elsewhere. Other caps pass through.
+pub fn cap_for(cap: &str, platform: Platform) -> &str {
+    if platform == Platform::Mac {
+        return cap;
+    }
+    match cap {
+        "⌃" => "Ctrl",
+        "⌥" => "Alt",
+        "⇧" => "Shift",
+        "⌘" => platform.super_name(),
+        "⏎" | "↵" => "Enter",
+        "⇥" => "Tab",
+        "⌫" => "Backspace",
+        "⌦" => "Del",
+        "esc" => "Esc",
+        _ => cap,
+    }
+}
+
+/// Prose that names keys with macOS glyphs ("⌃R, ⌃T and ⌥C run",
+/// "⌥↑ ⌥↓ reorder", "⌘-click"), as `platform` writes them: unchanged on
+/// macOS, "Ctrl+R, Ctrl+T and Alt+C run" elsewhere.
+pub fn words_for(text: &str, platform: Platform) -> std::borrow::Cow<'_, str> {
+    const GLYPHS: &str = "⌃⌥⇧⌘⏎⇥⌫⌦";
+    if platform == Platform::Mac || !text.chars().any(|c| GLYPHS.contains(c)) {
+        return text.into();
+    }
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if !GLYPHS.contains(c) {
+            out.push(c);
+            continue;
+        }
+        out.push_str(cap_for(c.encode_utf8(&mut [0; 4]), platform));
+        // a modifier joins the key after it: ⌃R → Ctrl+R, not ⌘-click
+        let modifier = "⌃⌥⇧⌘".contains(c);
+        if modifier
+            && chars
+                .peek()
+                .is_some_and(|n| !n.is_whitespace() && !"-,.;:)".contains(*n))
+        {
+            out.push('+');
+        }
+    }
+    out.into()
+}
+
+/// The platform shortcuts are shown for and whose default keys apply.
+/// A parameter (not only `cfg!`) so tests cover every platform on any host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Platform {
+    Mac,
+    Windows,
+    Linux,
+}
+
+impl Platform {
+    /// The platform this build runs on (the BSDs count as Linux).
+    pub const fn current() -> Platform {
+        if cfg!(target_os = "macos") {
+            Platform::Mac
+        } else if cfg!(windows) {
+            Platform::Windows
+        } else {
+            Platform::Linux
+        }
+    }
+
+    /// The modifier gestures use (⌘-click, ⌘⏎): ⌘ on macOS, Ctrl elsewhere.
+    pub const fn primary_name(self) -> &'static str {
+        match self {
+            Platform::Mac => "⌘",
+            Platform::Windows | Platform::Linux => "Ctrl",
+        }
+    }
+
+    /// What the `cmd` modifier (winit's Super) is called on the keyboard.
+    pub const fn super_name(self) -> &'static str {
+        match self {
+            Platform::Mac => "⌘",
+            Platform::Windows => "Win",
+            Platform::Linux => "Super",
+        }
+    }
+}
+
+/// The action an entry of [`defaults`] binds: `_alt` (a second chord) and
+/// `_pc` (the Windows and Linux chord of a ⌘-only action) name their base.
+fn base_action(entry: &str) -> &str {
+    entry
+        .strip_suffix("_alt")
+        .or_else(|| entry.strip_suffix("_pc"))
+        .unwrap_or(entry)
+}
+
+/// Default action → binding table for this build's platform.
 pub fn defaults() -> Vec<(&'static str, &'static str)> {
+    defaults_for(Platform::current())
+}
+
+/// Default action → binding table (spec §4, Warp-parity layout). Every
+/// entry applies on every platform, except the `_pc` ones: Windows and Linux
+/// only, so a ⌘-only action has a key there while macOS keeps its keys
+/// (and the shell keeps every ⌃ chord) exactly as before.
+pub fn defaults_for(platform: Platform) -> Vec<(&'static str, &'static str)> {
+    let mut all = shared_defaults();
+    if platform != Platform::Mac {
+        all.extend(pc_defaults());
+    }
+    all
+}
+
+/// The `_pc` defaults: Warp's Windows/Linux keys
+/// (docs.warp.dev/getting-started/keyboard-shortcuts) where Warp binds the
+/// action and the chord is free here; otherwise Warp's own mapping rule
+/// (⌘X → Ctrl+Shift+X, ⇧⌘X → Ctrl+Alt+X when Ctrl+Shift+X is taken,
+/// ⌥⌘X → Ctrl+Alt+X), or Windows Terminal / browser conventions.
+fn pc_defaults() -> Vec<(&'static str, &'static str)> {
+    vec![
+        // Warp's Ctrl+Alt+arrows are subword motion here (as in Warp's
+        // editor and VS Code): Shift added
+        ("navigate_left_pc", "ctrl+alt+shift+left"),
+        ("navigate_right_pc", "ctrl+alt+shift+right"),
+        ("navigate_up_pc", "ctrl+alt+shift+up"),
+        ("navigate_down_pc", "ctrl+alt+shift+down"),
+        // Warp has none; Windows Terminal's Alt+Shift+arrows (←/→ only:
+        // Alt+Shift+↑/↓ are the bookmark keys), Ctrl+Alt+↑/↓ for the others
+        ("resize_pane_left_pc", "alt+shift+left"),
+        ("resize_pane_right_pc", "alt+shift+right"),
+        ("resize_pane_up_pc", "ctrl+alt+up"),
+        ("resize_pane_down_pc", "ctrl+alt+down"),
+        ("open_settings_pc", "ctrl+,"),
+        ("open_keybindings_pc", "ctrl+shift+,"),
+        ("clear_blocks_pc", "ctrl+shift+k"),
+        ("tab_select_1_pc", "ctrl+1"),
+        ("tab_select_2_pc", "ctrl+2"),
+        ("tab_select_3_pc", "ctrl+3"),
+        ("tab_select_4_pc", "ctrl+4"),
+        ("tab_select_5_pc", "ctrl+5"),
+        ("tab_select_6_pc", "ctrl+6"),
+        ("tab_select_7_pc", "ctrl+7"),
+        ("tab_select_8_pc", "ctrl+8"),
+        ("tab_select_9_pc", "ctrl+9"),
+        ("reopen_closed_tab_pc", "ctrl+alt+t"),
+        ("font_increase_pc", "ctrl+="),
+        ("font_decrease_pc", "ctrl+-"),
+        ("font_reset_pc", "ctrl+0"),
+        ("focus_input_pc", "ctrl+shift+l"),
+        ("maximize_pane_pc", "ctrl+shift+enter"),
+        ("select_block_prev_pc", "ctrl+up"),
+        ("select_block_next_pc", "ctrl+down"),
+        // Warp's Ctrl+Shift+C is copy here
+        ("copy_block_command_pc", "ctrl+alt+c"),
+        ("copy_block_output_pc", "ctrl+alt+shift+c"),
+        // Warp's Ctrl+Shift+I is inspect_command here
+        ("reinput_pc", "ctrl+alt+i"),
+        ("toggle_sync_inputs_pc", "ctrl+alt+shift+i"),
+        ("focus_rail_search_pc", "ctrl+alt+f"),
+        ("select_all_pc", "ctrl+shift+a"),
+        ("new_window_pc", "ctrl+shift+n"),
+        ("close_window_pc", "ctrl+alt+w"),
+        // browsers' quit; plain Ctrl+Q is the terminal's XON
+        ("quit_pc", "ctrl+shift+q"),
+        ("toggle_fullscreen_pc", "f11"),
+        ("session_switcher_pc", "ctrl+shift+o"),
+        ("hint_mode_pc", "ctrl+shift+h"),
+        ("attention_center_pc", "ctrl+alt+a"),
+        // Ctrl+Shift+E splits; Ctrl+Alt+E is € (AltGr+E) on most European
+        // layouts
+        ("toggle_explorer_pc", "ctrl+alt+shift+e"),
+        ("toggle_review_pc", "ctrl+alt+g"),
+        ("focus_review_pc", "ctrl+alt+shift+g"),
+    ]
+}
+
+/// The defaults every platform shares.
+fn shared_defaults() -> Vec<(&'static str, &'static str)> {
     vec![
         ("new_tab", "ctrl+shift+t"),
         ("new_tab_alt", "cmd+t"),
@@ -279,6 +508,11 @@ impl Keymap {
     /// Defaults + user overrides (overrides win: they are matched first and
     /// also unbind the default for the same action).
     pub fn from_overrides(overrides: &BTreeMap<String, String>) -> Keymap {
+        Keymap::from_overrides_for(overrides, Platform::current())
+    }
+
+    /// [`Keymap::from_overrides`] with `platform`'s defaults.
+    pub fn from_overrides_for(overrides: &BTreeMap<String, String>, platform: Platform) -> Keymap {
         let mut entries: Vec<(Binding, String)> = Vec::new();
         let known = all_actions();
         for (action, binding) in overrides {
@@ -297,8 +531,8 @@ impl Keymap {
             }
         }
         let overrides_len = entries.len();
-        for (action, binding) in defaults() {
-            let base = action.strip_suffix("_alt").unwrap_or(action);
+        for (action, binding) in defaults_for(platform) {
+            let base = base_action(action);
             if overrides.contains_key(base) {
                 continue; // user override replaces default (and its alt)
             }
@@ -335,9 +569,14 @@ impl Keymap {
     /// one without ⌘ elsewhere (the `_alt` defaults are stored under the
     /// base name, after the Linux-style chord), else its first.
     pub fn preferred(&self, action: &str) -> Option<&Binding> {
+        self.preferred_for(action, Platform::current())
+    }
+
+    /// [`Keymap::preferred`] as shown on `platform`.
+    pub fn preferred_for(&self, action: &str, platform: Platform) -> Option<&Binding> {
         let all = self.bindings_for(action);
         all.iter()
-            .find(|b| b.cmd == cfg!(target_os = "macos"))
+            .find(|b| b.cmd == (platform == Platform::Mac))
             .or(all.first())
             .copied()
     }
@@ -369,8 +608,10 @@ impl Keymap {
 /// actions that ship unbound).
 pub fn all_actions() -> Vec<&'static str> {
     let mut out: Vec<&'static str> = Vec::new();
-    for (action, _) in defaults() {
-        let base = action.strip_suffix("_alt").unwrap_or(action);
+    // every platform's table: a config.toml shared between a Mac and a PC
+    // names the same actions
+    for (action, _) in defaults_for(Platform::Linux) {
+        let base = base_action(action);
         if !out.contains(&base) {
             out.push(base);
         }
@@ -497,7 +738,8 @@ mod tests {
 
     #[test]
     fn named_keys_show_as_their_caps() {
-        let chips = |s: &str| Binding::parse(s).unwrap().chips();
+        // macOS caps (the words elsewhere: chips_are_glyphs_on_macos_…)
+        let chips = |s: &str| Binding::parse(s).unwrap().chips_for(Platform::Mac);
         assert_eq!(chips("cmd+enter"), ["⌘", "⏎"]);
         assert_eq!(chips("escape"), ["Esc"]);
         assert_eq!(chips("alt+backspace"), ["⌥", "⌫"]);
@@ -550,16 +792,207 @@ mod tests {
         assert!(rows.iter().any(|(a, _)| a == "rename_tab"));
     }
 
+    const PLATFORMS: [Platform; 3] = [Platform::Mac, Platform::Windows, Platform::Linux];
+
     #[test]
     fn no_two_defaults_share_a_chord() {
-        let mut seen: Vec<(Binding, &str)> = Vec::new();
-        for (action, chord) in defaults() {
-            let b = Binding::parse(chord).unwrap();
-            if let Some((_, other)) = seen.iter().find(|(s, _)| *s == b) {
-                panic!("{chord:?} is both {other} and {action}");
+        for platform in PLATFORMS {
+            let mut seen: Vec<(Binding, &str)> = Vec::new();
+            for (action, chord) in defaults_for(platform) {
+                let b = Binding::parse(chord).unwrap();
+                if let Some((_, other)) = seen.iter().find(|(s, _)| *s == b) {
+                    panic!("{platform:?}: {chord:?} is both {other} and {action}");
+                }
+                seen.push((b, action));
             }
-            seen.push((b, action));
         }
+    }
+
+    /// ⌘ actions with no key off macOS, and why.
+    const MAC_ONLY: &[(&str, &str)] = &[
+        ("hide_app", "hiding an app (⌘H) is a macOS concept"),
+        (
+            "minimize",
+            "the system's own key minimizes (Windows ⊞↓, GNOME/KDE Super+H), \
+             which ⌘M becomes there",
+        ),
+    ];
+
+    #[test]
+    fn every_cmd_default_has_a_key_off_macos() {
+        for platform in [Platform::Windows, Platform::Linux] {
+            let km = Keymap::from_overrides_for(&BTreeMap::new(), platform);
+            for action in all_actions() {
+                let all = km.bindings_for(action);
+                if !all.iter().any(|b| b.cmd) {
+                    continue;
+                }
+                let reachable = all.iter().any(|b| !b.cmd);
+                let allowed = MAC_ONLY.iter().any(|(a, _)| *a == action);
+                assert!(
+                    reachable || allowed,
+                    "{platform:?}: {action} has only ⌘ defaults; add an `{action}_pc` \
+                     chord (or a MAC_ONLY reason)"
+                );
+                assert!(
+                    !(reachable && allowed),
+                    "{action} is in MAC_ONLY but has a key"
+                );
+                // the shown shortcut is the reachable one
+                if reachable {
+                    assert!(!km.preferred_for(action, platform).unwrap().cmd, "{action}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pc_defaults_leave_macos_and_the_shell_alone() {
+        // macOS: exactly the shared table, no `_pc` entry
+        assert_eq!(defaults_for(Platform::Mac), shared_defaults());
+        for (action, chord) in pc_defaults() {
+            let b = Binding::parse(chord).unwrap();
+            assert!(action.ends_with("_pc") && !b.cmd, "{action} = {chord}");
+            assert!(
+                all_actions().contains(&base_action(action)),
+                "{action} names no action"
+            );
+        }
+        // a plain ⌃letter belongs to the shell (⌃A ⌃E ⌃K ⌃R ⌃W …); Warp's
+        // two editor keys are the only defaults that take one
+        for platform in PLATFORMS {
+            for (action, chord) in defaults_for(platform) {
+                let b = Binding::parse(chord).unwrap();
+                let plain_ctrl_letter = b.ctrl
+                    && !b.shift
+                    && !b.alt
+                    && !b.cmd
+                    && b.key.len() == 1
+                    && b.key.chars().all(|c| c.is_ascii_alphabetic());
+                assert!(
+                    !plain_ctrl_letter || ["add_next_occurrence", "block_menu"].contains(&action),
+                    "{platform:?}: {action} = {chord} takes a shell key"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn chips_are_glyphs_on_macos_and_words_elsewhere() {
+        let b = |s: &str| Binding::parse(s).unwrap();
+        let d = b("ctrl+shift+d");
+        assert_eq!(d.chips_for(Platform::Mac), ["⌃", "⇧", "D"]);
+        assert_eq!(d.chips_for(Platform::Windows), ["Ctrl", "Shift", "D"]);
+        assert_eq!(d.label_for(Platform::Mac), "⌃⇧D");
+        assert_eq!(d.label_for(Platform::Linux), "Ctrl+Shift+D");
+        let all = b("ctrl+alt+shift+cmd+enter");
+        assert_eq!(all.label_for(Platform::Mac), "⌃⌥⇧⌘⏎");
+        assert_eq!(all.label_for(Platform::Windows), "Ctrl+Alt+Shift+Win+Enter");
+        assert_eq!(all.label_for(Platform::Linux), "Ctrl+Alt+Shift+Super+Enter");
+        for (chord, mac, pc) in [
+            ("alt+backspace", "⌥⌫", "Alt+Backspace"),
+            ("delete", "⌦", "Del"),
+            ("escape", "Esc", "Esc"),
+            ("shift+pageup", "⇧PgUp", "Shift+PgUp"),
+            ("ctrl+tab", "⌃Tab", "Ctrl+Tab"),
+            ("alt+left", "⌥←", "Alt+←"),
+            ("ctrl+,", "⌃,", "Ctrl+,"),
+            ("ctrl+shift+plus", "⌃⇧+", "Ctrl+Shift+Plus"),
+            ("ctrl+space", "⌃SPACE", "Ctrl+Space"),
+            ("f11", "F11", "F11"),
+        ] {
+            assert_eq!(b(chord).label_for(Platform::Mac), mac, "{chord}");
+            assert_eq!(b(chord).label_for(Platform::Windows), pc, "{chord}");
+            assert_eq!(b(chord).label_for(Platform::Linux), pc, "{chord}");
+        }
+        // a glyph cap written by hand reads as the chip would: every macOS
+        // chip maps through `cap_for` to the same platform's chip
+        for platform in [Platform::Windows, Platform::Linux] {
+            for chord in [
+                "ctrl+alt+shift+cmd+enter",
+                "alt+backspace",
+                "delete",
+                "tab",
+                "escape",
+            ] {
+                let mac = b(chord).chips_for(Platform::Mac);
+                let mapped: Vec<&str> = mac.iter().map(|c| cap_for(c, platform)).collect();
+                assert_eq!(mapped, b(chord).chips_for(platform), "{platform:?} {chord}");
+            }
+        }
+        assert_eq!(cap_for("⏎", Platform::Mac), "⏎");
+        assert_eq!(cap_for("esc", Platform::Mac), "esc");
+        assert_eq!(cap_for("esc", Platform::Windows), "Esc");
+        assert_eq!(cap_for("⇥", Platform::Linux), "Tab");
+        assert_eq!(cap_for("↑", Platform::Linux), "↑");
+        // prose
+        let pc = |s: &str| words_for(s, Platform::Windows).into_owned();
+        assert_eq!(pc("⌃R, ⌃T and ⌥C run"), "Ctrl+R, Ctrl+T and Alt+C run");
+        assert_eq!(pc("Drag a row (or ⌥↑ ⌥↓)."), "Drag a row (or Alt+↑ Alt+↓).");
+        assert_eq!(pc("With ⇧ it changes"), "With Shift it changes");
+        assert_eq!(pc("(⌘-click always opens)"), "(Win-click always opens)");
+        assert_eq!(pc("⌃Space completes"), "Ctrl+Space completes");
+        assert_eq!(pc("⏎ keeps, esc reverts"), "Enter keeps, esc reverts");
+        assert_eq!(
+            pc("Esc cancels · ⌫ unbinds"),
+            "Esc cancels · Backspace unbinds"
+        );
+        assert_eq!(words_for("⌘-click", Platform::Linux), "Super-click");
+        assert_eq!(words_for("⌃R, ⌥↑", Platform::Mac), "⌃R, ⌥↑");
+        // this build's platform
+        assert_eq!(d.chips(), d.chips_for(Platform::current()));
+        assert_eq!(hint("ctrl+r"), b("ctrl+r").label());
+    }
+
+    #[test]
+    fn pc_keys_follow_warp_windows_layout() {
+        let pc = Keymap::from_overrides_for(&BTreeMap::new(), Platform::Windows);
+        let mac = Keymap::from_overrides_for(&BTreeMap::new(), Platform::Mac);
+        let at = |km: &Keymap, chord: &str| {
+            let b = Binding::parse(chord).unwrap();
+            km.lookup(b.ctrl, b.shift, b.alt, b.cmd, &b.key)
+                .map(str::to_string)
+        };
+        for (chord, action) in [
+            ("ctrl+,", "open_settings"),
+            ("ctrl+shift+k", "clear_blocks"),
+            ("ctrl+1", "tab_select_1"),
+            ("ctrl+9", "tab_select_9"),
+            ("ctrl+alt+t", "reopen_closed_tab"),
+            ("ctrl+=", "font_increase"),
+            ("ctrl+-", "font_decrease"),
+            ("ctrl+0", "font_reset"),
+            ("ctrl+shift+l", "focus_input"),
+            ("ctrl+shift+enter", "maximize_pane"),
+            ("ctrl+up", "select_block_prev"),
+            ("ctrl+alt+shift+c", "copy_block_output"),
+            ("ctrl+shift+a", "select_all"),
+            ("f11", "toggle_fullscreen"),
+        ] {
+            assert_eq!(at(&pc, chord).as_deref(), Some(action), "{chord}");
+            // macOS leaves the chord to the terminal, as before
+            assert_eq!(at(&mac, chord), None, "{chord} on macOS");
+        }
+        // the ⌘ keys still work there (a Win/Super chord), and are not shown
+        assert_eq!(at(&pc, "cmd+k").as_deref(), Some("clear_blocks"));
+        assert_eq!(
+            pc.preferred_for("clear_blocks", Platform::Windows)
+                .unwrap()
+                .chord(),
+            "ctrl+shift+k"
+        );
+        assert_eq!(
+            mac.preferred_for("clear_blocks", Platform::Mac)
+                .unwrap()
+                .chord(),
+            "cmd+k"
+        );
+        // an override replaces the `_pc` chord too
+        let mut o = BTreeMap::new();
+        o.insert("clear_blocks".to_string(), "ctrl+alt+l".to_string());
+        let km = Keymap::from_overrides_for(&o, Platform::Linux);
+        assert_eq!(at(&km, "ctrl+shift+k"), None);
+        assert_eq!(km.bindings_for("clear_blocks").len(), 1);
     }
 
     #[test]

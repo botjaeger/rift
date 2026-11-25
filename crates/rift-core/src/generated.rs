@@ -57,19 +57,40 @@ pub fn generate(
     if !config.discover_shells {
         return None;
     }
+    let found = profiles::discover(shells_file, path_var);
+    generate_from(config, found, path_var, seen, login_shell, first_run)
+}
+
+/// [`generate`] for the shells already `found`.
+fn generate_from(
+    config: &Config,
+    found: Vec<Profile>,
+    path_var: Option<&OsStr>,
+    seen: &mut BTreeSet<String>,
+    login_shell: Option<&str>,
+    first_run: bool,
+) -> Option<Config> {
     let mut out = config.clone();
     let mut changed = false;
-    for shell in profiles::discover(shells_file, path_var) {
+    for shell in found {
         let Some(command) = shell.command.clone() else {
             continue;
         };
-        if !seen.insert(command.clone()) {
+        // a shell that needs arguments (a WSL distribution is `wsl.exe -d
+        // <name>`) is told apart by them
+        let key = if shell.args.is_empty() {
+            command.clone()
+        } else {
+            format!("{command}\t{}", shell.args.join("\t"))
+        };
+        if !seen.insert(key) {
             continue;
         }
         if out.profiles.iter().any(|p| {
             p.command
                 .as_deref()
                 .is_some_and(|c| same_program(c, &command, path_var))
+                && (shell.args.is_empty() || p.args == shell.args)
         }) {
             continue;
         }
@@ -110,6 +131,14 @@ pub fn mark_orphans(profiles: &mut [Profile], shells_file: &Path, path_var: Opti
         .filter_map(|p| crate::sys::canonicalize(p).ok())
         .collect();
     for p in profiles.iter_mut() {
+        // Windows has no shells file: a shell is there while its program is
+        if cfg!(windows) {
+            p.orphaned = p.is_generated()
+                && p.command.as_deref().is_some_and(|c| {
+                    profiles::find_program(c, path_var, home().as_deref()).is_none()
+                });
+            continue;
+        }
         p.orphaned = p.is_generated()
             && p.command.as_deref().is_some_and(|c| {
                 let Some(found) = profiles::find_program(c, path_var, home().as_deref()) else {
@@ -179,7 +208,12 @@ pub fn sync_default(shells_file: &Path) -> std::io::Result<Option<Config>> {
         return Ok(None);
     };
     let path = std::env::var_os("PATH");
-    let login = std::env::var("SHELL").ok();
+    // Windows has no $SHELL: the shell a pane opens with by default
+    let login = if cfg!(windows) {
+        profiles::windows_default(&profiles::RealHost::new(path.as_deref()))
+    } else {
+        std::env::var("SHELL").ok()
+    };
     sync(
         &config,
         &data.join(SEEN_FILE),
@@ -301,6 +335,38 @@ mod tests {
         fn names(&self) -> Vec<String> {
             self.load().profiles.into_iter().map(|p| p.name).collect()
         }
+    }
+
+    /// Shells that share a program and differ by arguments (WSL
+    /// distributions: `wsl.exe -d <name>`) each get their own profile, once.
+    #[test]
+    fn shells_with_arguments_are_told_apart_by_them() {
+        let wsl = |name: &str, distro: &str| Profile {
+            command: Some("/bin/wsl".into()),
+            args: vec!["-d".into(), distro.into()],
+            source: Some(profiles::SHELLS_SOURCE.into()),
+            ..Profile::named(name)
+        };
+        let found = || vec![wsl("Ubuntu (WSL)", "Ubuntu"), wsl("Debian (WSL)", "Debian")];
+        let mut seen = BTreeSet::new();
+        let c = generate_from(&Config::default(), found(), None, &mut seen, None, true)
+            .expect("both added");
+        let names: Vec<&str> = c.profiles.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["Ubuntu (WSL)", "Debian (WSL)"]);
+        assert_eq!(seen.len(), 2);
+        // nothing new the second time; a deleted one stays deleted
+        let mut c = c;
+        c.profiles.remove(1);
+        assert!(generate_from(&c, found(), None, &mut seen, None, false).is_none());
+        // a profile of the user's own with other arguments claims neither
+        let mut mine = Config::default();
+        mine.profiles.push(Profile {
+            command: Some("/bin/wsl".into()),
+            args: vec!["-d".into(), "Other".into()],
+            ..Profile::named("mine")
+        });
+        let c = generate_from(&mine, found(), None, &mut BTreeSet::new(), None, false).unwrap();
+        assert_eq!(c.profiles.len(), 3);
     }
 
     #[test]

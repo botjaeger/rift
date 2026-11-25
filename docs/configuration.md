@@ -366,7 +366,7 @@ subshell_offer = true             # offer Rift's hooks in docker exec … bash, 
 subshell_commands = []            # more such commands, as regular expressions
 subshell_denylist = []            # commands never to offer it for ("Don't ask again")
 rich_input_submit = "enter"       # rich input composer: "enter" sends (⇧⏎ new line) |
-                                  # "cmd_enter" (⌘⏎ sends, ⏎ new line)
+                                  # "cmd_enter" (⌘⏎ sends, Ctrl+Enter on Windows/Linux; ⏎ new line)
 rich_input_auto = false           # open the composer by itself when a coding agent waits
                                   # (its own notification, or 1 s of quiet after output)
 mouse_reporting = true            # forward clicks/drags/wheel to vim, tmux, htop…
@@ -788,6 +788,19 @@ args = ["--noprofile"]
   set to the entry running your login shell (`$SHELL`). A generated entry
   whose shell is no longer installed (gone from `/etc/shells`, or its file
   gone) stays in the file but is offered nowhere.
+- **Installed shells on Windows:** there is no `/etc/shells`; Rift looks for
+  *PowerShell 7* (`pwsh.exe` on `PATH`, else the newest
+  `%ProgramFiles%\PowerShell\<version>`), *Windows PowerShell*, *Command
+  Prompt* (`%ComSpec%`), *Git Bash* (`%ProgramFiles%\Git\bin\bash.exe`, or
+  beside the `git.exe` on `PATH`) and one *`<Distro> (WSL)`* entry per
+  distribution `wsl.exe -l -q` lists (Docker Desktop's own are skipped; each
+  runs `wsl.exe -d <name>`), in that order, written the same way. The first
+  launch makes the first of them (PowerShell 7, else Windows PowerShell) the
+  `default_profile`. An entry is orphaned when its program is gone. The
+  Command Prompt gets command blocks and the working directory from its
+  `PROMPT` (Rift starts it as `cmd.exe /k call <data dir>\rift.cmd`, which
+  keeps your own `PROMPT` text inside the markers); cmd cannot report an exit
+  status, so its blocks show none.
 - **Hiding one:** `hidden = true` keeps a profile in the file but out of the
   + menu and the palette; `default_profile` may still name it.
 - **Backup:** the first time Rift rewrites a config.toml it did not just
@@ -974,7 +987,9 @@ an app bundle; `notify-send` on Linux) while it is not, plus its sound.
 See [keyboard-shortcuts.md](keyboard-shortcuts.md) for action names and chord
 syntax. Semantics: a `[keybindings]` entry for a base action *replaces* the
 default chord **and** unbinds the action's built-in alternate (e.g. overriding
-`copy` removes both ⌃⇧C and ⌘C). Invalid chords are logged and skipped —
+`copy` removes both ⌃⇧C and ⌘C; overriding `clear_blocks` on Windows or
+Linux removes both ⌘K and Ctrl+Shift+K, see
+[Windows and Linux](keyboard-shortcuts.md#windows-and-linux)). Invalid chords are logged and skipped —
 leaving the action unbound, so check logs if a key stops working.
 
 ## Shell integration details

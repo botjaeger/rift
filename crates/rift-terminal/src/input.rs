@@ -38,6 +38,70 @@ impl KeyPress {
     }
 }
 
+/// The modifier app gestures use: ⌘ on macOS, Ctrl on Windows and Linux
+/// (Ctrl+click opens a link, Ctrl+Enter commits, as in Warp, VS Code and
+/// Windows Terminal there). The one home for "⌘ or Ctrl": gesture code
+/// never reads `super_key()` itself (`super_key_sites_are_platform_aware`).
+pub fn primary(mods: ModifiersState) -> bool {
+    primary_on(rift_core::keybindings::Platform::current(), mods)
+}
+
+/// [`primary`] on `platform`.
+pub fn primary_on(platform: rift_core::keybindings::Platform, mods: ModifiersState) -> bool {
+    if platform == rift_core::keybindings::Platform::Mac {
+        mods.super_key()
+    } else {
+        mods.control_key()
+    }
+}
+
+/// [`primary`] with none of the other chord modifiers (Ctrl, Alt, ⌘ /
+/// Win); Shift may be held.
+pub fn primary_only(mods: ModifiersState) -> bool {
+    primary_only_on(rift_core::keybindings::Platform::current(), mods)
+}
+
+/// [`primary_only`] on `platform`.
+pub fn primary_only_on(platform: rift_core::keybindings::Platform, mods: ModifiersState) -> bool {
+    let other = if platform == rift_core::keybindings::Platform::Mac {
+        mods.control_key()
+    } else {
+        mods.super_key()
+    };
+    primary_on(platform, mods) && !other && !mods.alt_key()
+}
+
+/// Windows reports AltGr as Ctrl+Alt (winit sets both): a Ctrl+Alt press
+/// whose character differs from its unmodified key's typed that character
+/// (German AltGr+E = €, Polish AltGr+A = ą). It is text, never a Ctrl+Alt
+/// chord. A real Ctrl+Alt+T on a US layout keeps its letter (or a control
+/// character), so it still binds; and a layout without AltGr types no
+/// `text` for a Ctrl+Alt chord (Ctrl+Alt+Shift+1 reports "!" as its key but
+/// types nothing), so that binds too.
+pub fn altgr_typed(
+    platform: rift_core::keybindings::Platform,
+    mods: ModifiersState,
+    unmodified: Option<&Key>,
+    logical: &Key,
+    text: Option<&str>,
+) -> bool {
+    platform == rift_core::keybindings::Platform::Windows
+        && mods.control_key()
+        && mods.alt_key()
+        && !mods.super_key()
+        && text.is_some_and(|t| !t.is_empty() && !t.chars().any(char::is_control))
+        && matches!((unmodified, logical), (Some(Key::Character(u)), Key::Character(l))
+            if !l.is_empty()
+                && !l.chars().any(char::is_control)
+                && l.to_lowercase() != u.to_lowercase())
+}
+
+/// `mods` with the Ctrl+Alt that AltGr reported taken off (see
+/// [`altgr_typed`]); Shift stays (AltGr+Shift types another character).
+pub fn without_altgr(mods: ModifiersState) -> ModifiersState {
+    mods - ModifiersState::CONTROL - ModifiersState::ALT
+}
+
 /// Stable identity of a physical key across press and release (the key
 /// without modifiers, so a Shift change mid-press still matches).
 pub fn key_identity(event: &KeyPress) -> String {
@@ -545,9 +609,40 @@ impl EditorKey {
 }
 
 pub fn editor_key(event: &KeyPress, mods: ModifiersState) -> Option<EditorKey> {
+    editor_key_on(rift_core::keybindings::Platform::current(), event, mods)
+}
+
+/// [`editor_key`] on `platform`. Off macOS the ⌘ editing chords are Warp's
+/// Windows/Linux keys: Ctrl+← / Ctrl+→ by word (⇧ selects), Ctrl+Backspace /
+/// Ctrl+Delete delete a word, Ctrl+Z / Ctrl+Shift+Z undo / redo; the other
+/// Ctrl+letters stay the shell's (⌃A ⌃E ⌃K …).
+pub fn editor_key_on(
+    platform: rift_core::keybindings::Platform,
+    event: &KeyPress,
+    mods: ModifiersState,
+) -> Option<EditorKey> {
     let ctrl = mods.control_key();
     let alt = mods.alt_key();
     let cmd = mods.super_key();
+
+    if platform != rift_core::keybindings::Platform::Mac && primary_only_on(platform, mods) {
+        let shift = mods.shift_key();
+        let key = match &event.logical_key {
+            Key::Named(NamedKey::ArrowLeft) if shift => Some(EditorKey::SelectWordLeft),
+            Key::Named(NamedKey::ArrowRight) if shift => Some(EditorKey::SelectWordRight),
+            Key::Named(NamedKey::ArrowLeft) => Some(EditorKey::WordLeft),
+            // at the end of the line it takes a word of the ghost text
+            Key::Named(NamedKey::ArrowRight) => Some(EditorKey::WordRight),
+            Key::Named(NamedKey::Backspace) => Some(EditorKey::DeleteWordBack),
+            Key::Named(NamedKey::Delete) => Some(EditorKey::DeleteWordForward),
+            Key::Character(s) if s.eq_ignore_ascii_case("z") && shift => Some(EditorKey::Redo),
+            Key::Character(s) if s.eq_ignore_ascii_case("z") => Some(EditorKey::Undo),
+            _ => None,
+        };
+        if key.is_some() {
+            return key;
+        }
+    }
 
     if let Key::Named(named) = &event.logical_key
         && mods.shift_key()
@@ -1095,6 +1190,217 @@ pub fn remote_editor_key(key: rift_remote::Key) -> Option<EditorKey> {
 mod tests {
     use super::*;
 
+    /// ⌘ gestures (⌘-click, ⌘⏎, ⌘⌫) are Ctrl off macOS: gesture code asks
+    /// `primary` / `primary_only`, never `super_key()` alone. Allowed: this
+    /// file and keyboard.rs (the helpers, chord lookup, byte encoders), a
+    /// chord record (`cmd: m.super_key()`), a check that names Ctrl too (any
+    /// chord), an exclusion beside Ctrl / Alt ones, and a macOS-only branch.
+    #[test]
+    fn super_key_sites_are_platform_aware() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    out.push(p);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        walk(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
+        let mut bare = Vec::new();
+        for f in files {
+            let name = f.file_name().unwrap().to_string_lossy().to_string();
+            if name == "input.rs" || name == "keyboard.rs" {
+                continue;
+            }
+            let src = std::fs::read_to_string(&f).unwrap();
+            let lines: Vec<&str> = src.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                let t = line.trim_start();
+                if t.starts_with("#[cfg(test)]") {
+                    break;
+                }
+                if t.starts_with("//") || !line.contains("super_key()") {
+                    continue;
+                }
+                let near = |w: &str| {
+                    lines[i.saturating_sub(1)..(i + 2).min(lines.len())]
+                        .iter()
+                        .any(|l| l.contains(w))
+                };
+                let negated = line.split("super_key()").next().is_some_and(|before| {
+                    before
+                        .trim_end_matches(|c: char| c.is_alphanumeric() || c == '.' || c == '_')
+                        .ends_with('!')
+                });
+                // `super || ctrl …` over several lines
+                let any_chord = near("control_key()")
+                    && (t.starts_with("||")
+                        || lines
+                            .get(i + 1)
+                            .is_some_and(|n| n.trim_start().starts_with("||")));
+                let ok = line.contains("cmd:")
+                    || line.contains("control_key()")
+                    || any_chord
+                    || (negated && (near("control_key()") || near("alt_key()")))
+                    || lines[i.saturating_sub(2)..=i]
+                        .iter()
+                        .any(|l| l.contains("cfg!(target_os = \"macos\")"));
+                if !ok {
+                    bare.push(format!("{}:{}: {t}", f.display(), i + 1));
+                }
+            }
+        }
+        assert!(
+            bare.is_empty(),
+            "⌘-only checks (use input::primary / primary_only):\n{}",
+            bare.join("\n")
+        );
+    }
+
+    #[test]
+    fn the_primary_modifier_is_cmd_on_macos_and_ctrl_elsewhere() {
+        use rift_core::keybindings::Platform::{Linux, Mac, Windows};
+        let (c, s, a, w) = (
+            ModifiersState::CONTROL,
+            ModifiersState::SHIFT,
+            ModifiersState::ALT,
+            ModifiersState::SUPER,
+        );
+        assert!(primary_on(Mac, w) && !primary_on(Mac, c));
+        for p in [Windows, Linux] {
+            assert!(primary_on(p, c) && !primary_on(p, w));
+            assert!(primary_only_on(p, c) && primary_only_on(p, c | s));
+            assert!(!primary_only_on(p, c | a) && !primary_only_on(p, c | w));
+        }
+        assert!(primary_only_on(Mac, w | s) && !primary_only_on(Mac, w | c));
+        let hint = rift_core::keybindings::primary_hint_for;
+        assert_eq!(hint("enter", Mac), "⌘⏎");
+        assert_eq!(hint("enter", Windows), "Ctrl+Enter");
+        assert_eq!(hint("backspace", Linux), "Ctrl+Backspace");
+
+        // the editor's ⌘ chords: Warp's Windows/Linux keys off macOS
+        let named = |k| KeyPress::new(Key::Named(k), None, None);
+        let z = KeyPress::new(
+            Key::Character("z".into()),
+            None,
+            Some(Key::Character("z".into())),
+        );
+        for p in [Windows, Linux] {
+            let ed = |e: &KeyPress, m| editor_key_on(p, e, m);
+            assert_eq!(
+                ed(&named(NamedKey::ArrowLeft), c),
+                Some(EditorKey::WordLeft)
+            );
+            assert_eq!(
+                ed(&named(NamedKey::ArrowRight), c),
+                Some(EditorKey::WordRight)
+            );
+            assert_eq!(
+                ed(&named(NamedKey::ArrowLeft), c | s),
+                Some(EditorKey::SelectWordLeft)
+            );
+            assert_eq!(
+                ed(&named(NamedKey::Backspace), c),
+                Some(EditorKey::DeleteWordBack)
+            );
+            assert_eq!(
+                ed(&named(NamedKey::Delete), c),
+                Some(EditorKey::DeleteWordForward)
+            );
+            assert_eq!(ed(&z, c), Some(EditorKey::Undo));
+            assert_eq!(ed(&z, c | s), Some(EditorKey::Redo));
+            // the shell's ⌃ keys stay
+            let a_key = KeyPress::new(Key::Character("a".into()), None, None);
+            assert_eq!(ed(&a_key, c), Some(EditorKey::Home));
+        }
+        // macOS unchanged: ⌘← is Home, ⌃→ takes a ghost word, ⌃Z is not undo
+        assert_eq!(
+            editor_key_on(Mac, &named(NamedKey::ArrowLeft), w),
+            Some(EditorKey::Home)
+        );
+        assert_eq!(
+            editor_key_on(Mac, &named(NamedKey::ArrowRight), c),
+            Some(EditorKey::AcceptGhostWord)
+        );
+        assert_eq!(editor_key_on(Mac, &z, w), Some(EditorKey::Undo));
+        assert_eq!(editor_key_on(Mac, &z, c), None);
+    }
+
+    #[test]
+    fn altgr_characters_are_text_not_ctrl_alt_chords() {
+        use rift_core::keybindings::Platform;
+        let ch = |s: &str| Key::Character(s.into());
+        let ca = ModifiersState::CONTROL | ModifiersState::ALT;
+        let win = Platform::Windows;
+        // a press that typed its key's character (`text` = the key)
+        let typed = |p: Platform, m: ModifiersState, u: &str, l: &str| {
+            altgr_typed(p, m, Some(&ch(u)), &ch(l), Some(l))
+        };
+        // German AltGr+E = €, AltGr+Q = @, Polish AltGr+A = ą, AltGr+Shift+A = Ą
+        assert!(typed(win, ca, "e", "€"));
+        assert!(typed(win, ca, "q", "@"));
+        assert!(typed(win, ca, "a", "ą"));
+        assert!(typed(win, ca | ModifiersState::SHIFT, "a", "Ą"));
+        // a real Ctrl+Alt+T (US layout): its letter, or a control character
+        assert!(!typed(win, ca, "t", "t"));
+        assert!(!altgr_typed(win, ca, Some(&ch("t")), &ch("\u{14}"), None));
+        assert!(!typed(win, ca | ModifiersState::SHIFT, "t", "T"));
+        // a US Ctrl+Alt+Shift+1 reports "!" as its key but types nothing:
+        // a chord, not AltGr
+        assert!(!altgr_typed(
+            win,
+            ca | ModifiersState::SHIFT,
+            Some(&ch("1")),
+            &ch("!"),
+            None
+        ));
+        // only Windows reports AltGr as Ctrl+Alt; only Ctrl+Alt is AltGr
+        for p in [Platform::Mac, Platform::Linux] {
+            assert!(!typed(p, ca, "e", "€"));
+        }
+        assert!(!typed(win, ModifiersState::ALT, "e", "€"));
+        assert!(!typed(win, ModifiersState::CONTROL, "e", "€"));
+        assert_eq!(
+            without_altgr(ca | ModifiersState::SHIFT),
+            ModifiersState::SHIFT
+        );
+
+        // end to end: € types, Ctrl+Alt+T still reopens a tab
+        let km = rift_core::Keymap::from_overrides_for(&Default::default(), win);
+        let mut o = std::collections::BTreeMap::new();
+        o.insert("attention_center".to_string(), "ctrl+alt+e".to_string());
+        let km_e = rift_core::Keymap::from_overrides_for(&o, win);
+        let euro = KeyPress::new(ch("€"), Some("€".into()), Some(ch("e")));
+        let mods = if altgr_typed(
+            win,
+            ca,
+            euro.unmodified.as_ref(),
+            &euro.logical_key,
+            euro.text.as_deref(),
+        ) {
+            without_altgr(ca)
+        } else {
+            ca
+        };
+        assert_eq!(app_action(&euro, mods, &km_e), None);
+        assert_eq!(editor_key(&euro, mods), Some(EditorKey::Insert("€".into())));
+        let t = KeyPress::new(ch("t"), None, Some(ch("t")));
+        assert!(!altgr_typed(
+            win,
+            ca,
+            t.unmodified.as_ref(),
+            &t.logical_key,
+            t.text.as_deref()
+        ));
+        assert_eq!(app_action(&t, ca, &km), Some(AppAction::ReopenClosedTab));
+    }
+
     /// Every key of the protocol's grammar (each one's name parses back to
     /// it).
     fn every_remote_key() -> Vec<rift_remote::Key> {
@@ -1242,7 +1548,12 @@ mod tests {
             ("down", None),
             ("ctrl+r", None),
             ("tab", None),
-            ("ctrl+right", None),
+            // macOS: ⌃→ takes a word of the ghost text (nothing here);
+            // Windows and Linux: Ctrl+→ moves by word (`primary`)
+            (
+                "ctrl+right",
+                (!cfg!(target_os = "macos")).then_some(EditorKey::WordRight),
+            ),
             // no editor meaning: nothing happens (never typed as text)
             ("ctrl+z", None),
             ("pageup", None),

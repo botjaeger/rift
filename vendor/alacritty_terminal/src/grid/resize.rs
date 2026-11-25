@@ -16,11 +16,24 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         T: ResetDiscriminant<D>,
         D: PartialEq,
     {
+        self.resize_with(reflow, lines, columns, true);
+    }
+
+    /// Rift: [`Grid::resize`], where `pull_history` false keeps the history
+    /// where it is when lines are added (blank lines go below the screen's
+    /// content). A Windows ConPTY repaints the whole screen from its top after
+    /// every resize: history pulled into the screen would sit under its
+    /// picture, a row lower than the lines it keeps.
+    pub fn resize_with<D>(&mut self, reflow: bool, lines: usize, columns: usize, pull_history: bool)
+    where
+        T: ResetDiscriminant<D>,
+        D: PartialEq,
+    {
         // Use empty template cell for resetting cells due to resize.
         let template = mem::take(&mut self.cursor.template);
 
         match self.lines.cmp(&lines) {
-            Ordering::Less => self.grow_lines(lines),
+            Ordering::Less => self.grow_lines(lines, pull_history),
             Ordering::Greater => self.shrink_lines(lines),
             Ordering::Equal => (),
         }
@@ -49,7 +62,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
     /// Alacritty keeps the cursor at the bottom of the terminal as long as there
     /// is scrollback available. Once scrollback is exhausted, new lines are
     /// simply added to the bottom of the screen.
-    fn grow_lines<D>(&mut self, target: usize)
+    fn grow_lines<D>(&mut self, target: usize, pull_history: bool)
     where
         T: ResetDiscriminant<D>,
         D: PartialEq,
@@ -61,7 +74,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         self.lines = target;
 
         let history_size = self.history_size();
-        let from_history = min(history_size, lines_added);
+        let from_history = if pull_history { min(history_size, lines_added) } else { 0 };
 
         // Move existing lines up for every line that couldn't be pulled from history.
         if from_history != lines_added {

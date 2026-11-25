@@ -5,6 +5,13 @@ Default layout follows Warp's macOS defaults. Every binding below is an
 [configuration.md](configuration.md)); overriding an action also unbinds its
 listed alternates.
 
+The tables below show the macOS keys. On Windows and Linux every ⌘ chord
+still works with the Windows / Super key, but those keys mostly belong to the
+system, so each ⌘-only action also has the key in
+[Windows and Linux](#windows-and-linux) (macOS does not get those: there
+the ⌃ chords stay the shell's). Off macOS, Rift writes keys as words:
+Ctrl, Alt, Shift, Win (Super on Linux), Enter, Backspace.
+
 ## Blocks
 
 | Shortcut | Action name | Effect |
@@ -134,6 +141,75 @@ collapsed group); a tab that closes while it shows drops out of it. ⇧⌘} /
 | — | `clear_ignored_suggestions` | Suggest again every command line the ghost text's ✕ ignored |
 | — | `[[actions]]` | Your own step sequences, by their `key` ([user actions](configuration.md#user-actions)) |
 | ⌘V / ⌃⇧V | `paste` | Paste |
+
+## Windows and Linux
+
+Each ⌘-only action above also has this key on Windows and Linux (not on
+macOS). The keys follow Warp's Windows and Linux defaults where Warp has the
+action and the chord is free in Rift; otherwise Warp's own pattern (⌘X →
+Ctrl+Shift+X, ⇧⌘X → Ctrl+Alt+X when Ctrl+Shift+X is taken, ⌥⌘X →
+Ctrl+Alt+X) or the Windows Terminal / browser key. No plain Ctrl+letter is
+taken: those stay the shell's (Ctrl+A, Ctrl+E, Ctrl+K, Ctrl+R, Ctrl+W …).
+The ⌃⇧ chords in the tables above (Ctrl+Shift+T new tab, Ctrl+Shift+D
+split …) apply on every platform.
+
+| Windows / Linux | macOS | Action name | Source |
+|---|---|---|---|
+| Ctrl+Alt+Shift+← → ↑ ↓ | ⌥⌘← → ↑ ↓ | `navigate_left/right/up/down` | Warp's Ctrl+Alt+arrows + Shift (Ctrl+Alt+← / → are `subword_left` / `_right`, as in Warp's editor and VS Code) |
+| Alt+Shift+← / → | ⌃⌘← / → | `resize_pane_left` / `_right` | Windows Terminal (Warp has none) |
+| Ctrl+Alt+↑ / ↓ | ⌃⌘↑ / ↓ | `resize_pane_up` / `_down` | Alt+Shift+↑ / ↓ are the bookmark keys |
+| Ctrl+Shift+Enter | ⇧⌘⏎ | `maximize_pane` | Warp |
+| Ctrl+Alt+Shift+I | ⌥⌘I | `toggle_sync_inputs` | ⌥⌘ → Ctrl+Alt, + Shift (Ctrl+Alt+I is `reinput`) |
+| Ctrl+1 … Ctrl+9 | ⌘1 … ⌘9 | `tab_select_1..9` | Warp (hold Ctrl for the tab numbers) |
+| Ctrl+Alt+T | ⇧⌘T | `reopen_closed_tab` | Warp |
+| Ctrl+Shift+O | ⇧⌘O | `session_switcher` | ⇧⌘ → Ctrl+Shift |
+| Ctrl+Alt+F | ⇧⌘F | `focus_rail_search` | Ctrl+Shift+F is `search` |
+| Ctrl+↑ / Ctrl+↓ | ⌘↑ / ⌘↓ | `select_block_prev` / `_next` | Warp |
+| Ctrl+Alt+C | ⇧⌘C | `copy_block_command` | Warp's Ctrl+Shift+C is `copy` here |
+| Ctrl+Alt+Shift+C | ⌥⇧⌘C | `copy_block_output` | Warp |
+| Ctrl+Alt+I | ⌘I | `reinput` | Warp's Ctrl+Shift+I is `inspect_command` here |
+| Ctrl+Shift+A | ⌘A | `select_all` | Warp |
+| Ctrl+Shift+K | ⌘K | `clear_blocks` | Warp |
+| Ctrl+Shift+N | ⌘N | `new_window` | Windows Terminal, VS Code |
+| Ctrl+Alt+W | ⇧⌘W | `close_window` | ⇧⌘ → Ctrl+Alt (Ctrl+Shift+W is `close_pane`) |
+| F11 | ⌃⌘F | `toggle_fullscreen` | Windows Terminal, VS Code, browsers |
+| Ctrl+Shift+Q | ⌘Q | `quit` | browsers (plain Ctrl+Q is the terminal's XON) |
+| Ctrl+, | ⌘, | `open_settings` | Warp |
+| Ctrl+Shift+, | ⌃⌘K | `open_keybindings` | beside Ctrl+, (Warp lists only its ⌘ chord) |
+| Ctrl+Shift+L | ⌘L | `focus_input` | Warp |
+| Ctrl+Alt+A | ⇧⌘A | `attention_center` | ⇧⌘ → Ctrl+Alt (Ctrl+Shift+A is `select_all`) |
+| Ctrl+Alt+Shift+E | ⇧⌘E | `toggle_explorer` | Ctrl+Shift+E splits; Ctrl+Alt+E types € under AltGr |
+| Ctrl+Alt+G | ⇧⌘G | `toggle_review` | ⇧⌘ → Ctrl+Alt (Ctrl+Shift+G is `rich_input`) |
+| Ctrl+Alt+Shift+G | ⌥⌘G | `focus_review` | + Shift (Ctrl+Alt+G is `toggle_review`) |
+| Ctrl+Shift+H | ⇧⌘H | `hint_mode` | ⇧⌘ → Ctrl+Shift |
+| Ctrl+= | ⌘= | `font_increase` | Warp |
+| Ctrl+- | ⌘- | `font_decrease` | Warp (takes readline's Ctrl+- undo, as Warp does) |
+| Ctrl+0 | ⌘0 | `font_reset` | Warp |
+| — | ⌘M | `minimize` | the system's key (Windows ⊞↓, GNOME / KDE Super+H) |
+| — | ⌘H | `hide_app` | hiding an app is macOS's |
+
+Settings, the palette, menus, the welcome list and tooltips show these keys
+on Windows and Linux; rebind any of them in `[keybindings]` as usual.
+
+The fixed ⌘ gestures (not remappable) take Ctrl on Windows and Linux, as in
+Warp, VS Code and Windows Terminal there:
+
+| Windows / Linux | macOS | Gesture |
+|---|---|---|
+| Ctrl+click | ⌘-click | Open a link or file path; add or remove a block in the selection; pick tabs for *Group tabs* |
+| Ctrl+scroll | ⌘-scroll | Zoom the font (`wheel_zoom`) |
+| Ctrl+Enter | ⌘⏎ | History pane: run in a new split; rich input (`rich_input_submit = "cmd_enter"`): send; commit message: commit |
+| Ctrl+Backspace | ⌘⌫ | Clear a Settings field, the tab rename field, the relay field; *Don't Save* in "Save changes?" |
+| Ctrl+A / Ctrl+G / Ctrl+Shift+G, F3 / Shift+F3 | ⌘A / ⌘G / ⇧⌘G | Search: select the query / next / previous match (F3: Warp) |
+| Ctrl+Home / Ctrl+End (Shift selects) | ⌘↑ / ⌘↓ | Start / end of a multi-line command (Ctrl+↑ / ↓ select blocks, Ctrl+Shift+↑ / ↓ add carets) |
+| Ctrl+← / Ctrl+→ (Shift selects) | ⌥← / ⌥→ | Command line: by word (⌥ works too); Ctrl+→ at the end takes a word of the ghost text |
+| Ctrl+Backspace / Ctrl+Delete | ⌥⌫ / ⌥⌦ | Command line: delete a word |
+| Ctrl+Z / Ctrl+Shift+Z | ⌘Z / ⇧⌘Z | Command line: undo / redo |
+
+The other Ctrl+letters at the prompt stay the shell's (Ctrl+A, Ctrl+E, Ctrl+K,
+Ctrl+U, Ctrl+W …). With AltGr (Windows reports it as Ctrl+Alt) a key that
+types a character (AltGr+E = €, AltGr+A = ą) types it and never runs a
+Ctrl+Alt shortcut.
 
 ## Editor keys (fixed, not remappable)
 
@@ -348,7 +424,9 @@ filter bar, and while search is open ⇧⌘G (`toggle_review`) is the previous
 match and ⌘A (`select_all`) selects the query.
 
 Or record shortcuts in Settings → Keybindings (⌃⌘K): click a row, press the
-chord. A recorded chord needs ⌘, ⌃ or ⌥, or a function or navigation key; a
-bare letter is refused with a toast. The macOS menu bar shows the resolved shortcuts. Where an action has
+chord (Ctrl+Shift+, on Windows and Linux). A recorded chord needs ⌘, ⌃ or ⌥
+(Ctrl or Alt), or a function or navigation key; a bare letter is refused with
+a toast. The macOS menu bar shows the resolved shortcuts. Where an action has
 two (a ⌃⇧ chord and a ⌘ one), the palette, Settings, menus, the welcome list
-and tooltips show the ⌘ one on macOS and the other elsewhere.
+and tooltips show the ⌘ one on macOS and the other elsewhere, as glyphs on
+macOS (⇧⌘D) and as words elsewhere (Ctrl+Shift+D).

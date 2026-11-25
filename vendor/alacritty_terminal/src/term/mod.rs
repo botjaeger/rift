@@ -386,6 +386,11 @@ pub struct Config {
 
     /// East Asian Ambiguous characters take two cells (Rift).
     pub ambiguous_wide: bool,
+
+    /// Lines added by a resize come from the history (the content stays at
+    /// the bottom). False under a Windows ConPTY, which repaints the whole
+    /// screen from its top after every resize (Rift; [`Grid::resize_with`]).
+    pub grow_from_history: bool,
 }
 
 impl Default for Config {
@@ -399,6 +404,7 @@ impl Default for Config {
             osc52: Default::default(),
             xtversion: format!("alacritty_terminal({})", env!("CARGO_PKG_VERSION")),
             ambiguous_wide: false,
+            grow_from_history: true,
         }
     }
 }
@@ -752,14 +758,16 @@ impl<T> Term<T> {
 
         // Move vi mode cursor with the content.
         let history_size = self.history_size();
+        let pull = self.config.grow_from_history;
         let mut delta = num_lines as i32 - old_lines as i32;
         let min_delta = cmp::min(0, num_lines as i32 - self.grid.cursor.point.line.0 - 1);
-        delta = cmp::min(cmp::max(delta, min_delta), history_size as i32);
+        let max_delta = if pull { history_size as i32 } else { 0 };
+        delta = cmp::min(cmp::max(delta, min_delta), max_delta);
         self.vi_mode_cursor.point.line += delta;
 
         let is_alt = self.mode.contains(TermMode::ALT_SCREEN);
-        self.grid.resize(!is_alt, num_lines, num_cols);
-        self.inactive_grid.resize(is_alt, num_lines, num_cols);
+        self.grid.resize_with(!is_alt, num_lines, num_cols, pull);
+        self.inactive_grid.resize_with(is_alt, num_lines, num_cols, pull);
 
         // Invalidate selection and tabs only when necessary.
         if old_cols != num_cols {

@@ -45,7 +45,7 @@ blocks, ⌘P = palette).
 ## Commands
 
 ```sh
-scripts/gates.sh               # quality gates: fmt clippy test doc shell docs mobile
+scripts/gates.sh               # quality gates: fmt clippy test doc shell docs mobile site
 scripts/gates.sh ui            # scripted UI regressions (scripts/ui-smoke.py), 2 shards in parallel
 scripts/gates.sh ui --only NAME  # one section's group (python3 scripts/ui-smoke.py BIN --list)
 scripts/gates.sh ssh           # palette/profile/install/completion against a disposable Docker SSH server
@@ -112,7 +112,8 @@ XDG_CONFIG_HOME=/tmp/rift-t/cfg XDG_DATA_HOME=/tmp/rift-t/data RIFT_NO_NOTIFY=1 
 
 Commands (one per line, `#` comments; full list in the `script.rs` module
 doc): `wait`, `wait_prompt`, `key`, `keyup`, `keyrepeat`, `type`, `paste`,
-`copyfiles`, `shot`, `dump`, `resize`, `move`, `click`, `dblclick`, `rclick`,
+`copyfiles`, `shot`, `dump`, `resize`, `move`, `click`, `click_on` (a real
+click on the control the accessibility tree names), `dblclick`, `rclick`,
 `mclick`, `drag`, `press`, `release`, `mods`, `scroll`, `sh`, `focus`, `ime`,
 `preedit`, `drop`, `wait_file`, `new_window`, `window`, `close_window`, `hotkey`,
 `drag_tab` (a tab dragged to another window or out of every one),
@@ -140,7 +141,10 @@ the shell gate and the scripted UI regressions (under Xvfb) in
 ## Architecture
 
 Five crates; dependencies flow strictly downward. The Expo companion app
-lives outside the workspace in `mobile/` (pnpm; the `mobile` gate).
+lives outside the workspace in `mobile/` (pnpm; the `mobile` gate), and the
+website in `site/` (Astro, pnpm; the `site` gate). The site's docs pages are
+built from `docs/`, `README.md` and the keymap at build time
+(`site/scripts/sync-docs.mjs`), so a docs change is a site change.
 
 - **rift-core** — no graphics deps, unit-tested: theme tokens and TOML/Warp
   themes (`theme/`), config + hot-reload watcher, keymap (`[keybindings]`
@@ -258,7 +262,9 @@ lives outside the workspace in `mobile/` (pnpm; the `mobile` gate).
   history drops its run of equal trailing cells; reads clamp to the last
   stored cell, writes restore the row, and row slices exist only through
   `cells_mut`. The trailing-cell scan trusts `Row::occ` — every cell from
-  it on equals the last — so a new row mutation must keep that true). The
+  it on equals the last — so a new row mutation must keep that true), and
+  `Config::grow_from_history` (`Grid::resize_with`: off under Windows'
+  ConPTY, which repaints the screen after a resize). The
   fmt, clippy and test gates run on them too. Only `tty`, `Term`,
   re-exported `vte` and `FairMutex` are used — never alacritty's
   `event_loop`.

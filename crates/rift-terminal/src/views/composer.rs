@@ -60,7 +60,7 @@ pub fn render(
     let mut b = Buffer::new(&mut engine.font_system, Metrics::new(11.0, HINT_H));
     b.set_text(
         &mut engine.font_system,
-        hint,
+        &hint,
         &Attrs::new().family(Family::Name(rift_renderer::FONT_SANS)),
         Shaping::Advanced,
         None,

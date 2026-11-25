@@ -30,6 +30,7 @@ mod remote;
 mod results;
 mod script;
 mod secret_mask;
+mod shell_icon;
 mod smart_select;
 mod stall;
 mod state;
@@ -45,6 +46,7 @@ mod tunnel;
 mod updater;
 mod views;
 mod vim;
+mod win_frame;
 
 use winit::event_loop::EventLoop;
 

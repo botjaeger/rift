@@ -1243,9 +1243,13 @@ pub fn render(
             theme.text_bright,
         );
     } else {
-        let placeholder = placeholder(state.mode);
+        // "⏎ keeps" reads "Enter keeps" off macOS
+        let placeholder = rift_core::keybindings::words_for(
+            placeholder(state.mode),
+            rift_core::keybindings::Platform::current(),
+        );
         layer.text(
-            sans(engine, placeholder, 15.0, Weight::NORMAL),
+            sans(engine, &placeholder, 15.0, Weight::NORMAL),
             qx + 4.0,
             cy - 10.0,
             theme.text_muted,
@@ -1256,7 +1260,8 @@ pub fn render(
         layer.rect([qx + qw + 1.0, cy - 9.0], [2.0, 18.0], theme.accent, 0.0);
     }
     // result count, then the esc cap
-    let esc_w = (engine.measure("esc", 10.5, FONT_SANS, Weight::MEDIUM) + 10.0).max(18.0);
+    let esc = rift_core::keybindings::cap_for("esc", rift_core::keybindings::Platform::current());
+    let esc_w = (engine.measure(esc, 10.5, FONT_SANS, Weight::MEDIUM) + 10.0).max(18.0);
     let esc_x = mx + modal_w - 16.0 - esc_w;
     super::completion::key_cap(layer, engine, theme, "esc", esc_x, cy);
     let count = counted(results.len(), "result");
@@ -1655,7 +1660,10 @@ mod tests {
             .iter()
             .find(|i| i.id == "open_settings")
             .expect("settings action");
-        assert_eq!(settings.shortcut, vec!["⌃", ","]);
+        assert_eq!(
+            settings.shortcut,
+            rift_core::Binding::parse("ctrl+,").unwrap().chips()
+        );
     }
 
     #[test]

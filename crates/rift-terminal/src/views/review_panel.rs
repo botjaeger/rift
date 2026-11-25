@@ -2059,10 +2059,13 @@ fn commit_bar(
         bottom: (field[1] + field[3]) as i32,
     };
     if state.commit_msg.is_empty() {
+        // ⌘⏎, and Ctrl+Enter too (`handle_commit_key`): the one this
+        // platform's keyboard has
+        let commit_keys = rift_core::keybindings::primary_hint("enter");
         layer.text_clipped(
             text(
                 engine,
-                "Commit message  ·  ⌘⏎ commits",
+                &format!("Commit message  ·  {commit_keys} commits"),
                 12.0,
                 FONT_SANS,
                 Weight::NORMAL,

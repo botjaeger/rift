@@ -139,6 +139,9 @@ pub struct MenuItem {
     pub bold: bool,
     /// A Nerd Font glyph in the icon column instead of the action's icon.
     pub glyph: Option<char>,
+    /// A program's own icon there instead (Windows: a shell's `.exe`,
+    /// `crate::shell_icon`); it wins over `glyph`.
+    pub image: Option<crate::shell_icon::Icon>,
     /// One of a choice (a radio item): `Some(true)` is the current one, a
     /// check in the icon column.
     pub radio: Option<bool>,
@@ -153,8 +156,14 @@ impl MenuItem {
             separator: false,
             bold: false,
             glyph: None,
+            image: None,
             radio: None,
         }
+    }
+
+    pub fn image(mut self, image: Option<crate::shell_icon::Icon>) -> Self {
+        self.image = image;
+        self
     }
 
     pub fn radio(mut self, checked: bool) -> Self {
@@ -382,7 +391,7 @@ pub fn render(
         .map(|item| {
             let keys = shortcut_actions(item.action)
                 .iter()
-                .find_map(|a| keymap.preferred(a).map(|b| b.chips().concat()));
+                .find_map(|a| keymap.preferred(a).map(|b| b.label()));
             let kw = keys
                 .as_ref()
                 .map(|k| engine.measure(k, 11.5, FONT_SANS, Weight::NORMAL) + 12.0)
@@ -460,6 +469,17 @@ pub fn render(
                 14.0,
                 theme.text_dim,
             );
+        } else if let Some((key, rgba)) = &item.image {
+            let px = crate::shell_icon::PX;
+            layer.sprites.push(rift_renderer::Sprite {
+                key: *key,
+                rgba: rgba.clone(),
+                size: [px, px],
+                rect: [rect[0] + 8.0, cy - 8.0, 16.0, 16.0],
+                src: [0.0, 0.0, px as f32, px as f32],
+                clip: [rect[0], ry, rect[2], row_h],
+                under_text: true,
+            });
         } else if let Some(g) = item.glyph {
             let ic = if item.enabled { theme.text_dim } else { color };
             crate::views::glyphs::draw(layer, engine, g, [rect[0] + 16.0, cy], 14.0, ic);

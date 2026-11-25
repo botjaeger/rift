@@ -97,7 +97,11 @@ pub fn render(
     let b = make_text(engine, &close_label, 12.0, FONT_SANS, Weight::MEDIUM);
     layer.text(b, close[0] + BTN_PAD, by + 5.0, theme.text_ui);
     hits.push((close, Part::Close));
-    let restart_label = format!("{}  ⏎", restart_label(code));
+    let restart_label = format!(
+        "{}  {}",
+        restart_label(code),
+        rift_core::keybindings::cap_for("⏎", rift_core::keybindings::Platform::current())
+    );
     let restart_label = restart_label.as_str();
     let restart_w = engine.measure(restart_label, 12.0, FONT_SANS, Weight::MEDIUM) + 2.0 * BTN_PAD;
     let restart = [close[0] - 8.0 - restart_w, by, restart_w, BTN_H];

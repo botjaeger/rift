@@ -73,7 +73,8 @@ readable on `bg` when adding a theme.
 The only literal colors in views are the spec's overlay values: black scrims
 and shadows, and white hairlines and hover tints at fixed alpha; and the
 pairing QR code (Settings › Remote access), black modules on a white plate in
-every theme so phone cameras can read it. New code uses
+every theme so phone cameras can read it; and Windows' own close-button red
+(`#c42b1c`, white glyph) on the Windows title bar. New code uses
 tokens; mix or alpha them (`Color::with_alpha`, `Color::mix`) instead of
 adding hex values.
 
@@ -102,7 +103,9 @@ glyphon; shaped runs are cached by content.
 | Tab bar height (Warp) / detailed tab style | 34 px / 44 px | `TAB_BAR_H`, `DETAILED_BAR_H` (`tabbar::bar_h()`) |
 | Tab end slots (status, × / ⌘ number), inset | 22 px, 6 px from the tab's edge | `SLOT`, `SLOT_INSET` |
 | Traffic light centres (x; y = strip middle) | 20 / 40 / 60 px | `TRAFFIC_X`, `TRAFFIC_GAP` |
-| First tab x (after traffic lights) | 78 px | `TABS_X` |
+| First tab x (after traffic lights) | 78 px (Windows, no traffic lights: 8 px) | `TABS_X` |
+| Windows admin badge | shield 14 px + "Admin" 12 px semibold in `warning`, 10 px padding each side, 1 px `border` divider; the word drops below a 720 px strip | `tabbar::admin_badge`, `ADMIN_WORD_MIN_W` |
+| Windows window buttons (minimize, maximize, close) | 46 px × strip height each, 10 px glyph, 1 px strokes; hover `text_ui` at 10 % (pressed 16 %), close `#c42b1c` with a white glyph | `win_frame::BUTTON_W`, `tabbar::window_buttons` |
 | Tab width (fixed, Warp / squeezed minimum) | 200 px / 120 px | `TAB_W`, `MIN_TAB_W` |
 | Chrome icon button | 26 px, icon 16 px | `tabbar::icon_button` |
 | Vertical rail width / row height | 220 px / 54 px | `RAIL_W`, `rail::ROW_H` |

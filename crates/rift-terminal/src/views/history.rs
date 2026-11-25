@@ -620,6 +620,8 @@ fn footer(
     results: bool,
 ) {
     layer.hline(x, fy, w, 1.0, theme.border);
+    // ⌘⏎, Ctrl+Enter off macOS (`input::primary`)
+    let primary = rift_core::keybindings::Platform::current().primary_name();
     key_hints(
         layer,
         engine,
@@ -628,7 +630,7 @@ fn footer(
             (&["↑", "↓"], "navigate"),
             (&["⏎"], if results { "rerun here" } else { "run" }),
             (&["⇥"], "edit first"),
-            (&["⌘", "⏎"], "run in new split"),
+            (&[primary, "⏎"], "run in new split"),
             (&["⌃", "R"], "scope"),
             (&["esc"], "close"),
         ],

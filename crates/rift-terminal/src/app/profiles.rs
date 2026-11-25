@@ -186,10 +186,17 @@ impl App {
             .enumerate()
             .map(|(i, p)| {
                 let glyph = p.icon.as_deref().and_then(crate::views::glyphs::by_name);
+                // Windows: the shell's own icon unless the profile names a
+                // glyph (Windows Terminal shows the program's icon)
+                let image = match glyph {
+                    None => p.command.as_deref().and_then(crate::shell_icon::of),
+                    Some(_) => None,
+                };
                 let bold = default.as_deref() == Some(p.name.trim());
                 MenuItem::new(p.name, MenuAction::NewTabProfile(i))
                     .bold(bold)
                     .glyph(glyph)
+                    .image(image)
             })
             .collect();
         let first_extra = MenuItem::new("Settings", MenuAction::OpenSettings);

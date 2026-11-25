@@ -27,6 +27,10 @@ pub enum ClickTarget {
     BlockDuration(PaneId, rift_core::BlockId),
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     TrafficLight(u8),
+    /// Windows: the strip's "running as administrator" shield (its hover
+    /// explains it; a click does nothing).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    AdminBadge,
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     WindowDrag,
     TabSelect(usize),
@@ -1247,6 +1251,12 @@ pub struct PaneState {
     pub transcript_id: String,
     /// When the app first saw the shell's output (boot placeholder grace).
     pub first_output: Option<std::time::Instant>,
+    /// When the shell's first bytes came, readable or not (the placeholder
+    /// waits for readable text, but not past `BOOT_TEXT_WAIT` after these).
+    pub first_bytes: Option<std::time::Instant>,
+    /// Enter was pressed on a command typed while the shell was still
+    /// starting: it runs at the shell's first prompt (`take_typed_ahead`).
+    pub submit_when_ready: bool,
     /// Running block whose password prompt already raised a notification.
     pub password_block: Option<rift_core::BlockId>,
     /// This pane's own window title (OSC 0/2): its title bar in a split.
@@ -1400,6 +1410,8 @@ impl PaneState {
             correction_checked: None,
             transcript_id: rift_core::transcript::new_id(),
             first_output: None,
+            first_bytes: None,
+            submit_when_ready: false,
             password_block: None,
             title: String::new(),
             fit: None,

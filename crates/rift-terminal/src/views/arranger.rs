@@ -433,6 +433,8 @@ fn key_cap(
     fill: Color,
     ink: Color,
 ) -> f32 {
+    // ⏎ / esc: Enter / Esc off macOS
+    let label = rift_core::keybindings::cap_for(label, rift_core::keybindings::Platform::current());
     let w = engine.measure(label, 10.5, FONT_SANS, Weight::MEDIUM) + 8.0;
     layer.rect([x, mid - 8.0], [w, 16.0], fill, 3.0);
     layer.text(
@@ -714,8 +716,10 @@ pub fn render<T: Copy + PartialEq>(
     cy += bucket_h + 24.0;
 
     // ── Cancel esc, Save changes ⏎ ──
-    let caps =
-        |engine: &mut TextEngine, l: &str| engine.measure(l, 10.5, FONT_SANS, Weight::MEDIUM) + 8.0;
+    let caps = |engine: &mut TextEngine, l: &str| {
+        let l = rift_core::keybindings::cap_for(l, rift_core::keybindings::Platform::current());
+        engine.measure(l, 10.5, FONT_SANS, Weight::MEDIUM) + 8.0
+    };
     let save_label = "Save changes";
     let sw = engine.measure(save_label, 12.5, FONT_SANS, Weight::MEDIUM)
         + 24.0
