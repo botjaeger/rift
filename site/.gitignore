@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.astro/
+.DS_Store
+.playwright-cli/
+.impeccable/
+# generated from the repo's docs by scripts/sync-docs.mjs (pnpm build / dev / check)
+/src/content/docs/getting-started.md
+/src/content/docs/features.md
+/src/content/docs/configuration.md
+/src/content/docs/keyboard-shortcuts.md

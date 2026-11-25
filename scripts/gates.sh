@@ -2,7 +2,7 @@
 # shellcheck disable=SC2317,SC2329  # gate_* functions are called as "gate_$g" (SC2317 on shellcheck <0.10)
 # Rift quality gates: one runner for local checks and CI.
 #
-#   scripts/gates.sh                 # default set: fmt clippy test doc shell docs mobile
+#   scripts/gates.sh                 # default set: fmt clippy test doc shell docs mobile site
 #   scripts/gates.sh all             # default set + release + ui + ssh + leak + linux
 #   scripts/gates.sh fmt clippy      # only the named gates
 #   scripts/gates.sh ui --only NAME  # only these ui-smoke.py sections (scripts/ui-smoke.sh)
@@ -23,8 +23,8 @@
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
-DEFAULT=(fmt clippy test doc shell docs mobile)
-ALL=(fmt clippy test doc shell docs mobile release ui ssh leak windows linux)
+DEFAULT=(fmt clippy test doc shell docs mobile site)
+ALL=(fmt clippy test doc shell docs mobile site release ui ssh leak windows linux)
 
 describe() {
     cat <<'EOF'
@@ -36,6 +36,8 @@ doc      cargo doc --workspace --no-deps --locked, rustdoc warnings denied
 shell    shellcheck on packaging/*.sh, scripts/*.sh, .githooks/*, bash hooks; zsh -n and fish --no-execute on their hooks
 docs     CLAUDE.md and AGENTS.md identical; every relative link in *.md resolves (vendored crates' upstream docs excepted)
 mobile   the Expo companion in mobile/: pnpm install --frozen-lockfile, typecheck, eslint, vitest (incl. the shared protocol fixtures)
+site     the website in site/: pnpm install --frozen-lockfile, its script tests, astro check and build (docs pages synced from docs/; the
+         download data from the latest public release, so it needs the network)
 release  cargo build --release --locked
 ui       isolated scripted UI regressions (display or xvfb-run required), RIFT_UI_SHARDS (default 2) parallel shards
          of scripts/ui-smoke.py's independent section groups; --only NAME[,NAME] runs only those sections' groups
@@ -175,6 +177,11 @@ gate_mobile() {
     (cd mobile && pnpm install --frozen-lockfile && pnpm typecheck && pnpm lint && pnpm test)
 }
 
+gate_site() {
+    have pnpm || { echo "pnpm not installed (corepack enable)"; return 1; }
+    (cd site && pnpm install --frozen-lockfile && pnpm test && pnpm check && pnpm build)
+}
+
 gate_linux() {
     have docker || { echo "docker not installed"; return 1; }
     # beside the local gates (see the loop): leave two cores to them
@@ -253,7 +260,7 @@ limit_for() {
     local s
     case $1 in
         fmt | shell | docs) s=300 ;;
-        clippy | doc | mobile | leak) s=1200 ;;
+        clippy | doc | mobile | site | leak) s=1200 ;;
         linux) s=5400 ;;
         windows) s=3600 ;;
         *) s=1800 ;;

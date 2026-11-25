@@ -1,0 +1,214 @@
+---
+interface Props {
+  size?: 'large' | 'small';
+}
+const { size = 'small' } = Astro.props;
+---
+
+<!-- Hidden until the script runs: without JavaScript the box could not search. -->
+<div class:list={['docs-search', size]} data-docs-search hidden>
+  <label class="sr-only" for={`q-${size}`}>Search the docs</label>
+  <div class="field">
+    <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>
+    <input id={`q-${size}`} type="search" placeholder="Search the docs" autocomplete="off" spellcheck="false" aria-describedby={`q-${size}-status`} />
+    <kbd class="kbd slash" aria-hidden="true">/</kbd>
+  </div>
+  <p class="sr-only" id={`q-${size}-status`} role="status"></p>
+  <ol class="results" hidden></ol>
+</div>
+
+<script>
+  type Row = { page: string; pageTitle: string; heading: string; anchor: string; text: string; h: string; t: string; p: string };
+  let index: Promise<Row[]> | undefined;
+  const load = () =>
+    (index ??= fetch('/docs/search.json')
+      .then((r) => {
+        if (!r.ok) throw new Error(`search index ${r.status}`);
+        return r.json() as Promise<string[][]>;
+      })
+      .then((rows) =>
+        rows.map(([page, pageTitle, heading, anchor, text]) => ({
+          page, pageTitle, heading, anchor, text,
+          h: heading.toLowerCase(), t: text.toLowerCase(), p: pageTitle.toLowerCase(),
+        })),
+      ));
+
+  function rank(rows: Row[], query: string): Row[] {
+    const q = query.trim().toLowerCase();
+    const terms = q.split(/\s+/).filter(Boolean);
+    if (!terms.length) return [];
+    const scored: [number, Row][] = [];
+    for (const r of rows) {
+      let score = 0;
+      for (const term of terms) {
+        const inHeading = r.h.includes(term);
+        const inText = r.t.includes(term);
+        if (!inHeading && !inText && !r.p.includes(term)) { score = -1; break; }
+        score += inHeading ? (r.h.startsWith(term) ? 12 : 10) : inText ? 1 : 0.5;
+      }
+      if (score < 0) continue;
+      if (r.h === q) score += 20;
+      scored.push([score, r]);
+    }
+    return scored.sort((a, b) => b[0] - a[0]).slice(0, 12).map(([, r]) => r);
+  }
+
+  // Appends text to el with every search term wrapped in <mark>.
+  function marked(el: HTMLElement, text: string, terms: string[]) {
+    const re = new RegExp(`(${terms.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`, 'gi');
+    for (const part of text.split(re)) {
+      if (!part) continue;
+      if (terms.some((t) => t === part.toLowerCase())) {
+        const m = document.createElement('mark');
+        m.textContent = part;
+        el.append(m);
+      } else el.append(part);
+    }
+  }
+
+  function snippet(r: Row, terms: string[]): string {
+    const at = Math.min(...terms.map((t) => r.t.indexOf(t)).filter((i) => i >= 0));
+    if (!Number.isFinite(at)) return r.text.slice(0, 140) + (r.text.length > 140 ? '…' : '');
+    const start = Math.max(0, at - 50);
+    const end = Math.min(r.text.length, at + 110);
+    return (start ? '…' : '') + r.text.slice(start, end) + (end < r.text.length ? '…' : '');
+  }
+
+  for (const root of document.querySelectorAll<HTMLElement>('[data-docs-search]')) {
+    const input = root.querySelector('input')!;
+    const list = root.querySelector<HTMLOListElement>('.results')!;
+    const status = root.querySelector<HTMLElement>('[role=status]')!;
+    root.hidden = false;
+    let seq = 0;
+
+    const links = () => [...list.querySelectorAll<HTMLAnchorElement>('a')];
+
+    async function update() {
+      const query = input.value;
+      const mine = ++seq;
+      if (!query.trim()) {
+        list.hidden = true;
+        list.replaceChildren();
+        status.textContent = '';
+        return;
+      }
+      let rows: Row[];
+      try {
+        rows = await load();
+      } catch {
+        index = undefined; // let the next keystroke try again
+        if (mine !== seq) return;
+        list.replaceChildren(Object.assign(document.createElement('li'), { className: 'empty', textContent: 'Search could not load. Check your connection and type again.' }));
+        list.hidden = false;
+        status.textContent = 'Search could not load.';
+        return;
+      }
+      if (mine !== seq) return; // a newer keystroke won
+      const terms = query.trim().toLowerCase().split(/\s+/);
+      const hits = rank(rows, query);
+      list.replaceChildren();
+      if (!hits.length) {
+        const li = document.createElement('li');
+        li.className = 'empty';
+        li.textContent = `Nothing matches “${query.trim()}”.`;
+        list.append(li);
+      }
+      for (const r of hits) {
+        const a = document.createElement('a');
+        a.href = `/docs/${r.page}/${r.anchor ? `#${r.anchor}` : ''}`;
+        const head = document.createElement('span');
+        head.className = 'r-head';
+        marked(head, r.heading, terms);
+        const page = document.createElement('span');
+        page.className = 'r-page';
+        page.textContent = r.anchor ? r.pageTitle : 'Overview';
+        const snip = document.createElement('span');
+        snip.className = 'r-snip';
+        marked(snip, snippet(r, terms), terms);
+        a.append(head, page, snip);
+        const li = document.createElement('li');
+        li.append(a);
+        list.append(li);
+      }
+      list.hidden = false;
+      status.textContent = hits.length ? `${hits.length} result${hits.length === 1 ? '' : 's'}` : 'No results';
+    }
+
+    input.addEventListener('input', update);
+    input.addEventListener('focus', () => void load().catch(() => (index = undefined)), { once: true });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowDown' && links().length) {
+        e.preventDefault();
+        links()[0].focus();
+      } else if (e.key === 'Enter' && links().length) {
+        e.preventDefault();
+        links()[0].click();
+      } else if (e.key === 'Escape') {
+        input.value = '';
+        void update();
+      }
+    });
+    list.addEventListener('keydown', (e) => {
+      const all = links();
+      const i = all.indexOf(document.activeElement as HTMLAnchorElement);
+      if (e.key === 'ArrowDown' && i < all.length - 1) { e.preventDefault(); all[i + 1].focus(); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); (i > 0 ? all[i - 1] : input).focus(); }
+      else if (e.key === 'Escape') { input.focus(); input.value = ''; void update(); }
+    });
+    // A result inside the current page only moves the anchor: close the list.
+    list.addEventListener('click', () => {
+      input.value = '';
+      void update();
+    });
+  }
+
+  // "/" focuses the search box, as on most docs sites.
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey) return;
+    const t = e.target as HTMLElement;
+    if (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)) return;
+    const input = document.querySelector<HTMLInputElement>('[data-docs-search] input');
+    if (!input) return;
+    e.preventDefault();
+    input.focus();
+  });
+</script>
+
+<style>
+  .docs-search { position: relative; width: 100%; }
+  /* Shown from the first paint when JavaScript is on (Base.astro adds html.js); the script then drops hidden. */
+  :global(html.js) .docs-search[hidden] { display: block; }
+  .field {
+    display: flex; align-items: center; gap: 10px; padding: 0 12px;
+    background: var(--surface); border: 1px solid #ffffff1f; border-radius: 8px; color: var(--text-muted);
+    transition: border-color .15s;
+  }
+  .field:focus-within { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .field svg { flex: none; }
+  input {
+    flex: 1; min-width: 0; height: 44px; background: transparent; border: 0; outline: 0;
+    color: var(--text-strong); font: inherit; font-size: 15px;
+  }
+  input::placeholder { color: var(--text-faint); }
+  input::-webkit-search-cancel-button { filter: invert(1); }
+  .large .field { border-radius: 10px; padding: 0 16px; }
+  .large input { height: 54px; font-size: 17px; }
+  .slash { flex: none; }
+  .field:focus-within .slash { display: none; }
+  @media (hover: none) { .slash { display: none; } }
+  .results {
+    list-style: none; margin: 8px 0 0; padding: 6px; display: flex; flex-direction: column; gap: 2px;
+    background: #0e0e0e; border: 1px solid #ffffff1f; border-radius: 10px;
+    max-height: min(70vh, 560px); overflow-y: auto;
+  }
+  .results[hidden] { display: none; }
+  /* In the sidebar the list sits in the flow, inside the sidebar's own scroll area. */
+  .small .results { max-height: none; overflow: visible; }
+  .results :global(a) { display: grid; gap: 2px; padding: 10px 12px; border-radius: 6px; color: var(--text); }
+  .results :global(a:hover), .results :global(a:focus-visible) { background: #19aad81a; color: var(--text-strong); outline-offset: -2px; }
+  .results :global(.r-head) { font-weight: 600; color: var(--text-strong); font-size: 14px; }
+  .results :global(.r-page) { font-size: 12px; color: var(--accent); }
+  .results :global(.r-snip) { font-size: 13px; line-height: 1.5; color: var(--text-muted); overflow-wrap: anywhere; }
+  .results :global(mark) { background: #19aad840; color: var(--text-strong); border-radius: 2px; }
+  .results :global(.empty) { padding: 12px; font-size: 14px; color: var(--text-muted); }
+</style>

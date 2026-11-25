@@ -1,0 +1,36 @@
+---
+import { RELEASES_URL, REPO_URL } from '../lib/release';
+
+interface Props {
+  page: 'home' | 'download' | 'features' | 'phone' | 'performance' | 'docs' | 'about' | 'other';
+}
+const { page } = Astro.props;
+---
+
+<header class="site-header">
+  <nav class="wrap site-nav" aria-label="Main">
+    <a class="brand" href={page === 'home' ? '#top' : '/'}>
+      <img src="/rift-56.png" alt="" width="28" height="28" />Rift
+    </a>
+    <div class="nav-links hide-sm">
+      <a class="navlink" href="/features/" aria-current={page === 'features' ? 'page' : undefined}>Features</a>
+      <a class="navlink" href="/phone/" aria-current={page === 'phone' ? 'page' : undefined}>Phone</a>
+      <a class="navlink" href="/performance/" aria-current={page === 'performance' ? 'page' : undefined}>Performance</a>
+      <a class="navlink" href="/docs/" aria-current={page === 'docs' ? 'page' : undefined}>Docs</a>
+      <a class="navlink" href="/about/" aria-current={page === 'about' ? 'page' : undefined}>About</a>
+    </div>
+    <div class="nav-actions">
+      <a class="navlink show-sm" href="/docs/" aria-current={page === 'docs' ? 'page' : undefined}>Docs</a>
+      {
+        page === 'download' ? (
+          <a class="btn btn-ghost btn-sm" href={RELEASES_URL}>All releases</a>
+        ) : (
+          <>
+            <a class="btn btn-ghost btn-sm hide-sm" href={REPO_URL}>GitHub</a>
+            <a class="btn btn-primary btn-sm" href="/download/">Download</a>
+          </>
+        )
+      }
+    </div>
+  </nav>
+</header>

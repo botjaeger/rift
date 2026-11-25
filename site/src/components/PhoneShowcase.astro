@@ -1,0 +1,282 @@
+---
+// "What your phone can do": a list of features beside one phone whose screen shows the chosen one.
+// The screens are drawn (not screenshots) at the app's 390 x 844 pt and scaled into the frame; their
+// wording is the app's own, from the Rift docs (features.md › Remote access, the trust model).
+// Without JavaScript every feature is listed and the phone shows the first screen.
+const features = [
+  { id: 'live', title: 'Follow panes live', body: 'Every window, tab and pane. Blocks stream in as they run; page back through older ones, and pick up after a dropped connection without a gap.' },
+  { id: 'agent', title: 'Answer a coding agent', body: 'When Claude Code or Codex asks, the question docks at the foot of the pane with the file and its changed lines. A tap answers.' },
+  { id: 'run', title: 'Run commands and send keys', body: 'A command runs at the pane’s prompt and becomes a normal block. The key row sends ^C, esc, tab and arrows to a running program.' },
+  { id: 'tui', title: 'Full-screen programs', body: 'While vim, less or htop is open, the phone shows the pane’s screen in its colours and types into it.' },
+  { id: 'alerts', title: 'Alerts on the lock screen', body: 'A question raises an alert with Yes and No. They need the phone unlocked and go through the same checks as an answer in the app. Alerts come as push notifications, or through ntfy with no push setup.' },
+  { id: 'open', title: 'Open tabs from the phone', body: 'New tab and New pane start a shell, Claude Code, Codex or OpenCode. On macOS, even while Rift is closed.' },
+  { id: 'password', title: 'Passwords, safely', body: 'Answer a sudo or ssh prompt. The field is secure, and the password is never shown, logged or kept on either side.' },
+  { id: 'lock', title: 'App lock', body: 'Face ID or a fingerprint on launch and after 5 minutes away; the app switcher shows a privacy cover.' },
+];
+---
+
+<div class="showcase" data-showcase>
+  <div class="list" role="tablist" aria-label="Phone features" aria-orientation="vertical">
+    {
+      features.map((f, i) => (
+        <button type="button" role="tab" id={`tab-${f.id}`} aria-controls={`screen-${f.id}`} aria-selected={i === 0 ? 'true' : 'false'} tabindex={i === 0 ? 0 : -1}>
+          <span class="t">{f.title}</span>
+          <span class="b">{f.body}</span>
+        </button>
+      ))
+    }
+  </div>
+
+  <div class="device">
+    <div class="phone">
+      <!-- Follow panes live -->
+      <div class="screen" role="tabpanel" id="screen-live" aria-labelledby="tab-live">
+        <div class="bar"><span class="back">‹</span><div><div class="title">project2</div><div class="sub">MacBook · This network</div></div></div>
+        <div class="blocks">
+          <div class="blk"><div class="bh"><span class="c">git pull</span><span class="ok">✓ 0</span></div><div class="o dim">Already up to date.</div></div>
+          <div class="blk"><div class="bh"><span class="c">pnpm test</span><span class="ok">✓ 0</span></div><div class="o">Tests <span class="lime">214 passed</span> (214)</div></div>
+          <div class="blk run"><div class="bh"><span class="c">pnpm dev</span><span class="acc">running</span></div>
+            <div class="o stream"><span>ready in 412 ms</span><span>➜ Local: http://localhost:4321/</span><span class="dim">watching for file changes…</span><span class="lime">page reload src/pages/index.astro</span></div>
+          </div>
+        </div>
+        <div class="foot"><span class="field">Run a command</span></div>
+      </div>
+
+      <!-- Answer a coding agent -->
+      <div class="screen" role="tabpanel" id="screen-agent" aria-labelledby="tab-agent" hidden>
+        <div class="bar"><span class="back">‹</span><div><div class="title">project1</div><div class="sub">claude · Waiting for you</div></div></div>
+        <div class="blocks"><div class="blk"><div class="o dim">● Update(src/server.ts)</div></div></div>
+        <div class="dock rise">
+          <div class="where">claude is asking · MacBook · project1 · pane 1</div>
+          <div class="q">Do you want to make this edit to src/server.ts?</div>
+          <div class="diff"><span class="del">- await upload(file);</span><span class="add">+ await retry(() =&gt; upload(file), 1);</span></div>
+          <div class="pills"><span class="pill primary press">Yes</span><span class="pill">Always</span><span class="pill">No</span></div>
+        </div>
+      </div>
+
+      <!-- Run commands and send keys -->
+      <div class="screen" role="tabpanel" id="screen-run" aria-labelledby="tab-run" hidden>
+        <div class="bar"><span class="back">‹</span><div><div class="title">project1</div><div class="sub">MacBook · Over the relay</div></div></div>
+        <div class="blocks">
+          <div class="blk"><div class="bh"><span class="c">git status --short</span><span class="ok">✓ 0</span></div><div class="o"><span class="red">M</span> src/server.ts</div></div>
+          <div class="blk land"><div class="bh"><span class="c">git diff --stat</span><span class="ok">✓ 0</span></div><div class="o">1 file changed, <span class="lime">2 insertions(+)</span>, <span class="red">1 deletion(-)</span></div></div>
+        </div>
+        <div class="foot">
+          <div class="keys"><span>^C</span><span>esc</span><span>tab</span><span>←</span><span>↑</span><span>↓</span><span>→</span></div>
+          <div class="cmdrow"><span class="field typed">git diff --stat</span><span class="runbtn">Run</span></div>
+        </div>
+      </div>
+
+      <!-- Full-screen programs -->
+      <div class="screen" role="tabpanel" id="screen-tui" aria-labelledby="tab-tui" hidden>
+        <div class="bar"><span class="back">‹</span><div><div class="title">server</div><div class="sub">htop is full screen · showing its screen</div></div></div>
+        <div class="tui">
+          <div class="meter"><span>CPU</span><span class="m"><i style="--w: 62%" class="g"></i></span><span>62%</span></div>
+          <div class="meter"><span>Mem</span><span class="m"><i style="--w: 41%" class="b"></i></span><span>6.6G</span></div>
+          <div class="meter"><span>Swp</span><span class="m"><i style="--w: 8%" class="r"></i></span><span>0.3G</span></div>
+          <div class="ps head"><span>PID</span><span>CPU%</span><span>Command</span></div>
+          <div class="ps sel"><span>4127</span><span>48.2</span><span>node server.js</span></div>
+          <div class="ps"><span>3880</span><span>9.6</span><span>postgres</span></div>
+          <div class="ps"><span>412</span><span>2.1</span><span>nginx: worker</span></div>
+          <div class="ps"><span>1</span><span>0.0</span><span>systemd</span></div>
+          <div class="fkeys"><span><b>F1</b>Help</span><span><b>F6</b>Sort</span><span><b>F9</b>Kill</span><span><b>F10</b>Quit</span></div>
+        </div>
+        <div class="foot"><div class="keys"><span>^C</span><span>esc</span><span>tab</span><span>←</span><span>↑</span><span>↓</span><span>→</span></div></div>
+      </div>
+
+      <!-- Alerts on the lock screen -->
+      <div class="screen lockscreen" role="tabpanel" id="screen-alerts" aria-labelledby="tab-alerts" hidden>
+        <div class="clock"><div class="day">Monday 16 November</div><div class="time">9:41</div></div>
+        <div class="notif rise">
+          <div class="nhead"><img src="/rift-56.png" alt="" width="20" height="20" /><span>RIFT</span><span class="now">now</span></div>
+          <div class="ntitle">claude needs you · MacBook</div>
+          <div class="nbody">Do you want to make this edit to src/server.ts?</div>
+          <div class="nacts"><span>Yes</span><span>No</span><span>Open</span></div>
+        </div>
+      </div>
+
+      <!-- Open tabs from the phone -->
+      <div class="screen" role="tabpanel" id="screen-open" aria-labelledby="tab-open" hidden>
+        <div class="bar"><span class="back">‹</span><div><div class="title">MacBook</div><div class="sub">This network · 5 tabs</div></div></div>
+        <div class="sheet rise">
+          <div class="grab"></div>
+          <div class="stitle">New tab</div>
+          <div class="opt"><span class="tile">&gt;_</span><span>Shell</span></div>
+          <div class="opt"><span class="tile claude"><img src="/claude-60.png" alt="" width="20" height="20" /></span><span>Claude Code</span></div>
+          <div class="opt"><span class="tile">cx</span><span>Codex</span></div>
+          <div class="opt"><span class="tile">oc</span><span>OpenCode</span></div>
+          <div class="hint">Starts in ~/code/project1</div>
+        </div>
+      </div>
+
+      <!-- Passwords, safely -->
+      <div class="screen" role="tabpanel" id="screen-password" aria-labelledby="tab-password" hidden>
+        <div class="bar"><span class="back">‹</span><div><div class="title">project1</div><div class="sub">sudo is asking</div></div></div>
+        <div class="blocks"><div class="blk run"><div class="bh"><span class="c">sudo systemctl restart nginx</span><span class="acc">running</span></div></div></div>
+        <div class="dock rise">
+          <div class="where">sudo is asking · MacBook · project1 · pane 1</div>
+          <div class="q">[sudo] password for me:</div>
+          <div class="secret"><span class="dots">••••••••••</span><span class="caret"></span></div>
+          <div class="pnote">Sent once, encrypted. Never shown, logged or kept.</div>
+        </div>
+      </div>
+
+      <!-- App lock -->
+      <div class="screen locked" role="tabpanel" id="screen-lock" aria-labelledby="tab-lock" hidden>
+        <div class="lockmark rise"><img src="/rift-144.png" alt="" width="84" height="84" /></div>
+        <div class="ltext">Your tabs stay connected</div>
+        <div class="faceid"><svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2"></path><path d="M9 9v1M15 9v1M12 9v4h-1M9.5 16a3.5 3.5 0 0 0 5 0"></path></svg></div>
+        <div class="unlock">Unlock with Face ID</div>
+      </div>
+    </div>
+    <p class="drawn">Drawn from the app, not a screenshot.</p>
+  </div>
+</div>
+
+<script>
+  // Tabs: click, or ↑ ↓ (← → on a phone's row), Home and End; the screen follows. No auto-advance.
+  for (const root of document.querySelectorAll<HTMLElement>('[data-showcase]')) {
+    const tabs = [...root.querySelectorAll<HTMLButtonElement>('[role=tab]')];
+    const select = (tab: HTMLButtonElement, focus = false) => {
+      for (const t of tabs) {
+        const on = t === tab;
+        t.setAttribute('aria-selected', String(on));
+        t.tabIndex = on ? 0 : -1;
+        root.querySelector<HTMLElement>(`#${t.getAttribute('aria-controls')}`)!.hidden = !on;
+      }
+      if (focus) tab.focus();
+      // On a phone the list is a row: keep the chosen one in view.
+      tab.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    };
+    for (const t of tabs) t.addEventListener('click', () => select(t));
+    root.querySelector('[role=tablist]')!.addEventListener('keydown', (e) => {
+      const key = (e as KeyboardEvent).key;
+      const i = tabs.indexOf(document.activeElement as HTMLButtonElement);
+      const next = { ArrowDown: i + 1, ArrowRight: i + 1, ArrowUp: i - 1, ArrowLeft: i - 1, Home: 0, End: tabs.length - 1 }[key];
+      if (next === undefined || i < 0) return;
+      e.preventDefault();
+      select(tabs[(next + tabs.length) % tabs.length], true);
+    });
+  }
+</script>
+
+<style>
+  .showcase { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 56px; align-items: start; margin-top: 40px; }
+  .list { display: flex; flex-direction: column; gap: 4px; }
+  .list button {
+    display: grid; gap: 4px; text-align: left; font: inherit; cursor: pointer; padding: 14px 18px; border-radius: 10px;
+    background: transparent; border: 1px solid transparent; color: var(--text-muted);
+  }
+  .list button:hover { background: #ffffff08; }
+  .list button[aria-selected='true'] { background: var(--surface); border-color: #19aad84d; }
+  .t { font-size: 16px; font-weight: 600; color: var(--text-strong); }
+  .b { font-size: 14px; line-height: 1.55; }
+  .device { position: sticky; top: 100px; display: flex; flex-direction: column; align-items: center; gap: 12px; }
+  .drawn { margin: 0; font-size: 12px; color: var(--text-faint); }
+
+  /* Frame and screen, as on the home page's Portals phone. */
+  .phone { --s: 0.7205; position: relative; width: 299px; height: 626px; border-radius: 46px; border: 9px solid #1e1e1e; background: #050505; overflow: hidden; box-shadow: 0 30px 80px #00000099, 0 0 100px #19aad814; }
+  .screen { position: absolute; top: 0; left: 0; width: 390px; height: 844px; transform: scale(var(--s)); transform-origin: 0 0; background: #050505; color: #e6e6e6; font-family: var(--font-sans); display: flex; flex-direction: column; }
+  .screen[hidden] { display: none; }
+  .bar { display: flex; align-items: center; gap: 12px; padding: 58px 16px 14px; background: #000; border-bottom: 1px solid #ffffff14; }
+  .back { font-size: 34px; line-height: 1; color: #19aad8; }
+  .title { font-size: 18px; font-weight: 600; color: #fff; }
+  .sub { font-size: 13px; color: #9b9b9b; }
+  .blocks { padding: 12px; display: flex; flex-direction: column; gap: 10px; flex: 1; overflow: hidden; }
+  .blk { background: #141414; border: 1px solid #ffffff14; border-left: 3px solid #1ca05a; border-radius: 10px; padding: 10px 12px; font-family: var(--font-mono); font-size: 14px; line-height: 1.6; }
+  .blk.run { border-left-color: #19aad8; }
+  .bh { display: flex; justify-content: space-between; gap: 8px; }
+  .c { color: #fff; font-weight: 500; }
+  .ok { color: #3fd182; font-size: 13px; }
+  .acc { color: #19aad8; font-size: 13px; }
+  .o { color: #e6e6e6; }
+  .dim { color: #8a8a8a; }
+  .lime { color: #b4fa72; }
+  .red { color: #ff8272; }
+  .stream { display: flex; flex-direction: column; }
+  .stream span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .foot { padding: 12px 12px 34px; border-top: 1px solid #ffffff14; display: flex; flex-direction: column; gap: 10px; }
+  .field { flex: 1; display: block; padding: 13px 14px; border-radius: 12px; background: #1e1e1e; color: #8a8a8a; font-family: var(--font-mono); font-size: 15px; }
+  .field.typed { color: #fff; }
+  .cmdrow { display: flex; gap: 8px; }
+  .runbtn { padding: 13px 18px; border-radius: 12px; background: #19aad8; color: #050505; font-weight: 700; }
+  .keys { display: flex; gap: 6px; }
+  .keys span { flex: 1; text-align: center; padding: 10px 0; border-radius: 9px; background: #1e1e1e; border: 1px solid #ffffff14; font-family: var(--font-mono); font-size: 14px; }
+
+  .dock { margin: 0 12px 34px; padding: 16px; border-radius: 16px; background: #1a1a1a; border: 1px solid #e5a01a66; display: flex; flex-direction: column; gap: 12px; }
+  .where { font-size: 12px; color: #e5a01a; }
+  .q { font-size: 17px; line-height: 1.4; color: #fff; font-weight: 500; }
+  .diff { display: flex; flex-direction: column; font-family: var(--font-mono); font-size: 13px; line-height: 1.7; border-radius: 8px; overflow: hidden; }
+  .del { background: #ff82721a; color: #ffb3a8; padding: 0 8px; }
+  .add { background: #1ca05a1f; color: #b4fa72; padding: 0 8px; }
+  .pills { display: flex; gap: 8px; }
+  .pill { flex: 1; text-align: center; padding: 12px 0; border-radius: 12px; border: 1px solid #ffffff3d; font-weight: 600; font-size: 15px; }
+  .pill.primary { background: #19aad8; border-color: #19aad8; color: #050505; }
+  .secret { display: flex; align-items: center; gap: 4px; padding: 13px 14px; border-radius: 12px; background: #0c0c0c; border: 1px solid #19aad8; font-size: 20px; letter-spacing: 2px; color: #fff; }
+  .caret { width: 2px; height: 22px; background: #19aad8; }
+  .pnote { font-size: 13px; color: #9b9b9b; }
+
+  .tui { flex: 1; padding: 14px 12px; background: #000; font-family: var(--font-mono); font-size: 14px; line-height: 1.8; display: flex; flex-direction: column; }
+  .meter { display: grid; grid-template-columns: 44px 1fr 56px; gap: 8px; align-items: center; color: #5cc6e8; }
+  .meter span:last-child { text-align: right; color: #e6e6e6; }
+  .m { height: 12px; background: #1e1e1e; border-radius: 2px; overflow: hidden; }
+  .m i { display: block; height: 100%; width: var(--w); }
+  .m .g { background: #3fd182; } .m .b { background: #19aad8; } .m .r { background: #ff8272; }
+  .ps { display: grid; grid-template-columns: 64px 64px 1fr; gap: 6px; color: #e6e6e6; }
+  .ps.head { margin-top: 12px; background: #1ca05a; color: #000; padding: 0 4px; }
+  .ps.sel { background: #19aad8; color: #000; padding: 0 4px; }
+  .ps:not(.head):not(.sel) { padding: 0 4px; }
+  .fkeys { margin-top: auto; display: flex; gap: 10px; font-size: 12px; color: #000; }
+  .fkeys span { background: #19aad8; padding: 0 6px 0 0; }
+  .fkeys b { background: #000; color: #fff; padding: 0 4px; margin-right: 4px; font-weight: 400; }
+
+  .lockscreen { background: radial-gradient(ellipse 120% 70% at 50% 0%, #19405a, #050505 70%); align-items: center; }
+  .clock { margin-top: 120px; text-align: center; color: #fff; }
+  .day { font-size: 18px; font-weight: 500; opacity: 0.85; }
+  .time { font-size: 88px; font-weight: 600; letter-spacing: -2px; line-height: 1.05; }
+  .notif { margin-top: 56px; width: 358px; padding: 14px 16px; border-radius: 22px; background: #2a2a2ae6; display: flex; flex-direction: column; gap: 4px; }
+  .nhead { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #b4b4b4; letter-spacing: 0.5px; }
+  .nhead img { border-radius: 5px; }
+  .now { margin-left: auto; }
+  .ntitle { font-size: 16px; font-weight: 600; color: #fff; }
+  .nbody { font-size: 15px; color: #e6e6e6; }
+  .nacts { display: flex; gap: 8px; margin-top: 8px; }
+  .nacts span { flex: 1; text-align: center; padding: 10px 0; border-radius: 12px; background: #ffffff1f; font-weight: 600; font-size: 15px; color: #fff; }
+
+  .sheet { margin-top: auto; background: #1a1a1a; border-radius: 22px 22px 0 0; padding: 10px 16px 40px; display: flex; flex-direction: column; gap: 6px; border-top: 1px solid #ffffff1f; }
+  .grab { width: 40px; height: 5px; border-radius: 3px; background: #ffffff40; align-self: center; margin-bottom: 8px; }
+  .stitle { font-size: 20px; font-weight: 600; color: #fff; margin-bottom: 6px; }
+  .opt { display: flex; align-items: center; gap: 14px; padding: 10px 4px; font-size: 17px; color: #fff; border-bottom: 1px solid #ffffff14; }
+  .tile { width: 40px; height: 40px; border-radius: 10px; background: #19aad81a; display: flex; align-items: center; justify-content: center; font-family: var(--font-mono); font-size: 13px; color: #19aad8; }
+  .tile.claude { background: #d977571f; }
+  .hint { margin-top: 8px; font-size: 13px; color: #9b9b9b; }
+
+  .locked { align-items: center; justify-content: center; gap: 18px; background: #050505; }
+  .lockmark img { border-radius: 20px; }
+  .ltext { font-size: 18px; color: #e6e6e6; }
+  .faceid { margin-top: 40px; color: #19aad8; }
+  .unlock { padding: 14px 28px; border-radius: 14px; background: #19aad8; color: #050505; font-weight: 700; font-size: 16px; }
+
+  /* A screen's motion plays once each time it is shown (display none → flex restarts it). */
+  .rise { animation: rise .5s cubic-bezier(.2, .8, .2, 1) both; }
+  .land { animation: land .5s ease-out .5s both; }
+  .typed { animation: type .5s steps(15) both; overflow: hidden; white-space: nowrap; }
+  .press { animation: press .6s ease-in-out 1s both; }
+  .stream span { animation: fade .3s ease-out both; }
+  .stream span:nth-child(2) { animation-delay: .4s; } .stream span:nth-child(3) { animation-delay: .8s; } .stream span:nth-child(4) { animation-delay: 1.2s; }
+  .m i { animation: grow .8s ease-out both; }
+  @keyframes land { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+  @keyframes type { from { max-width: 0; } to { max-width: 100%; } }
+  @keyframes press { 50% { transform: scale(0.94); filter: brightness(1.2); } }
+  @keyframes grow { from { width: 0; } }
+
+  @media (max-width: 900px) {
+    .showcase { grid-template-columns: minmax(0, 1fr); gap: 24px; }
+    .list { flex-direction: row; overflow-x: auto; scrollbar-width: none; margin: 0 calc(-1 * var(--gutter)); padding: 0 var(--gutter); scroll-padding-inline: var(--gutter); }
+    .list button { flex: none; width: 240px; }
+    .device { position: static; }
+  }
+  @media (max-width: 360px) {
+    .phone { zoom: 0.88; }
+  }
+</style>

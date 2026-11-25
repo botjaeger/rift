@@ -1,0 +1,16 @@
+import { defineCollection } from 'astro:content';
+import { glob } from 'astro/loaders';
+import { z } from 'astro/zod';
+
+// Four pages are copied from the Rift repo by scripts/sync-docs.mjs; phone.md is written by hand.
+const docs = defineCollection({
+  loader: glob({ pattern: '*.md', base: './src/content/docs' }),
+  schema: z.object({
+    title: z.string(),
+    description: z.string(),
+    order: z.number(),
+    source: z.string(),
+  }),
+});
+
+export const collections = { docs };

@@ -1,0 +1,162 @@
+---
+import Base from '../layouts/Base.astro';
+import { getRelease, platforms } from '../lib/release';
+
+const r = await getRelease();
+---
+
+<Base
+  page="download"
+  title={`Download Rift ${r.version} for ${platforms(r)}`}
+  description={`Download Rift ${r.version}: a DMG for Apple silicon and Intel Macs, a .deb for Debian and Ubuntu, an AppImage for any Linux distribution${r.windows ? ', a zip for Windows (beta)' : ''}, and tarballs.`}
+>
+  <section class="glow-section">
+    <div class="hero-bg dl-bg" aria-hidden="true"></div>
+    <div class="wrap relative dl-hero">
+      <h1 class="in">Download Rift</h1>
+      <p class="in d1 dl-lead">
+        Version {r.version} · released <time datetime={r.isoDate}>{r.date}</time>. The macOS app and the AppImage update
+        themselves, and keep your tabs and running shells when they do.
+      </p>
+      <p class="in d2 dl-news"><a href={r.notesUrl}>What's new in {r.version} →</a></p>
+    </div>
+  </section>
+
+  <section class="wrap dl-grid" aria-label="Packages">
+    <div class="card dl-card featured" id="macos">
+      <div class="dl-head">
+        <h2>macOS</h2>
+        <span>macOS 11 or newer</span>
+      </div>
+      <div class="row">
+        <a class="btn btn-primary" href={r.macArm.url} style="flex: 1 1 200px">Apple silicon (.dmg)</a>
+        <a class="btn btn-ghost" href={r.macIntel.url} style="flex: 1 1 160px">Intel (.dmg)</a>
+      </div>
+      <p class="body">
+        Open the DMG and drag Rift to Applications. The first launch needs one approval: click Done, then System Settings ›
+        Privacy &amp; Security › Open Anyway. Updates from inside Rift need neither.
+      </p>
+      <pre class="code"><span class="c"># or clear the quarantine flag yourself</span>
+xattr -dr com.apple.quarantine /Applications/Rift.app</pre>
+    </div>
+
+    <div class="card dl-card" id="linux">
+      <div class="dl-head">
+        <h2>Debian / Ubuntu</h2>
+        <span>x86_64</span>
+      </div>
+      <a class="btn btn-ghost btn-file" href={r.deb.url}>{r.deb.name}</a>
+      <pre class="code">sudo dpkg -i {r.deb.name}
+sudo apt-get install -f   <span class="c"># only if dependencies are missing</span></pre>
+    </div>
+
+    <div class="card dl-card" id="appimage">
+      <div class="dl-head">
+        <h2>AppImage</h2>
+        <span>any distribution · updates itself</span>
+      </div>
+      <a class="btn btn-ghost btn-file" href={r.appImage.url}>{r.appImage.name}</a>
+      <pre class="code">chmod +x {r.appImage.name}
+./{r.appImage.name}</pre>
+      <p class="body small">Ubuntu 24.04 needs FUSE 2: <span class="mono inline-code">sudo apt install libfuse2t64</span></p>
+    </div>
+
+    {r.windows && (
+      <div class="card dl-card" id="windows">
+        <div class="dl-head">
+          <h2>Windows <span class="beta">beta</span></h2>
+          <span>Windows 10 (1809) or newer · x64, runs on ARM too</span>
+        </div>
+        <a class="btn btn-ghost btn-file" href={r.windows.url}>{r.windows.name}</a>
+        <p class="body">
+          Unzip it and run <span class="mono inline-code">Rift.exe</span>. The first launch needs one approval: More info ›
+          Run anyway. The shells you have installed, PowerShell and Command Prompt among them, are found for you.
+        </p>
+        <p class="body small">
+          In the beta, updates are manual (download the next zip), shells end when Rift quits, and the phone app does not
+          connect yet.
+        </p>
+      </div>
+    )}
+
+    <div class="card dl-card" id="tarball">
+      <div class="dl-head">
+        <h2>Tarball</h2>
+        <span>macOS and Linux</span>
+      </div>
+      <div class="row tight">
+        <a class="btn btn-ghost mono-btn" href={r.tarMacArm.url} aria-label={`${r.tarMacArm.name} (macOS, Apple silicon)`}>macos-arm64</a>
+        <a class="btn btn-ghost mono-btn" href={r.tarMacIntel.url} aria-label={`${r.tarMacIntel.name} (macOS, Intel)`}>macos-x86_64</a>
+        <a class="btn btn-ghost mono-btn" href={r.tarLinux.url} aria-label={`${r.tarLinux.name} (Linux)`}>linux-x86_64</a>
+      </div>
+      <p class="body">
+        The binary, the .desktop file, the icon and the docs. Put <span class="mono inline-code">rift-terminal</span> on
+        your PATH.
+      </p>
+    </div>
+  </section>
+
+  <section class="rule deep">
+    <div class="wrap after">
+      <div class="after-col" style="flex-basis: 420px">
+        <h2>After you install</h2>
+        <ol>
+          <li>Open Rift. Your login shell starts with Rift's integration loaded; nothing to add to your rc files.</li>
+          <li>Type a command and press ⏎. It becomes a block.</li>
+          <li>Press <span class="mono">⌘↑</span> to select it, <span class="mono">⌥⇧⌘C</span> to copy its output, <span class="mono">⌘P</span> to see every action.</li>
+          <li>Change settings with <span class="mono">⌘,</span>. They save to <span class="mono muted">~/.config/rift/config.toml</span> and apply instantly.</li>
+          {r.windows && (
+            <li>
+              On Windows and Linux: <span class="mono">Ctrl+↑</span>, <span class="mono">Ctrl+Alt+Shift+C</span>,
+              <span class="mono">Ctrl+Shift+P</span> and <span class="mono">Ctrl+,</span>.
+            </li>
+          )}
+        </ol>
+      </div>
+      <div class="after-col" id="phone" style="flex-basis: 320px">
+        <h2>On your phone</h2>
+        <p>Install the companion app, then pair it from Rift: Settings › Remote access.</p>
+        <div class="row">
+          <a class="btn btn-ghost placeholder" href="#phone">[APP STORE LINK]</a>
+          <a class="btn btn-ghost placeholder" href="#phone">[GOOGLE PLAY LINK]</a>
+        </div>
+      </div>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .dl-bg { background: radial-gradient(ellipse 60% 60% at 30% 0%, #19aad816, transparent 70%); }
+  .dl-hero { padding-top: 88px; padding-bottom: 40px; display: flex; flex-direction: column; gap: 14px; }
+  .dl-hero h1 { margin: 0; font-size: clamp(36px, 5vw, 56px); letter-spacing: -0.035em; font-weight: 700; color: var(--text-strong); line-height: 1.05; }
+  .dl-lead { margin: 0; font-size: 18px; line-height: 1.55; color: var(--text-muted); max-width: 620px; }
+  .dl-news { margin: 0; font-size: 15px; }
+  .dl-news a { display: inline-block; padding: 12px 0; }
+  .dl-hero .in { animation-duration: .6s; }
+
+  .dl-grid { padding-bottom: 88px; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 460px), 1fr)); gap: 14px; }
+  .dl-card { padding: 28px; gap: 16px; }
+  .dl-card.featured { border-color: #ffffff2e; }
+  .dl-head { display: flex; align-items: baseline; justify-content: space-between; gap: 4px 12px; flex-wrap: wrap; }
+  .dl-head h2 { margin: 0; font-size: 22px; font-weight: 600; color: var(--text-strong); }
+  .dl-head span { font-size: 13px; color: var(--text-faint); }
+  .dl-head h2 .beta { margin-left: 6px; padding: 2px 8px; border: 1px solid #e5a01a66; border-radius: 999px; font-size: 12px; font-weight: 600; color: #e5a01a; vertical-align: middle; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .row.tight { gap: 8px; }
+  .mono-btn { flex: 1 1 130px; font-family: var(--font-mono); font-size: 13px; font-weight: 500; }
+  .body { margin: 0; font-size: 15px; line-height: 1.6; color: var(--text-muted); }
+  .body.small { font-size: 14px; }
+  .inline-code { color: var(--text); overflow-wrap: anywhere; }
+
+  .after { padding-top: 72px; padding-bottom: 72px; display: flex; flex-wrap: wrap; gap: 48px; }
+  .after-col { flex-grow: 1; flex-shrink: 1; display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  .after-col h2 { margin: 0; font-size: 24px; font-weight: 600; color: var(--text-strong); letter-spacing: -0.02em; }
+  .after-col ol { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 12px; font-size: 16px; line-height: 1.6; color: var(--text); }
+  .after-col p { margin: 0; font-size: 16px; line-height: 1.6; color: var(--text-muted); }
+  .muted { color: var(--text-muted); overflow-wrap: anywhere; }
+
+  @media (max-width: 720px) {
+    .dl-hero { padding-top: 64px; }
+    .dl-card { padding: 22px; }
+  }
+</style>

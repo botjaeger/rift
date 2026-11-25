@@ -1,0 +1,17 @@
+---
+import { render } from 'astro:content';
+import Docs from '../../layouts/Docs.astro';
+import { getDocs, type Doc } from '../../lib/docs';
+
+export async function getStaticPaths() {
+  return (await getDocs()).map((doc) => ({ params: { slug: doc.id }, props: { doc } }));
+}
+
+const { doc } = Astro.props as { doc: Doc };
+const { Content, headings } = await render(doc);
+const toc = headings.filter((h) => h.depth === 2).map((h) => ({ slug: h.slug, text: h.text }));
+---
+
+<Docs title={doc.data.title} description={doc.data.description} current={doc.id} toc={toc} osKeys={(doc.body ?? "").includes('class="os-mac"')}>
+  <Content />
+</Docs>

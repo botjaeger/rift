@@ -1,0 +1,110 @@
+---
+import Base from '../layouts/Base.astro';
+import { getRelease, platforms } from '../lib/release';
+
+const shipsFor = platforms(await getRelease());
+
+// Every line here comes from the Rift README ("Why Rift" and its opening); add nothing it does not say.
+const reasons = [
+  {
+    title: 'Output has structure',
+    body: 'A classic terminal is one long scroll. Rift knows where each command starts and ends (shell integration, OSC 133), so “copy the output of that failed build” or “jump to the last error” is one keystroke.',
+  },
+  {
+    title: 'The command line is a real editor',
+    body: 'Syntax highlighting, completions with descriptions, multi-line editing, undo, and optional vim keys, before the shell sees anything.',
+  },
+  {
+    title: 'A full terminal underneath',
+    body: 'vim, tmux, htop, ssh and every TUI run unchanged: Rift hands the keyboard straight to the program whenever one is running.',
+  },
+  {
+    title: 'Warp’s habits without Warp’s account',
+    body: 'Warp’s default keys, and its theme and launch-configuration files, work unchanged; profiles, actions and kept exited panes work as in Windows Terminal.',
+  },
+  {
+    title: 'Modern protocols',
+    body: 'Kitty keyboard and graphics, iTerm2 images, synchronized output, OSC 8 links, OSC 52 clipboard, bracketed paste, notifications (OSC 9/777/99).',
+  },
+  {
+    title: 'Fast and small',
+    body: 'One binary with embedded fonts, themes and shell hooks. GPU rendering with a shaped-text cache; 500,000 lines of output render in 0.54 s with a 138 MiB peak.',
+  },
+];
+const stack = ['Rust', 'wgpu', 'glyphon', 'winit', 'alacritty_terminal'];
+---
+
+<Base
+  page="about"
+  title="About Rift: why it exists"
+  description={`Why Rift was built: a GPU-accelerated terminal for ${shipsFor} where every command is a block. No account, no cloud, no telemetry.`}
+>
+  <section class="glow-section">
+    <div class="hero-bg" aria-hidden="true"></div>
+    <div class="wrap relative about-hero">
+      <h1 class="in">About Rift</h1>
+      <p class="in d1 lead">
+        A GPU-accelerated terminal for {shipsFor} that turns every command into a <strong>block</strong>: its
+        command, output, exit status and duration in one unit you can select, copy, search, bookmark, re-run or send to
+        another command.
+      </p>
+      <p class="in d2 promise">No account, no cloud, no telemetry, no AI features: a local terminal configured with one TOML file.</p>
+    </div>
+  </section>
+
+  <section class="wrap why" aria-labelledby="why">
+    <h2 class="h-section" id="why">Why we built Rift</h2>
+    <ol class="reasons">
+      {
+        reasons.map((r, i) => (
+          <li class="card">
+            <span class="num mono" aria-hidden="true">{String(i + 1).padStart(2, '0')}</span>
+            <h3>{r.title}</h3>
+            <p>{r.body}</p>
+          </li>
+        ))
+      }
+    </ol>
+  </section>
+
+  <section class="wrap built" aria-labelledby="built">
+    <h2 class="h-section" id="built">How it is built</h2>
+    <p class="lead">
+      Written in Rust, rendered on the GPU, shipped as one binary. A phone companion app follows your panes from an
+      iPhone or Android phone.
+    </p>
+    <ul class="stack" aria-label="Built with">
+      {stack.map((s) => <li class="mono">{s}</li>)}
+    </ul>
+    <div class="cta">
+      <a class="btn btn-primary" href="/download/">Download Rift</a>
+      <a class="btn btn-ghost" href="/docs/">Read the docs</a>
+      <a class="btn btn-ghost" href="/docs/phone/">The phone companion</a>
+    </div>
+  </section>
+</Base>
+
+<style>
+  /* Text measure capped on the children, so every section keeps the same left edge as the grid. */
+  .about-hero { padding-top: 96px; padding-bottom: 64px; }
+  .about-hero > *, .built > p { max-width: 760px; }
+  .about-hero h1 { margin: 0; font-size: clamp(40px, 6vw, 64px); line-height: 1.05; letter-spacing: -0.04em; color: var(--text-strong); }
+  .about-hero .lead { margin-top: 20px; font-size: 19px; }
+  .about-hero .lead strong { color: var(--text-strong); }
+  .promise { margin: 20px 0 0; font-size: 15px; color: var(--text); border-left: 2px solid var(--accent); padding-left: 14px; }
+  .why { padding-top: 24px; padding-bottom: 72px; }
+  .reasons { list-style: none; margin: 32px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr)); gap: 16px; }
+  .reasons h3 { margin: 0; font-size: 18px; line-height: 1.3; color: var(--text-strong); }
+  .reasons p { margin: 0; font-size: 15px; line-height: 1.6; color: var(--text-muted); }
+  .num { font-size: 12px; color: var(--accent); }
+  .built { padding-bottom: 96px; }
+  .built .lead { margin-top: 16px; }
+  .stack { list-style: none; margin: 24px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+  .stack li { font-size: 13px; color: var(--text); background: var(--surface); border: 1px solid var(--line-card); border-radius: 6px; padding: 6px 10px; }
+  .cta { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 32px; }
+  @media (max-width: 720px) {
+    .about-hero { padding-top: 56px; padding-bottom: 40px; }
+    .why { padding-bottom: 48px; }
+    .built { padding-bottom: 64px; }
+  }
+</style>

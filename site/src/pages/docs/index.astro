@@ -1,0 +1,72 @@
+---
+import { render } from 'astro:content';
+import Base from '../../layouts/Base.astro';
+import DocsSearch from '../../components/DocsSearch.astro';
+import { docUrl, getDocs } from '../../lib/docs';
+
+const docs = await Promise.all(
+  (await getDocs()).map(async (doc) => {
+    const { headings } = await render(doc);
+    return { doc, topics: headings.filter((h) => h.depth === 2) };
+  }),
+);
+---
+
+<Base
+  page="docs"
+  title="Rift documentation"
+  description="How to use and configure Rift: getting started, every feature, config.toml, keyboard shortcuts and the phone companion, with search."
+>
+  <section class="glow-section">
+    <div class="hero-bg" aria-hidden="true"></div>
+    <div class="wrap relative docs-hero">
+      <h1 class="in">Documentation</h1>
+      <p class="in d1 lead">How to use Rift, every setting it reads, and every shortcut it knows.</p>
+      <div class="in d2 search-slot"><DocsSearch size="large" /></div>
+    </div>
+  </section>
+
+  <section class="wrap topics" aria-label="Docs pages">
+    {
+      docs.map(({ doc, topics }) => (
+        <article class="card topic">
+          <h2><a href={docUrl(doc.id)}>{doc.data.title}</a></h2>
+          <p class="tdesc">{doc.data.description}</p>
+          {topics.length > 0 && (
+            <ul class="tlinks">
+              {topics.slice(0, 8).map((h) => (
+                <li>
+                  <a href={docUrl(doc.id, h.slug)}>{h.text}</a>
+                </li>
+              ))}
+              {topics.length > 8 && (
+                <li>
+                  <a class="more" href={docUrl(doc.id)}>
+                    {topics.length - 8} more topics →
+                  </a>
+                </li>
+              )}
+            </ul>
+          )}
+        </article>
+      ))
+    }
+  </section>
+</Base>
+
+<style>
+  .docs-hero { padding-top: 88px; padding-bottom: 48px; display: flex; flex-direction: column; gap: 16px; max-width: 760px; }
+  .docs-hero h1 { margin: 0; font-size: clamp(36px, 5vw, 56px); letter-spacing: -0.035em; line-height: 1.05; color: var(--text-strong); }
+  .search-slot { margin-top: 10px; }
+  .topics { padding-bottom: 96px; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 14px; }
+  .topic { padding: 26px; gap: 12px; }
+  .topic h2 { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
+  .topic h2 a { color: var(--text-strong); }
+  .topic h2 a:hover { color: var(--accent-hover); }
+  .tdesc { margin: 0; font-size: 14px; line-height: 1.55; color: var(--text-muted); }
+  .tlinks { list-style: none; margin: 4px 0 0; padding: 12px 0 0; border-top: 1px solid var(--line-card); display: flex; flex-wrap: wrap; gap: 0 18px; }
+  .tlinks a { display: inline-block; padding: 7px 0; font-size: 14px; color: var(--text); }
+  .tlinks a:hover { color: var(--accent-hover); }
+  .tlinks .more { color: var(--accent); }
+  @media (max-width: 720px) { .docs-hero { padding-top: 56px; } }
+</style>

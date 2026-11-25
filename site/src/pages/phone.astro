@@ -1,0 +1,263 @@
+---
+import Base from '../layouts/Base.astro';
+import PhonePortals from '../components/PhonePortals.astro';
+import PhoneShowcase from '../components/PhoneShowcase.astro';
+import SecurityFlow from '../components/SecurityFlow.astro';
+
+// Every claim here comes from the Rift docs: features.md › Remote access (phone companion) and the
+// mobile trust model. The pairing card and the code in it are drawn, not a real, scannable code.
+
+// A drawn QR-like pattern: the three finder squares and seeded noise. It encodes nothing.
+const N = 25;
+let seed = 7;
+const rand = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+const FINDERS: [number, number][] = [[0, 0], [N - 7, 0], [0, N - 7]];
+const inFinder = (x: number, y: number) => FINDERS.some(([fx, fy]) => x >= fx - 1 && x <= fx + 7 && y >= fy - 1 && y <= fy + 7);
+const cells: [number, number][] = [];
+for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) if (!inFinder(x, y) && rand() < 0.48) cells.push([x, y]);
+
+const steps = [
+  {
+    title: 'Turn it on',
+    body: 'In Rift, Settings › Remote access › Allow remote access. It is off until you turn it on, and turning it off disconnects every phone.',
+  },
+  {
+    title: 'Scan the code',
+    body: 'Pair a phone shows a QR code. Scan it with the Rift app or the phone’s camera. The code works once, for 2 minutes; Cancel withdraws it.',
+  },
+  {
+    title: 'Pick a pane',
+    body: 'Choose a computer, a tab and a pane: its blocks follow live. Type a command and confirm to run it, or use the key row to talk to a running program.',
+  },
+];
+
+const security = [
+  { icon: '<path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.77.04"/>', title: 'Off by default', body: 'Remote access does nothing until you turn it on. While a phone is connected, every Rift window shows a Remote chip naming it.' },
+  { icon: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3"/><path d="M21 14v7h-7"/>', title: 'Paired by what is on your screen', body: 'Pairing needs the code shown on your computer. Its secret works once, for 2 minutes. Each phone then has its own key.' },
+  { icon: '<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>', title: 'End-to-end encrypted', body: 'Every byte after the handshake is encrypted and authenticated in both directions: Noise XX with X25519, ChaCha20-Poly1305 and BLAKE2s.' },
+  { icon: '<circle cx="7.5" cy="15.5" r="4.5"/><path d="m10.7 12.3 9.3-9.3"/><path d="m17 6 3 3"/><path d="m14 9 2 2"/>', title: 'The phone pins your computer', body: 'The phone learns your computer’s key from the code and pins it. Anything that answers with another key fails the handshake before the phone sends anything.' },
+  { icon: '<path d="M2 12s3.5-7 10-7c2 0 3.7.6 5.1 1.5"/><path d="M22 12s-3.5 7-10 7c-2 0-3.7-.6-5.1-1.5"/><path d="m3 3 18 18"/>', title: 'The relay sees no content', body: 'The relay only forwards ciphertext and holds no key. It does see routing ids, times, addresses and sizes; use your own relay, a Cloudflare tunnel or Tailscale if you would rather it did not.' },
+  { icon: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>', title: 'Watch only, or run commands', body: 'Each phone is View only or Can run commands, changed at any time. A view-only phone cannot run commands, send keys or type.' },
+  { icon: '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10 21h4"/>', title: 'Nothing happens unseen', body: 'A command from the phone becomes a visible block and a toast naming the phone. Every connection and failed attempt is listed under Recent connections.' },
+  { icon: '<path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/><path d="m9 12 2 2 4-4"/>', title: 'Lost phone, locked app', body: 'Revoke a phone and it is cut off within a second. App lock asks for Face ID or a fingerprint on launch and after 5 minutes away; with Ask before running on, Confirm with Face ID asks before each command.' },
+];
+---
+
+<Base
+  page="phone"
+  title="Rift on your phone: follow panes, answer agents, run commands"
+  description="The Rift phone companion for iPhone and Android: pair by QR code, follow panes live, answer coding agents and run commands, end-to-end encrypted, directly or through a relay that sees only ciphertext."
+>
+  <section class="glow-section">
+    <div class="hero-bg" aria-hidden="true"></div>
+    <div class="wrap relative ph-hero">
+      <div class="ph-copy">
+        <p class="in eyebrow">Phone companion</p>
+        <h1 class="in d1">Your terminal, away from your desk</h1>
+        <p class="in d2 lead">
+          Pair an iPhone or Android phone with Rift by QR code. Follow your panes live, answer a coding agent, run a command or
+          send Ctrl-C, on your network or from anywhere.
+        </p>
+        <div class="in d3 store-links">
+          <a class="btn btn-ghost placeholder" href="#get">[APP STORE LINK]</a>
+          <a class="btn btn-ghost placeholder" href="#get">[GOOGLE PLAY LINK]</a>
+        </div>
+        <nav class="in d4 jump" aria-label="On this page">
+          <a href="#how">How it works</a><a href="#scan">The QR code</a><a href="#can">What it can do</a><a href="#connects">How it connects</a><a href="#security">Security</a>
+        </nav>
+      </div>
+      <div class="in d2 ph-device"><PhonePortals /></div>
+    </div>
+  </section>
+
+  <section class="rule" id="how" aria-labelledby="how-h">
+    <div class="wrap section two">
+      <div>
+        <h2 class="h-section" id="how-h">Pair in three steps</h2>
+        <ol class="steps">
+          {
+            steps.map((s, i) => (
+              <li>
+                <span class="num mono" aria-hidden="true">{i + 1}</span>
+                <div>
+                  <h3>{s.title}</h3>
+                  <p>{s.body}</p>
+                </div>
+              </li>
+            ))
+          }
+        </ol>
+        <p class="note">
+          From a terminal, <code>rift-terminal remote pair</code> prints the same code (<code>--view</code> pairs a phone that can only watch).
+        </p>
+      </div>
+      <figure class="pair" role="img" aria-label="Sample: Rift's Pair a phone card with a QR code, a 1:54 countdown, Copy link and Cancel. Drawn; the code is not real.">
+        <div class="pair-head">
+          <span>Pair a phone</span>
+          <span class="mono count">1:54</span>
+        </div>
+        <svg class="qr" viewBox={`-2 -2 ${N + 4} ${N + 4}`} aria-hidden="true">
+          <rect x="-2" y="-2" width={N + 4} height={N + 4} fill="#fff" />
+          {cells.map(([x, y]) => <rect x={x} y={y} width="1" height="1" fill="#000" />)}
+          {FINDERS.map(([x, y]) => (
+            <g>
+              <rect x={x} y={y} width="7" height="7" fill="#000" />
+              <rect x={x + 1} y={y + 1} width="5" height="5" fill="#fff" />
+              <rect x={x + 2} y={y + 2} width="3" height="3" fill="#000" />
+            </g>
+          ))}
+        </svg>
+        <p class="pair-text">Scan with the Rift app or your phone’s camera. The code works once.</p>
+        <p class="pair-check"><span class="box" aria-hidden="true"></span>The new phone can only watch</p>
+        <div class="pair-actions"><span class="fake-btn">Copy link</span><span class="fake-btn">Cancel</span></div>
+      </figure>
+    </div>
+  </section>
+
+  <section class="rule deep" id="scan" aria-labelledby="scan-h">
+    <div class="wrap section">
+      <h2 class="h-section" id="scan-h">What the code carries</h2>
+      <p class="lead narrow">
+        The QR code is a <code>rift-remote://pair</code> link. It tells the phone how to reach your computer (its addresses on your
+        network, a Tailscale or other private-network address, and the relay) and your computer’s key, which the phone pins. It
+        also holds a one-time pairing secret.
+      </p>
+      <ul class="facts">
+        <li><b>Once, for 2 minutes.</b> After that, <em>The code expired</em> › <em>Show a new code</em>.</li>
+        <li><b>Withdraw it.</b> <em>Cancel</em> stops the code at once; so does changing <em>The new phone can only watch</em>.</li>
+        <li><b>Watch-only phones.</b> Tick <em>The new phone can only watch</em> before you show the code.</li>
+        <li><b>Pair again</b> after you change the relay address, or after each restart with a Cloudflare tunnel.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="rule" id="can" aria-labelledby="can-h">
+    <div class="wrap section">
+      <h2 class="h-section" id="can-h">What your phone can do</h2>
+      <p class="lead narrow">A view-only phone watches. A phone that may run commands can also act, and your computer shows each thing it does.</p>
+      <PhoneShowcase />
+    </div>
+  </section>
+
+  <section class="rule deep" id="connects" aria-labelledby="connects-h">
+    <div class="wrap section">
+      <h2 class="h-section" id="connects-h">How it connects</h2>
+      <p class="lead narrow">
+        The app tries your computer’s own addresses first and the relay second, and reconnects at once when your phone changes
+        networks. Coming home moves it back to the direct path.
+      </p>
+      <div class="paths">
+        <div class="path">
+          <p class="path-label">On the same network</p>
+          <div class="flow" aria-hidden="true"><span class="node">Phone</span><span class="wire"></span><span class="node">Computer</span></div>
+          <p>Connects directly. Nothing to set up.</p>
+        </div>
+        <div class="path">
+          <p class="path-label">Away from home</p>
+          <div class="flow" aria-hidden="true"><span class="node">Phone</span><span class="wire"></span><span class="node relay">Relay</span><span class="wire"></span><span class="node">Computer</span></div>
+          <p>Through Rift’s public relay by default, which forwards only encrypted traffic.</p>
+        </div>
+      </div>
+      <ul class="facts">
+        <li><b>Your own relay.</b> Host one with <code>rift-terminal relay</code> and put its <code>wss://</code> address under <em>Connection settings</em> › <em>Relay address</em>.</li>
+        <li><b>A Cloudflare tunnel.</b> <em>Use a Cloudflare tunnel instead</em> runs the relay on your computer behind a quick tunnel; Settings offers to install <code>cloudflared</code>.</li>
+        <li><b>A private network.</b> A Tailscale or other private-network address works without a relay.</li>
+        <li><b>Your network only.</b> Clear the relay address and phones connect only on your network.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="rule" id="security" aria-labelledby="security-h">
+    <div class="wrap section">
+      <h2 class="h-section" id="security-h">Security</h2>
+      <p class="lead narrow">A phone that can run commands is as powerful as your keyboard, so Rift treats the network and the relay as untrusted.</p>
+      <SecurityFlow />
+      <div class="grid">
+        {
+          security.map((s) => (
+            <div class="card sec">
+              <svg class="icon" aria-hidden="true" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" set:html={s.icon} />
+              <h3>{s.title}</h3>
+              <p>{s.body}</p>
+            </div>
+          ))
+        }
+      </div>
+    </div>
+  </section>
+
+  <section class="rule glow-section" id="get" aria-labelledby="get-h">
+    <div class="wrap section ph-cta">
+      <h2 class="h-section" id="get-h">Get the app</h2>
+      <div class="store-links">
+        <a class="btn btn-ghost placeholder" href="#get">[APP STORE LINK]</a>
+        <a class="btn btn-ghost placeholder" href="#get">[GOOGLE PLAY LINK]</a>
+      </div>
+      <p class="fine">Every setting and command: <a href="/docs/phone/">the phone companion docs</a>.</p>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .ph-hero { padding-top: 88px; padding-bottom: 88px; display: flex; flex-wrap: wrap; align-items: center; gap: 56px; }
+  .ph-copy { flex: 1 1 440px; min-width: 0; display: flex; flex-direction: column; gap: 18px; }
+  .ph-copy h1 { margin: 0; font-size: clamp(40px, 5.6vw, 64px); line-height: 1.05; letter-spacing: -0.04em; color: var(--text-strong); }
+  .ph-device { flex: 0 1 300px; display: flex; justify-content: center; margin: 0 auto; }
+  .store-links { display: flex; flex-wrap: wrap; gap: 10px; }
+  .jump { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+  .jump a { font-size: 14px; color: var(--text); border: 1px solid #ffffff1f; border-radius: 999px; padding: 10px 14px; }
+  .jump a:hover { color: var(--text-strong); border-color: #ffffff40; }
+
+  .section { padding-top: 96px; padding-bottom: 96px; }
+  .narrow { max-width: 720px; margin-top: 14px; }
+  .two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 380px); gap: 64px; align-items: center; }
+  .steps { list-style: none; margin: 32px 0 0; padding: 0; display: flex; flex-direction: column; gap: 24px; }
+  .steps li { display: flex; gap: 18px; }
+  .steps h3 { margin: 0; font-size: 19px; color: var(--text-strong); }
+  .steps p { margin: 6px 0 0; font-size: 16px; line-height: 1.6; color: var(--text-muted); }
+  .num { flex: none; width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; font-size: 14px; color: var(--accent); border: 1px solid #19aad866; }
+  .note { margin: 28px 0 0; font-size: 14px; line-height: 1.6; color: var(--text-muted); }
+  code { font-family: var(--font-mono); font-size: 0.88em; color: #f1f1f1; background: #ffffff0f; border: 1px solid #ffffff14; border-radius: 4px; padding: 1px 5px; overflow-wrap: anywhere; }
+
+  .pair { margin: 0; padding: 22px; background: var(--surface); border: 1px solid #ffffff1f; border-radius: 14px; display: flex; flex-direction: column; gap: 14px; box-shadow: 0 30px 80px #00000099; }
+  .pair-head { display: flex; justify-content: space-between; align-items: baseline; font-weight: 600; color: var(--text-strong); }
+  .count { font-size: 13px; font-weight: 500; color: var(--text-faint); }
+  .qr { width: 100%; max-width: 240px; align-self: center; border-radius: 6px; shape-rendering: crispEdges; }
+  .pair-text { margin: 0; font-size: 14px; line-height: 1.5; color: var(--text-muted); text-align: center; }
+  .pair-check { margin: 0; display: flex; gap: 10px; align-items: center; font-size: 14px; color: var(--text); }
+  .box { flex: none; width: 16px; height: 16px; border: 1px solid #ffffff40; border-radius: 4px; }
+  .pair-actions { display: flex; gap: 8px; }
+  .fake-btn { flex: 1; text-align: center; font-size: 14px; font-weight: 600; color: var(--text-strong); border: 1px solid #ffffff26; border-radius: 8px; padding: 9px 0; }
+
+  .facts { margin: 28px 0 0; padding: 0; list-style: none; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 16px 32px; max-width: 860px; }
+  .facts li { font-size: 15px; line-height: 1.6; color: var(--text-muted); padding-left: 16px; border-left: 1px solid var(--line-card); }
+  .facts b { color: var(--text-strong); font-weight: 600; }
+  .facts em { font-style: normal; color: var(--text); }
+
+  .grid { margin-top: 36px; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr)); gap: 16px; }
+  .grid h3 { margin: 0; font-size: 17px; line-height: 1.3; color: var(--text-strong); }
+  .grid p { margin: 0; font-size: 15px; line-height: 1.6; color: var(--text-muted); }
+  .icon { width: 40px; height: 40px; padding: 9px; border-radius: 10px; color: var(--accent); background: #19aad814; border: 1px solid #19aad840; }
+
+  .paths { margin-top: 36px; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); gap: 16px; }
+  .path { background: var(--surface); border: 1px solid var(--line-card); border-radius: 12px; padding: 24px; }
+  .path p { margin: 14px 0 0; font-size: 15px; line-height: 1.6; color: var(--text-muted); }
+  .path .path-label { margin: 0; font-size: 13px; font-weight: 600; color: var(--accent); }
+  .flow { display: flex; align-items: center; margin-top: 18px; }
+  .node { flex: none; font-family: var(--font-mono); font-size: 13px; color: var(--text-strong); border: 1px solid #ffffff2e; border-radius: 8px; padding: 8px 12px; }
+  .node.relay { color: var(--text-muted); border-style: dashed; }
+  .wire { flex: 1; min-width: 12px; height: 1px; background: linear-gradient(90deg, var(--accent), #19aad855); }
+
+  .ph-cta { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 22px; }
+  .fine { margin: 0; font-size: 14px; color: var(--text-muted); }
+  .fine a { text-decoration: underline; text-decoration-color: #19aad866; text-underline-offset: 3px; }
+
+  @media (max-width: 860px) {
+    .two { grid-template-columns: minmax(0, 1fr); gap: 40px; }
+    .pair { max-width: 380px; }
+  }
+  @media (max-width: 720px) {
+    .ph-hero { padding-top: 56px; padding-bottom: 64px; }
+    .section { padding-top: 72px; padding-bottom: 72px; }
+  }
+</style>

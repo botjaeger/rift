@@ -1,0 +1,32 @@
+---
+import { RELEASES_URL, getRelease } from '../lib/release';
+
+interface Props {
+  page: 'home' | 'download' | 'features' | 'phone' | 'performance' | 'docs' | 'about' | 'other';
+}
+const { page } = Astro.props;
+const release = await getRelease();
+---
+
+<footer class="site-footer">
+  <div class="wrap footer-row">
+    <span class="footer-brand"><img src="/rift-40.png" alt="" width="20" height="20" loading="lazy" />Rift</span>
+    {
+      page === 'download' ? (
+        <>
+          <span>Linux needs a Vulkan, OpenGL or software (Mesa) GPU driver.</span>
+          <a class="push" href={RELEASES_URL}>Older versions</a>
+        </>
+      ) : (
+        <>
+          <a href="/features/">Features</a>
+          <a href="/docs/">Documentation</a>
+          <a href="/about/">About</a>
+          <a href={RELEASES_URL}>Releases</a>
+          <a href={release.notesUrl}>Changelog</a>
+          <span class="push">[LICENSE]</span>
+        </>
+      )
+    }
+  </div>
+</footer>

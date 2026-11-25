@@ -1,0 +1,348 @@
+---
+import Base from '../layouts/Base.astro';
+import { featureRows, groupRows } from '../lib/features';
+import '../styles/window.css';
+
+// The rows are the README's Features table; this page only groups them and draws a sample per group.
+// A README row that fits no group, or a prefix that matches no row, fails the build.
+const groups = groupRows(await featureRows(), [
+  {
+    id: 'blocks',
+    title: 'Command blocks',
+    lead: 'Every command, its output, exit status and duration in one unit you can select, copy, search, bookmark, re-run or send to another command.',
+    prefixes: ['Command blocks', "Copy a block's command", 'Exact run time', 'Block menu', 'Bookmarks', "Filter a block's output", 'Several blocks at once', 'Compare two outputs', 'Save output', 'Send block output', 'Clear'],
+  },
+  {
+    id: 'editor',
+    title: 'The command editor',
+    lead: 'The line you type is a real editor, before the shell sees anything.',
+    prefixes: ['Command editor', 'Multi-line commands', 'History search', 'Vim keys', 'Compose a long prompt', 'Several carets', 'What each part', 'Smart selection'],
+  },
+  {
+    id: 'find',
+    title: 'Find anything',
+    lead: 'Every action is in the command palette, with its shortcut, and can be rebound.',
+    prefixes: ['Command palette', 'Find in scrollback', 'Select scrollback', 'Session switcher', 'Hint mode', 'Links and paths'],
+  },
+  {
+    id: 'tabs',
+    title: 'Tabs, panes and windows',
+    lead: 'Splits, groups, pins, colours and a searchable side rail.',
+    prefixes: ['Tabs and split panes', 'Profiles', 'Tab groups', 'Tab colours', 'Vertical tabs', 'Read-only panes', 'Keep a pane', 'Synchronized input', 'Window', 'Global hotkey'],
+  },
+  {
+    id: 'code',
+    title: 'Files and code review',
+    lead: 'The project tree, a Markdown viewer and your diff, beside the terminal.',
+    prefixes: ['File explorer', 'Run a Markdown', 'Code review', 'Send code'],
+  },
+  {
+    id: 'agents',
+    title: 'Coding agents and notifications',
+    lead: 'Know when a command finishes or an agent needs you, without watching the tab.',
+    prefixes: ['Coding agents', 'Notifications', 'Alert when', 'Progress reports', 'Links back to a pane'],
+  },
+  {
+    id: 'sessions',
+    title: 'Sessions and updates',
+    lead: 'Your tabs and running shells come back after an update or a crash.',
+    prefixes: ['Session restore', 'Saved block output', 'Durable sessions', 'Updates'],
+  },
+  {
+    id: 'terminal',
+    title: 'A full terminal underneath',
+    lead: 'vim, tmux, htop, ssh and every TUI run unchanged, with modern protocols.',
+    prefixes: ['Terminal behavior', 'Inline images', 'Paste safety', 'Secret masking', 'Screen readers'],
+  },
+  {
+    id: 'yours',
+    title: 'Make it yours',
+    lead: 'Configured with one TOML file; Settings writes the same file.',
+    prefixes: ['Themes', 'A colour scheme', 'Fonts', 'Text and cursor', 'Your own actions', 'Launch configurations'],
+  },
+  {
+    id: 'remote',
+    title: 'Remote, automation and phone',
+    lead: 'Blocks on remote hosts, a control socket for scripts, and your panes on your phone.',
+    prefixes: ['SSH profiles', 'Automation socket', 'The rift command', 'Phone companion'],
+  },
+]);
+const count = groups.reduce((n, g) => n + g.rows.length, 0);
+---
+
+<Base
+  page="features"
+  title="Rift features: blocks, editor, panes, review, agents"
+  description="Every Rift feature with the shortcut, menu or setting that reaches it: command blocks, the command editor, palette, tabs and panes, code review, coding agents, themes, SSH and the phone companion."
+>
+  <section class="glow-section">
+    <div class="hero-bg" aria-hidden="true"></div>
+    <div class="wrap relative f-hero">
+      <h1 class="in">Features</h1>
+      <p class="in d1 lead">
+        All {count} features, each with the shortcut, menu or setting that reaches it. Shortcuts are macOS defaults; on Linux
+        ⌘ is the Super key and most actions also have a ⌃⇧ chord. The samples are drawn, not screenshots.
+      </p>
+      <nav class="in d2 jump" aria-label="Feature groups">
+        {groups.map((g) => <a href={`#${g.id}`}>{g.title}</a>)}
+      </nav>
+    </div>
+  </section>
+
+  {
+    groups.map((g, i) => (
+      <section class:list={['rule', 'group', { deep: i % 2 === 1 }]} id={g.id} aria-labelledby={`${g.id}-h`}>
+        <div class="wrap g-row">
+          <div class="g-copy">
+            <h2 class="h-section" id={`${g.id}-h`}>{g.title}</h2>
+            <p class="lead">{g.lead}</p>
+            <dl class="rows">
+              {g.rows.map((r) => (
+                <div class="row">
+                  <dt set:html={r.what} />
+                  <dd set:html={r.how} />
+                </div>
+              ))}
+            </dl>
+          </div>
+          <div class="g-sample">
+            {g.id === 'blocks' && (
+              <figure class="window" role="img" aria-label="Sample: a command typed at the prompt becomes a block; a filter keeps only the matching lines of a failed build">
+                <div class="mono term">
+                  <div class="blk failed">
+                    <div class="bh"><span class="cmd"><span class="acc">cargo</span> build</span><span class="dir">~/code/project2</span><span class="meta"><span class="badge err">✕ 101</span><span class="dur">38.1s</span></span></div>
+                    <div class="filterbar"><span class="faint">⌥⇧F</span> error</div>
+                    <div class="out"><span class="red bold">error[E0425]</span>: cannot find value `cfg`<br /><span class="red bold">error</span>: could not compile `project2`</div>
+                  </div>
+                  <div class="blk selected">
+                    <div class="bh"><span class="cmd"><span class="acc">git</span> status <span class="flag">--short</span></span><span class="dir">~/code/project1</span><span class="branch">main</span><span class="meta"><span class="badge ok">✓ 0</span><span class="dur">14ms</span></span></div>
+                    <div class="out"><span class="red">&nbsp;M</span> src/server.ts</div>
+                  </div>
+                  <div class="blk typed">
+                    <div class="bh"><span class="cmd"><span class="acc">pnpm</span> test</span><span class="dir">~/code/project1</span><span class="branch">main</span><span class="meta"><span class="badge ok">✓ 0</span><span class="dur">4.2s</span></span></div>
+                    <div class="out pre">{' Tests  '}<span class="lime">214 passed</span> (214)</div>
+                  </div>
+                  <div class="blk prompt">
+                    <div class="ctx"><span class="acc">~/code/project1</span> on <span class="branch">main</span></div>
+                    <div class="line"><span class="branch">❯</span> <span class="typing"><span class="acc">pnpm</span> test</span><span class="caret" aria-hidden="true"></span></div>
+                  </div>
+                </div>
+              </figure>
+            )}
+            {g.id === 'editor' && (
+              <figure class="window" role="img" aria-label="Sample: the command editor with a history suggestion and the completion panel">
+                <div class="mono term">
+                  <div class="blk prompt first">
+                    <div class="ctx"><span class="acc">~/code/project1</span> on <span class="branch">main</span></div>
+                    <div class="line"><span class="branch">❯</span> <span class="acc">git</span> che<span class="caret" aria-hidden="true"></span><span class="ghost">ckout main</span></div>
+                    <ul class="menu" aria-label="Completions">
+                      <li class="on"><span>checkout</span><span class="faint">Switch branches or restore working tree files</span></li>
+                      <li><span>cherry-pick</span><span class="faint">Apply the changes introduced by some existing commits</span></li>
+                      <li><span>cherry</span><span class="faint">Find commits yet to be applied to upstream</span></li>
+                    </ul>
+                    <p class="hintline faint"><span class="kbd">Tab</span> completes · <span class="kbd">→</span> takes the suggestion · <span class="kbd">⌃→</span> one word</p>
+                  </div>
+                </div>
+              </figure>
+            )}
+            {g.id === 'find' && (
+              <figure class="window palette" role="img" aria-label="Sample: the command palette filtered by the word theme">
+                <div class="mono p-input"><span class="faint">›</span> theme<span class="caret" aria-hidden="true"></span></div>
+                <ul class="mono p-list">
+                  <li class="on"><span>Theme picker (live preview)</span></li>
+                  <li><span>Pane theme: name</span></li>
+                  <li><span>Toggle secret masking</span></li>
+                  <li><span>Toggle vertical tabs</span></li>
+                </ul>
+                <p class="p-foot mono faint"><span class="kbd">⌘P</span> every action, setting, theme, launch configuration</p>
+              </figure>
+            )}
+            {g.id === 'tabs' && (
+              <figure class="window" role="img" aria-label="Sample: tabs in a side rail and a window split into two panes">
+                <div class="split">
+                  <ul class="mono rail" aria-label="Vertical tabs">
+                    <li class="on"><span class="dot"></span><span>project1<small class="branch">main · ±3</small></span></li>
+                    <li><span class="dot amber"></span><span>project2<small class="branch">dev</small></span></li>
+                    <li><span class="dot idle"></span><span>claude<small class="faint">project1</small></span></li>
+                  </ul>
+                  <div class="panes">
+                    <div class="mono pane on"><span class="branch">❯</span> <span class="acc">pnpm</span> dev<br /><span class="faint">ready on :4321</span></div>
+                    <div class="mono pane"><span class="branch">❯</span> <span class="acc">git</span> log <span class="flag">--oneline</span><br /><span class="str">a1b2c3d</span> fix upload</div>
+                  </div>
+                </div>
+              </figure>
+            )}
+            {g.id === 'code' && (
+              <figure class="window" role="img" aria-label="Sample: the code review panel with one changed file and a hunk">
+                <div class="titlebar"><span class="mono faint">Code review</span><span class="mono palette-hint"><span class="lime">+12</span> <span class="red">−3</span></span></div>
+                <div class="mono review">
+                  <div class="r-file"><span>src/server.ts</span><span class="faint">Unstaged</span></div>
+                  <div class="r-line"><span class="faint">41</span> {'  const retries = 1;'}</div>
+                  <div class="r-line del"><span class="faint">42</span> - await upload(file);</div>
+                  <div class="r-line add"><span class="faint">42</span> + await retry(() =&gt; upload(file), retries);</div>
+                  <div class="r-actions"><span class="chip">s Stage</span><span class="chip">r Revert</span><span class="chip">a Send to agent…</span></div>
+                </div>
+              </figure>
+            )}
+            {g.id === 'agents' && (
+              <figure class="window" role="img" aria-label="Sample: the notifications inbox">
+                <div class="titlebar"><span class="mono faint">Notifications</span><span class="mono palette-hint"><span class="kbd">⇧⌘A</span></span></div>
+                <ul class="mono inbox">
+                  <li><span class="dot amber"></span><span><b>claude</b> needs your input<small class="faint">project1 · just now</small></span></li>
+                  <li><span class="dot err"></span><span><b>cargo build</b> failed ✕ 101<small class="faint">project2 · 2 min ago</small></span></li>
+                  <li><span class="dot ok"></span><span><b>pnpm test</b> finished ✓ 0<small class="faint">project1 · 4.2s · 5 min ago</small></span></li>
+                </ul>
+              </figure>
+            )}
+            {g.id === 'sessions' && (
+              <figure class="window" role="img" aria-label="Sample: the tab bar offering an update">
+                <div class="titlebar">
+                  <div class="lights hide-sm" aria-hidden="true"><span></span><span></span><span></span></div>
+                  <div class="mono tabs"><span class="tab active"><span class="dot"></span>project1</span><span class="tab hide-sm">project2</span></div>
+                  <span class="mono palette-hint update">Update Rift</span>
+                </div>
+                <div class="mono term">
+                  <div class="blk"><div class="bh"><span class="cmd"><span class="acc">pnpm</span> dev</span><span class="dir">~/code/project1</span><span class="meta"><span class="dur">running 2h 14m</span></span></div><div class="out faint">still running after the update</div></div>
+                  <div class="blk prompt"><div class="line faint">Tabs, splits, directories and running shells come back.</div></div>
+                </div>
+              </figure>
+            )}
+            {g.id === 'terminal' && (
+              <figure class="window" role="img" aria-label="Sample: a secret masked in output, and the protocols Rift speaks">
+                <div class="mono term">
+                  <div class="blk"><div class="bh"><span class="cmd"><span class="acc">cat</span> .env</span><span class="dir">~/code/project1</span><span class="meta"><span class="badge ok">✓ 0</span></span></div><div class="out">API_URL=https://api.example.com<br />API_TOKEN=<span class="masked">••••••••••••</span></div></div>
+                  <div class="blk prompt"><div class="protos">{['Kitty keyboard', 'Kitty graphics', 'iTerm2 images', 'OSC 8 links', 'OSC 52 clipboard', 'Synchronized output', 'Bracketed paste', 'OSC 9 / 777 / 99'].map((p) => <span class="chip">{p}</span>)}</div></div>
+                </div>
+              </figure>
+            )}
+            {g.id === 'yours' && (
+              <figure class="window" role="img" aria-label="Sample: a few lines of config.toml">
+                <div class="titlebar"><span class="mono faint">~/.config/rift/config.toml</span></div>
+                <pre class="mono toml"><span class="key">font_family</span> = <span class="str">"JetBrains Mono"</span>
+<span class="key">font_size</span>   = <span class="num">13.0</span>
+<span class="key">theme</span>       = <span class="str">"dark-default"</span>
+<span class="key">mask_secrets</span> = <span class="num">true</span>
+
+<span class="faint">[keybindings]</span>
+<span class="key">palette</span> = <span class="str">"cmd+shift+space"</span>
+
+<span class="faint">[[profiles]]</span>
+<span class="key">name</span>  = <span class="str">"project1"</span>
+<span class="key">cwd</span>   = <span class="str">"~/code/project1"</span></pre>
+              </figure>
+            )}
+            {g.id === 'remote' && (
+              <figure class="window" role="img" aria-label="Sample: the control socket from a shell">
+                <div class="mono term">
+                  <div class="blk"><div class="bh"><span class="cmd"><span class="acc">rift-terminal</span> ctl list</span><span class="meta"><span class="badge ok">✓ 0</span></span></div><div class="out faint">tabs and panes of every window (JSON)</div></div>
+                  <div class="blk"><div class="bh"><span class="cmd"><span class="acc">rift-terminal</span> ctl focus <span class="flag">--tab</span> 2</span><span class="meta"><span class="badge ok">✓ 0</span></span></div></div>
+                  <div class="blk prompt"><div class="line"><span class="branch">❯</span> <span class="acc">rift</span> .<span class="caret" aria-hidden="true"></span></div></div>
+                </div>
+              </figure>
+            )}
+            {g.id === 'remote' && <p class="sample-link"><a href="/docs/phone/">The phone companion →</a></p>}
+          </div>
+        </div>
+      </section>
+    ))
+  }
+
+  <section class="rule glow-section">
+    <div class="wrap f-cta">
+      <h2 class="h-section">Try it on your own commands</h2>
+      <div class="actions">
+        <a class="btn btn-primary" href="/download/">Download Rift</a>
+        <a class="btn btn-ghost" href="/docs/getting-started/">Getting started</a>
+        <a class="btn btn-ghost" href="/docs/keyboard-shortcuts/">All shortcuts</a>
+      </div>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .f-hero { padding-top: 96px; padding-bottom: 56px; }
+  .f-hero h1 { margin: 0; font-size: clamp(40px, 6vw, 64px); line-height: 1.05; letter-spacing: -0.04em; color: var(--text-strong); }
+  .f-hero .lead { margin-top: 18px; max-width: 720px; font-size: 18px; }
+  .jump { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 28px; }
+  .jump a { font-size: 14px; color: var(--text); border: 1px solid #ffffff1f; border-radius: 999px; padding: 10px 14px; }
+  .jump a:hover { color: var(--text-strong); border-color: #ffffff40; }
+
+  .group { padding: 88px 0; }
+  .g-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 56px; align-items: start; }
+  .g-copy .lead { margin-top: 14px; }
+  .g-sample { position: sticky; top: 100px; }
+  .rows { margin: 28px 0 0; }
+  .row { padding: 14px 0; border-top: 1px solid var(--line-card); }
+  .row dt { color: var(--text-strong); font-size: 15px; line-height: 1.5; font-weight: 500; }
+  .row dd { margin: 4px 0 0; color: var(--text-muted); font-size: 14px; line-height: 1.6; }
+  .row :global(code) { font-family: var(--font-mono); font-size: 0.88em; color: #f1f1f1; background: #ffffff0f; border: 1px solid #ffffff14; border-radius: 4px; padding: 0 4px; overflow-wrap: anywhere; }
+  .row :global(em) { font-style: normal; color: var(--text); }
+  .row :global(.kbd) { font-size: 11px; padding: 1px 5px; }
+
+  /* Samples */
+  .filterbar { display: flex; gap: 10px; align-items: center; margin: 6px 0 4px; padding: 4px 10px; font-size: 13px; color: var(--text-strong); background: #ffffff0a; border: 1px solid #ffffff1a; border-radius: 6px; }
+  /* Type a command, it becomes a block: plays once (under 5 s, so it needs no pause control) and ends
+     on the finished block with an empty prompt. Reduced motion skips straight to that end state. */
+  .typing { display: inline-block; overflow: hidden; white-space: nowrap; vertical-align: bottom; width: 0; animation: type 2.6s steps(9) .8s both; }
+  .typed { animation: land 2.6s ease-out .8s both; }
+  @keyframes type { 0% { width: 0; } 45%, 70% { width: 9ch; } 71%, 100% { width: 0; } }
+  @keyframes land { 0%, 70% { opacity: 0; transform: translateY(8px); } 85%, 100% { opacity: 1; transform: none; } }
+  .first { margin-top: 0; border-top: 0; }
+  .menu { list-style: none; margin: 10px 0 0; padding: 4px; font-size: 13px; background: #0e0e0e; border: 1px solid #ffffff1f; border-radius: 8px; max-width: 460px; }
+  .menu li { display: grid; grid-template-columns: 12ch minmax(0, 1fr); gap: 12px; padding: 4px 10px; border-radius: 5px; white-space: nowrap; }
+  .menu li span + span { overflow: hidden; text-overflow: ellipsis; }
+  .menu li.on { background: #19aad826; color: var(--text-strong); }
+  .menu li.on .faint { color: #a8a8a8; } /* 4.5:1 on the highlighted row */
+  .hintline { margin: 12px 0 0; font-size: 12px; font-family: var(--font-sans); }
+  .palette { max-width: 560px; }
+  .p-input { padding: 14px 16px; font-size: 15px; color: var(--text-strong); border-bottom: 1px solid var(--line-card); }
+  .p-list { list-style: none; margin: 0; padding: 6px; font-size: 13px; color: var(--text); }
+  .p-list li { padding: 8px 10px; border-radius: 6px; }
+  .p-list li.on { background: #19aad826; color: var(--text-strong); }
+  .p-foot { margin: 0; padding: 10px 16px 14px; font-size: 12px; border-top: 1px solid var(--line-card); }
+  .sample-link { margin: 16px 0 0; font-size: 14px; }
+  .sample-link a { display: inline-block; padding: 8px 0; }
+  .split { display: grid; grid-template-columns: 170px minmax(0, 1fr); min-height: 220px; }
+  .rail { list-style: none; margin: 0; padding: 8px; border-right: 1px solid var(--line-card); background: var(--bg-deep); font-size: 13px; }
+  .rail li { display: flex; gap: 8px; align-items: baseline; padding: 6px 8px; border-radius: 6px; color: var(--text-muted); }
+  .rail li.on { background: #19aad81a; color: var(--text-strong); }
+  .rail small { display: block; font-size: 11px; }
+  .dot.amber { background: #e5a01a; } .dot.idle { background: #555; } .dot.err { background: var(--err); } .dot.ok { background: var(--ok); }
+  .panes { display: grid; grid-template-columns: 1fr 1fr; }
+  .pane { padding: 14px; font-size: 13px; line-height: 1.7; color: #f1f1f1; }
+  .pane + .pane { border-left: 1px solid var(--line-card); opacity: 0.75; }
+  .review { padding: 10px 0 14px; font-size: 13px; line-height: 1.8; }
+  .r-file { display: flex; justify-content: space-between; padding: 4px 16px; color: var(--text-strong); }
+  .r-line { padding: 0 16px; white-space: pre; overflow-x: auto; color: #d0d0d0; }
+  .r-line.add { background: #1ca05a1f; color: #b4fa72; }
+  .r-line.del { background: #ff82721a; color: #ffb3a8; }
+  .r-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 16px 0; }
+  .chip { font-size: 12px; border: 1px solid #ffffff1f; border-radius: 6px; padding: 3px 8px; color: #c8c8c8; }
+  .inbox { list-style: none; margin: 0; padding: 8px; font-size: 13px; }
+  .inbox li { display: flex; gap: 10px; align-items: baseline; padding: 10px; border-radius: 6px; color: var(--text); }
+  .inbox li + li { border-top: 1px solid var(--line-card); }
+  .inbox b { color: var(--text-strong); font-weight: 600; }
+  .inbox small { display: block; font-size: 11px; margin-top: 2px; }
+  .update { flex: none; color: var(--bg); background: var(--text-strong); border-radius: 6px; padding: 4px 10px; font-weight: 600; }
+  .masked { color: var(--text-faint); letter-spacing: 1px; }
+  .protos { display: flex; flex-wrap: wrap; gap: 6px; }
+  .toml { margin: 0; padding: 16px; font-size: 13px; line-height: 1.75; color: #f1f1f1; overflow-x: auto; }
+  .toml .key { color: #a5d5fe; } .toml .num { color: #f0a868; }
+
+  .f-cta { padding-top: 96px; padding-bottom: 104px; display: flex; flex-direction: column; align-items: center; text-align: center; gap: 24px; }
+  .actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; }
+
+  @media (max-width: 960px) {
+    .g-row { grid-template-columns: minmax(0, 1fr); gap: 32px; }
+    .g-sample { position: static; order: -1; }
+  }
+  @media (max-width: 720px) {
+    .f-hero { padding-top: 56px; padding-bottom: 40px; }
+    .group { padding: 64px 0; }
+    .split { grid-template-columns: minmax(0, 1fr); }
+    .rail { border-right: 0; border-bottom: 1px solid var(--line-card); display: flex; overflow-x: auto; }
+    .rail li { flex: none; }
+    .panes { grid-template-columns: minmax(0, 1fr); }
+    .pane + .pane { border-left: 0; border-top: 1px solid var(--line-card); }
+  }
+</style>

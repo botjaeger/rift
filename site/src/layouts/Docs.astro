@@ -1,0 +1,236 @@
+---
+import Base from './Base.astro';
+import DocsSearch from '../components/DocsSearch.astro';
+import { docUrl, getDocs } from '../lib/docs';
+
+interface Props {
+  title: string;
+  description: string;
+  current: string; // slug
+  toc: { slug: string; text: string }[];
+  osKeys?: boolean; // the page has key tables with a Linux version (scripts/os-keys.mjs)
+}
+const { title, description, current, toc, osKeys = false } = Astro.props;
+const docs = await getDocs();
+---
+
+<Base page="docs" title={`${title} · Rift docs`} description={description}>
+  <!-- Runs before the tables draw, so a Linux visitor never sees the macOS keys flash first. -->
+  <script is:inline>
+    (() => {
+      let os = /Linux|X11/.test(navigator.userAgent) && !/Android/.test(navigator.userAgent) ? 'linux' : 'mac';
+      try {
+        const saved = localStorage.getItem('rift-docs-os');
+        if (saved === 'mac' || saved === 'linux') os = saved;
+      } catch {
+        // storage blocked: the system's default
+      }
+      document.documentElement.dataset.os = os;
+    })();
+  </script>
+  <div class="wrap docs">
+    <aside class="side" aria-label="Documentation">
+      <DocsSearch />
+      <nav aria-label="Docs pages">
+        <p class="side-label"><a href="/docs/">Documentation</a></p>
+        <ul class="pages">
+          {
+            docs.map((d) => (
+              <li>
+                <a href={docUrl(d.id)} aria-current={d.id === current ? 'page' : undefined}>
+                  {d.data.title}
+                </a>
+              </li>
+            ))
+          }
+        </ul>
+      </nav>
+      {
+        toc.length > 0 && (
+          <>
+            <nav class="toc toc-wide" aria-label="On this page">
+              <p class="toc-label">On this page</p>
+              <ul>
+                {toc.map((h) => (
+                  <li>
+                    <a href={`#${h.slug}`}>{h.text}</a>
+                  </li>
+                ))}
+              </ul>
+            </nav>
+            <details class="toc toc-narrow">
+              <summary>On this page</summary>
+              <ul>
+                {toc.map((h) => (
+                  <li>
+                    <a href={`#${h.slug}`}>{h.text}</a>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          </>
+        )
+      }
+    </aside>
+    <article class="prose">
+      <h1>{title}</h1>
+      <p class="lede">{description}</p>
+      {
+        osKeys && (
+          // Without JavaScript the tables show macOS and the toggle stays hidden; the inline script above
+          // marks <html data-os> before the first paint, which reveals it with no layout shift.
+          <div class="os-toggle" role="group" aria-label="Show shortcuts for" hidden>
+            <span>Shortcuts for</span>
+            <button type="button" data-os="mac" aria-pressed="true">macOS</button>
+            <button type="button" data-os="linux" aria-pressed="false">Windows and Linux</button>
+          </div>
+        )
+      }
+      {
+        osKeys && (
+          // The tables switch; the paragraphs keep the macOS symbols, so say how to read them.
+          <p class="os-note">
+            The tables show each action’s Windows and Linux shortcut. In the text, read ⌘ as the Windows / Super key, ⌥ as
+            Alt, ⌃ as Ctrl and ⇧ as Shift.
+          </p>
+        )
+      }
+      <slot />
+    </article>
+  </div>
+</Base>
+
+<script>
+  // macOS / Linux shortcuts: the choice is remembered; the first visit follows the visitor's system.
+  const toggle = document.querySelector<HTMLElement>('.os-toggle');
+  if (toggle) {
+    const KEY = 'rift-docs-os';
+    const os = document.documentElement.dataset.os === 'linux' ? 'linux' : 'mac'; // set by the inline script above
+    const show = (next: string) => {
+      document.documentElement.dataset.os = next;
+      for (const b of toggle.querySelectorAll<HTMLButtonElement>('button')) b.setAttribute('aria-pressed', String(b.dataset.os === next));
+    };
+    show(os);
+    toggle.hidden = false; // CSS already shows it; this keeps the attribute honest
+    toggle.addEventListener('click', (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button');
+      if (!b?.dataset.os) return;
+      show(b.dataset.os);
+      try {
+        localStorage.setItem(KEY, b.dataset.os);
+      } catch {
+        // storage blocked: the choice lasts for this page only
+      }
+    });
+  }
+
+  // On a phone the page list is one sideways-scrolling row: bring the current page into view.
+  const row = document.querySelector<HTMLElement>('.pages');
+  const current = row?.querySelector<HTMLElement>('[aria-current="page"]');
+  if (row && current && row.scrollWidth > row.clientWidth) {
+    row.scrollLeft = current.offsetLeft - (row.clientWidth - current.offsetWidth) / 2;
+  }
+  // Keyboard focus on a chip that is only partly on screen scrolls all of it into view.
+  row?.addEventListener('focusin', (e) => {
+    if (row.scrollWidth > row.clientWidth) (e.target as HTMLElement).scrollIntoView({ inline: 'nearest', block: 'nearest' });
+  });
+</script>
+
+<style>
+  .docs { display: grid; grid-template-columns: 248px minmax(0, 1fr); gap: 56px; padding-top: 40px; padding-bottom: 96px; align-items: start; }
+  .side {
+    position: sticky; top: 77px; max-height: calc(100vh - 93px); overflow-y: auto; overscroll-behavior: contain;
+    display: flex; flex-direction: column; gap: 22px; padding-bottom: 16px; scrollbar-width: thin;
+  }
+  .side-label { margin: 0 0 6px; font-size: 13px; font-weight: 600; }
+  .side-label a { color: var(--text-faint); display: inline-block; padding: 4px 0; }
+  .side-label a:hover { color: var(--text-strong); }
+  .pages, .toc ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+  .pages a { display: block; padding: 8px 12px; border-radius: 6px; font-size: 14px; color: var(--text-muted); }
+  .pages a:hover { color: var(--text-strong); background: #ffffff0a; }
+  .pages a[aria-current='page'] { color: var(--text-strong); background: #19aad81a; box-shadow: inset 2px 0 0 var(--accent); }
+  .toc-narrow { display: none; }
+  .toc-label { margin: 0; font-size: 13px; font-weight: 600; color: var(--text-faint); padding: 6px 0; }
+  .toc summary { cursor: pointer; font-size: 13px; font-weight: 600; color: var(--text-faint); }
+  .toc summary:hover { color: var(--text-strong); }
+  .toc ul { border-left: 1px solid var(--line-card); margin-top: 6px; }
+  .toc a { display: block; padding: 6px 12px; font-size: 13px; line-height: 1.4; color: var(--text-muted); margin-left: -1px; border-left: 1px solid transparent; }
+  .toc a:hover { color: var(--text-strong); border-left-color: #ffffff59; }
+
+  @media (max-width: 960px) {
+    .docs { grid-template-columns: minmax(0, 1fr); gap: 28px; padding-top: 24px; }
+    .side { position: static; max-height: none; overflow: visible; gap: 16px; padding-bottom: 0; }
+    /* One row that scrolls sideways, so the page itself starts near the top on a phone. */
+    .pages { flex-direction: row; gap: 6px; overflow-x: auto; scrollbar-width: none; margin: 0 calc(-1 * var(--gutter)); padding: 0 var(--gutter); scroll-padding-inline: var(--gutter); }
+    .pages li { flex: none; }
+    .pages a { border: 1px solid var(--line-card); padding: 10px 12px; white-space: nowrap; }
+    .pages a[aria-current='page'] { box-shadow: none; border-color: #19aad866; }
+    .toc-wide { display: none; }
+    .toc-narrow { display: block; border: 1px solid var(--line-card); border-radius: 8px; padding: 0 14px; }
+    .toc summary { padding: 12px 0; }
+    .toc ul { max-height: 50vh; overflow-y: auto; margin-bottom: 8px; }
+  }
+
+  /* Rendered markdown */
+  .prose { min-width: 0; max-width: 780px; font-size: 16px; line-height: 1.7; color: var(--text); overflow-wrap: break-word; }
+  .prose h1 { margin: 0; font-size: clamp(32px, 4.4vw, 44px); line-height: 1.1; letter-spacing: -0.03em; color: var(--text-strong); }
+  .lede { margin: 14px 0 0; font-size: 18px; line-height: 1.55; color: var(--text-muted); }
+  .prose :global(h2) { margin: 56px 0 0; padding-top: 28px; border-top: 1px solid var(--line); font-size: 26px; line-height: 1.25; letter-spacing: -0.02em; color: var(--text-strong); }
+  .prose :global(h3) { margin: 36px 0 0; font-size: 19px; line-height: 1.35; color: var(--text-strong); }
+  .prose :global(h4) { margin: 28px 0 0; font-size: 16px; color: var(--text-strong); }
+  .prose :global(p), .prose :global(ul), .prose :global(ol) { margin: 14px 0 0; }
+  .prose :global(ul), .prose :global(ol) { padding-left: 22px; }
+  .prose :global(li + li) { margin-top: 6px; }
+  .prose :global(li > ul), .prose :global(li > ol) { margin-top: 6px; }
+  .prose :global(strong) { color: var(--text-strong); font-weight: 600; }
+  .prose :global(em) { color: var(--text-strong); font-style: normal; }
+  .prose :global(a) { text-decoration: underline; text-decoration-color: #19aad866; text-underline-offset: 3px; }
+  .prose :global(a:hover) { text-decoration-color: currentColor; }
+  .prose :global(:not(pre) > code) {
+    font-family: var(--font-mono); font-size: 0.86em; color: #f1f1f1;
+    background: #ffffff0f; border: 1px solid #ffffff14; border-radius: 4px; padding: 1px 5px;
+    /* break-word, not anywhere: table columns keep room for a whole identifier. */
+    overflow-wrap: break-word;
+  }
+  .prose :global(pre) {
+    margin: 16px 0 0; padding: 14px 16px; border: 1px solid var(--line-card); border-radius: 8px;
+    background: var(--bg-deep) !important; font-size: 13px; line-height: 1.65; overflow-x: auto;
+  }
+  .prose :global(pre code) { font-family: var(--font-mono); }
+  .prose :global(table) {
+    display: block; max-width: 100%; overflow-x: auto; margin: 18px 0 0;
+    border-collapse: collapse; font-size: 14px; line-height: 1.55;
+  }
+  .prose :global(th), .prose :global(td) { text-align: left; vertical-align: top; padding: 9px 14px 9px 0; border-bottom: 1px solid var(--line-card); }
+  .prose :global(th) { color: var(--text-strong); font-weight: 600; border-bottom-color: #ffffff2e; white-space: nowrap; }
+  .prose :global(td:first-child) { min-width: 120px; }
+  /* Phones: each row becomes a stacked entry, first cell as its title. */
+  @media (max-width: 640px) {
+    .prose :global(table) { overflow: visible; }
+    .prose :global(thead) { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+    .prose :global(tbody), .prose :global(tr), .prose :global(td) { display: block; }
+    .prose :global(tr) { padding: 12px 0; border-bottom: 1px solid var(--line-card); }
+    .prose :global(td) { border: 0; padding: 2px 0; min-width: 0; }
+    .prose :global(td:first-child) { min-width: 0; font-weight: 600; color: var(--text-strong); }
+    .prose :global(td:empty) { display: none; }
+  }
+  .os-toggle { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; margin-top: 22px; font-size: 14px; color: var(--text-muted); }
+  .os-toggle[hidden] { display: none; }
+  :global(html[data-os]) .os-toggle[hidden] { display: flex; }
+  .os-toggle span { margin-right: 8px; }
+  .os-note { display: none; margin: 12px 0 0; font-size: 14px; line-height: 1.6; color: var(--text-muted); }
+  :global(html[data-os='linux']) .os-note { display: block; }
+  .os-toggle button {
+    min-height: 44px; padding: 0 16px; font: inherit; font-weight: 600; color: var(--text-muted);
+    background: transparent; border: 1px solid var(--line-card); border-radius: 8px; cursor: pointer;
+  }
+  .os-toggle button:hover { color: var(--text-strong); }
+  :global(html:not([data-os='linux'])) .os-toggle [data-os='mac'],
+  :global(html[data-os='linux']) .os-toggle [data-os='linux'] { color: var(--text-strong); background: #19aad81a; border-color: #19aad866; }
+  .prose :global(.os-linux) { display: none; }
+  :global(html[data-os='linux']) .prose :global(.os-linux) { display: inline; }
+  :global(html[data-os='linux']) .prose :global(.os-mac) { display: none; }
+  .prose :global(hr) { border: 0; border-top: 1px solid var(--line); margin: 32px 0; }
+  .prose :global(.store-row) { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+  .prose :global(.store-row a) { text-decoration: none; }
+</style>

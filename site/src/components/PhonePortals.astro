@@ -1,0 +1,155 @@
+---
+// The Rift phone app's Portals screen, drawn at the app's real 390 x 844 pt size and scaled into the frame
+// (from the app's Portals screen, Dark Default theme). Used on the home and phone pages.
+---
+
+<div class="phone" role="img" aria-label="The Rift phone app's Portals screen: a MacBook on this network with five tabs. Claude Code in project1 asks to edit a file, with Yes, Always and No buttons; project2 is running pnpm dev; a cargo build in project3 failed.">
+  <div class="screen">
+    <div class="p-header">
+      <div class="p-title-row">
+        <span class="p-heading">Portals</span>
+        <span class="glass"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path><circle cx="12" cy="12" r="3"></circle></svg></span>
+        <span class="glass"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M12 4v16"></path><path d="M4 12h16"></path></svg></span>
+      </div>
+      <p class="p-summary"><span class="warn">● 1 needs you</span> · 1 working · 1 failed · 2 idle</p>
+    </div>
+    <div class="p-cards">
+      <div class="p-card">
+        <div class="p-head">
+          <span class="p-dot"></span>
+          <div class="p-head-text">
+            <div class="p-name">MacBook</div>
+            <div class="p-conn">This network · 5 tabs</div>
+          </div>
+          <span class="glass small"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="3"></rect><path d="M12 9v6"></path><path d="M9 12h6"></path></svg></span>
+        </div>
+
+        <div class="p-row needs inline">
+          <div class="p-row-main">
+            <span class="tile claude"><img src="/claude-60.png" alt="" width="20" height="20" loading="lazy" /></span>
+            <div class="p-row-text">
+              <div class="p-row-title">project1</div>
+              <div class="p-row-line">Waiting for you · Edit src/server.ts?</div>
+              <div class="p-question">Do you want to make this edit to src/server.ts?</div>
+            </div>
+            <span class="p-mark"><span class="mdot warn-bg"></span><span class="when warn">2m</span></span>
+          </div>
+          <div class="p-pills">
+            <span class="pill-btn primary">Yes</span>
+            <span class="pill-btn">Always</span>
+            <span class="pill-btn">No</span>
+            <span class="p-flex"></span>
+            <span class="pill-btn text">Open</span>
+          </div>
+        </div>
+
+        <div class="p-row">
+          <div class="p-row-main">
+            <span class="tile">&gt;_</span>
+            <div class="p-row-text">
+              <div class="p-row-title">project2</div>
+              <div class="p-row-line">pnpm dev · running</div>
+            </div>
+            <span class="p-mark"><span class="mdot acc-bg"></span><span class="when acc">4:12</span></span>
+          </div>
+        </div>
+
+        <div class="p-row">
+          <div class="p-row-main">
+            <span class="tile">&gt;_</span>
+            <div class="p-row-text">
+              <div class="p-row-title">project3</div>
+              <div class="p-row-line">cargo build · failed with 101</div>
+            </div>
+            <span class="p-mark"><span class="mdot err-bg"></span><span class="when err">✕ 101</span></span>
+          </div>
+        </div>
+
+        <div class="p-row">
+          <div class="p-row-main">
+            <span class="tile claude"><img src="/claude-60.png" alt="" width="20" height="20" loading="lazy" /></span>
+            <div class="p-row-text">
+              <div class="p-row-title">project4</div>
+              <div class="p-row-line">Idle · waiting for your prompt</div>
+            </div>
+            <span class="p-mark"><span class="mdot ok-bg"></span><span class="when muted">12m</span></span>
+          </div>
+        </div>
+
+        <div class="p-row last">
+          <div class="p-row-main">
+            <span class="tile">&gt;_</span>
+            <div class="p-row-text">
+              <div class="p-row-title">~</div>
+              <div class="p-row-line">Idle · last: git pull</div>
+            </div>
+            <span class="p-mark"><span class="mdot ok-bg"></span></span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<style>
+  /* Phone frame: the screen is drawn at the app's 390 x 844 pt and scaled to the frame's inner 281 px. */
+  .phone {
+    --s: 0.7205;
+    position: relative; flex-shrink: 0; width: 299px; height: 626px; border-radius: 46px; border: 9px solid #1e1e1e;
+    background: #050505; overflow: hidden; box-shadow: 0 30px 80px #00000099;
+  }
+  .screen {
+    position: absolute; top: 0; left: 0; width: 390px; height: 844px; transform: scale(var(--s)); transform-origin: 0 0;
+    background: #050505; font-family: var(--font-sans); color: #e6e6e6; text-align: left;
+  }
+  .p-header { background: #000000; padding: 54px 16px 12px; display: flex; flex-direction: column; gap: 12px; }
+  .p-title-row { display: flex; align-items: center; gap: 8px; }
+  .p-heading { flex: 1; font-weight: 600; font-size: 30px; line-height: 36px; letter-spacing: -0.5px; color: #ffffff; }
+  .glass {
+    width: 38px; height: 38px; border-radius: 50%; background: #ffffff14; border: 1px solid #ffffff1f;
+    display: flex; align-items: center; justify-content: center; color: #e6e6e6; flex-shrink: 0;
+  }
+  .glass.small { width: 34px; height: 34px; color: #9b9b9b; }
+  .p-summary { margin: 0; font-size: 14px; line-height: 20px; color: #9b9b9b; }
+  .warn { color: #e5a01a; }
+  .p-cards { padding: 4px 16px 0; display: flex; flex-direction: column; gap: 14px; }
+  .p-card { border-radius: 14px; background: #1e1e1e; border: 1px solid #ffffff1a; overflow: hidden; }
+  .p-head { display: flex; align-items: center; gap: 10px; padding: 12px 12px 12px 16px; border-bottom: 1px solid #ffffff1a; }
+  .p-dot { width: 9px; height: 9px; border-radius: 5px; background: #1ca05a; flex-shrink: 0; }
+  .p-head-text { flex: 1; min-width: 0; }
+  .p-name { font-weight: 600; font-size: 17px; line-height: 22px; color: #ffffff; }
+  .p-conn { font-size: 13px; line-height: 17px; color: #9b9b9b; }
+  .p-row { min-height: 62px; border-bottom: 1px solid #ffffff1a; }
+  .p-row.last { border-bottom: none; }
+  .p-row.needs { background: #19aad80f; }
+  .p-row.inline { padding-bottom: 14px; }
+  .p-row-main { display: flex; gap: 12px; padding: 0 12px 0 16px; align-items: center; min-height: 62px; }
+  .p-row.inline .p-row-main { align-items: flex-start; padding-top: 14px; padding-bottom: 12px; min-height: 0; }
+  .tile {
+    width: 36px; height: 36px; border-radius: 10px; background: #19aad81a; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--font-mono); font-weight: 500; font-size: 12px; color: #19aad8;
+  }
+  .tile.claude { background: #d977571f; }
+  .p-row-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+  .p-row-title { font-weight: 600; font-size: 15px; line-height: 20px; color: #ffffff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .p-row-line { font-size: 13px; line-height: 17px; color: #9b9b9b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .p-question { font-size: 14px; line-height: 20px; color: #e6e6e6; margin-top: 4px; }
+  .p-mark { flex-shrink: 0; min-width: 34px; display: flex; flex-direction: column; align-items: flex-end; justify-content: center; gap: 3px; align-self: center; }
+  .mdot { width: 8px; height: 8px; border-radius: 4px; }
+  .warn-bg { background: #e5a01a; } .acc-bg { background: #19aad8; } .err-bg { background: #ff8272; } .ok-bg { background: #1ca05a; }
+  .when { font-family: var(--font-mono); font-weight: 500; font-size: 11px; line-height: 14px; font-variant-numeric: tabular-nums; }
+  .when.acc { color: #19aad8; } .when.err { color: #ff8272; } .when.muted { color: #9b9b9b; }
+  .p-pills { display: flex; align-items: center; gap: 8px; padding: 0 16px 0 68px; }
+  .pill-btn {
+    min-height: 34px; padding: 0 12px; border-radius: 10px; border: 1px solid #ffffff3d;
+    display: inline-flex; align-items: center; font-weight: 600; font-size: 13px; color: #e6e6e6;
+  }
+  .pill-btn.primary { background: #19aad8; border-color: #19aad8; color: #050505; }
+  .pill-btn.text { border-color: transparent; color: #19aad8; }
+  .p-flex { flex: 1; }
+  /* The 299 px frame plus the page gutters is wider than a 320 px phone: draw it smaller there. */
+  @media (max-width: 360px) {
+    .phone { zoom: 0.88; }
+  }
+</style>

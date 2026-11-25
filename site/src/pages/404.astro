@@ -1,0 +1,24 @@
+---
+import Base from '../layouts/Base.astro';
+---
+
+<Base page="other" title="Page not found · Rift" description="This page does not exist. Go to the Rift home page or the download page." noindex>
+  <section class="glow-section">
+    <div class="hero-bg" aria-hidden="true"></div>
+    <div class="wrap relative nf">
+      <p class="mono code-404">404</p>
+      <h1>This page does not exist.</h1>
+      <div class="actions">
+        <a class="btn btn-primary" href="/">Rift home</a>
+        <a class="btn btn-ghost" href="/download/">Download</a>
+      </div>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .nf { padding-top: 120px; padding-bottom: 160px; display: flex; flex-direction: column; align-items: center; text-align: center; gap: 18px; }
+  .code-404 { margin: 0; font-size: 14px; color: var(--accent); }
+  .nf h1 { margin: 0; font-size: clamp(32px, 5vw, 48px); letter-spacing: -0.03em; color: var(--text-strong); }
+  .actions { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; margin-top: 8px; }
+</style>

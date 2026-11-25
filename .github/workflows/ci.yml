@@ -21,7 +21,7 @@ jobs:
           - os: macos-14
             gates: fmt clippy test doc docs release
           - os: ubuntu-24.04
-            gates: fmt clippy test doc shell docs mobile release
+            gates: fmt clippy test doc shell docs mobile site release
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -53,6 +53,9 @@ jobs:
 
       - name: Gates
         run: scripts/gates.sh ${{ matrix.gates }}
+        env:
+          # the site gate reads the latest public release (unauthenticated calls are rate-limited)
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Scripted UI regressions and memory soak (Linux software GPU)
         if: runner.os == 'Linux'
