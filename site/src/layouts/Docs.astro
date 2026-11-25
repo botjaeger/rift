@@ -1,4 +1,5 @@
 ---
+import { url } from '../lib/url';
 import Base from './Base.astro';
 import DocsSearch from '../components/DocsSearch.astro';
 import { docUrl, getDocs } from '../lib/docs';
@@ -32,7 +33,7 @@ const docs = await getDocs();
     <aside class="side" aria-label="Documentation">
       <DocsSearch />
       <nav aria-label="Docs pages">
-        <p class="side-label"><a href="/docs/">Documentation</a></p>
+        <p class="side-label"><a href={url('/docs/')}>Documentation</a></p>
         <ul class="pages">
           {
             docs.map((d) => (

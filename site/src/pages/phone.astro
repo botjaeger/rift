@@ -1,4 +1,5 @@
 ---
+import { url } from '../lib/url';
 import Base from '../layouts/Base.astro';
 import PhonePortals from '../components/PhonePortals.astro';
 import PhoneShowcase from '../components/PhoneShowcase.astro';
@@ -193,7 +194,7 @@ const security = [
         <a class="btn btn-ghost placeholder" href="#get">[APP STORE LINK]</a>
         <a class="btn btn-ghost placeholder" href="#get">[GOOGLE PLAY LINK]</a>
       </div>
-      <p class="fine">Every setting and command: <a href="/docs/phone/">the phone companion docs</a>.</p>
+      <p class="fine">Every setting and command: <a href={url('/docs/phone/')}>the phone companion docs</a>.</p>
     </div>
   </section>
 </Base>

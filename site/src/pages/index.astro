@@ -1,4 +1,5 @@
 ---
+import { url } from '../lib/url';
 import Base from '../layouts/Base.astro';
 import '../styles/window.css';
 import PhonePortals from '../components/PhonePortals.astro';
@@ -89,12 +90,12 @@ const protocols = [
         together, so you can select, copy, search, bookmark, re-run or pipe it in one keystroke.
       </p>
       <div class="in d3 actions">
-        <a class="btn btn-primary" href="/download/">
+        <a class="btn btn-primary" href={url('/download/')}>
           <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12"></path><path d="m6 11 6 6 6-6"></path><path d="M5 20h14"></path></svg>
           Download for macOS
         </a>
-        <a class="btn btn-ghost" href="/download/#linux">Linux packages</a>
-        {release.windows && <a class="btn btn-ghost" href="/download/#windows">Windows (beta)</a>}
+        <a class="btn btn-ghost" href={url('/download/#linux')}>Linux packages</a>
+        {release.windows && <a class="btn btn-ghost" href={url('/download/#windows')}>Windows (beta)</a>}
       </div>
       <p class="in d4 fine">No account · no telemetry · configured with one TOML file</p>
     </div>
@@ -161,7 +162,7 @@ const protocols = [
       <div class="reveal intro">
         <p class="eyebrow">Features</p>
         <h2 class="h-section">Built for the work you do in a terminal all day</h2>
-        <p class="lead">Every action is in the command palette and can be rebound. <a href="/features/">See all features →</a></p>
+        <p class="lead">Every action is in the command palette and can be rebound. <a href={url('/features/')}>See all features →</a></p>
       </div>
       <div class="feature-grid">
         {
@@ -197,7 +198,7 @@ const protocols = [
           <a class="btn btn-ghost placeholder" href="#phone">[APP STORE LINK]</a>
           <a class="btn btn-ghost placeholder" href="#phone">[GOOGLE PLAY LINK]</a>
         </div>
-        <p class="phone-more"><a href="/phone/">How pairing, the relay and security work →</a></p>
+        <p class="phone-more"><a href={url('/phone/')}>How pairing, the relay and security work →</a></p>
       </div>
       <div class="reveal phone-wrap">
         <PhonePortals />
@@ -213,7 +214,7 @@ const protocols = [
         <div><dt class="mono">138 MiB</dt><dd>peak memory for that run</dd></div>
         <div><dt class="mono">1 binary</dt><dd>fonts, themes and shell hooks embedded</dd></div>
       </dl>
-      <p class="speed-more"><a href="/performance/">Full numbers: latency, throughput and test suites →</a></p>
+      <p class="speed-more"><a href={url('/performance/')}>Full numbers: latency, throughput and test suites →</a></p>
       <div class="two-col">
         <div class="reveal col" style="flex-basis: 360px">
           <h2>Warp's habits, without the account</h2>
@@ -234,10 +235,10 @@ const protocols = [
   <section class="glow-section rule">
     <div class="cta-bg" aria-hidden="true"></div>
     <div class="wrap relative cta">
-      <img class="reveal" src="/rift-144.png" alt="Rift logo" width="72" height="72" loading="lazy" />
+      <img class="reveal" src={url('/rift-144.png')} alt="Rift logo" width="72" height="72" loading="lazy" />
       <h2 class="reveal">Type a command. It becomes a block.</h2>
       <div class="reveal actions">
-        <a class="btn btn-primary" href="/download/">Download Rift</a>
+        <a class="btn btn-primary" href={url('/download/')}>Download Rift</a>
         <a class="btn btn-ghost" href={REPO_URL}>View on GitHub</a>
       </div>
     </div>

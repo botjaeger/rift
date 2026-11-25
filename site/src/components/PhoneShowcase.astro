@@ -1,4 +1,5 @@
 ---
+import { url } from '../lib/url';
 // "What your phone can do": a list of features beside one phone whose screen shows the chosen one.
 // The screens are drawn (not screenshots) at the app's 390 x 844 pt and scaled into the frame; their
 // wording is the app's own, from the Rift docs (features.md › Remote access, the trust model).
@@ -88,7 +89,7 @@ const features = [
       <div class="screen lockscreen" role="tabpanel" id="screen-alerts" aria-labelledby="tab-alerts" hidden>
         <div class="clock"><div class="day">Monday 16 November</div><div class="time">9:41</div></div>
         <div class="notif rise">
-          <div class="nhead"><img src="/rift-56.png" alt="" width="20" height="20" /><span>RIFT</span><span class="now">now</span></div>
+          <div class="nhead"><img src={url('/rift-56.png')} alt="" width="20" height="20" /><span>RIFT</span><span class="now">now</span></div>
           <div class="ntitle">claude needs you · MacBook</div>
           <div class="nbody">Do you want to make this edit to src/server.ts?</div>
           <div class="nacts"><span>Yes</span><span>No</span><span>Open</span></div>
@@ -102,7 +103,7 @@ const features = [
           <div class="grab"></div>
           <div class="stitle">New tab</div>
           <div class="opt"><span class="tile">&gt;_</span><span>Shell</span></div>
-          <div class="opt"><span class="tile claude"><img src="/claude-60.png" alt="" width="20" height="20" /></span><span>Claude Code</span></div>
+          <div class="opt"><span class="tile claude"><img src={url('/claude-60.png')} alt="" width="20" height="20" /></span><span>Claude Code</span></div>
           <div class="opt"><span class="tile">cx</span><span>Codex</span></div>
           <div class="opt"><span class="tile">oc</span><span>OpenCode</span></div>
           <div class="hint">Starts in ~/code/project1</div>
@@ -123,7 +124,7 @@ const features = [
 
       <!-- App lock -->
       <div class="screen locked" role="tabpanel" id="screen-lock" aria-labelledby="tab-lock" hidden>
-        <div class="lockmark rise"><img src="/rift-144.png" alt="" width="84" height="84" /></div>
+        <div class="lockmark rise"><img src={url('/rift-144.png')} alt="" width="84" height="84" /></div>
         <div class="ltext">Your tabs stay connected</div>
         <div class="faceid"><svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2"></path><path d="M9 9v1M15 9v1M12 9v4h-1M9.5 16a3.5 3.5 0 0 0 5 0"></path></svg></div>
         <div class="unlock">Unlock with Face ID</div>

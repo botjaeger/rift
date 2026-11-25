@@ -1,15 +1,20 @@
 // pnpm test
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { base } from '../base.mjs';
 import { dropSection, dropTestItems, escapePlaceholders, rewriteLinks, takeSection, transformPage } from './docs-transform.mjs';
 
 const page = { from: 'docs/x.md', title: 'X', description: 'd', order: 1 };
 
 test('links to published pages point at the site, with their anchor and a readable title', () => {
-  assert.equal(rewriteLinks('see [keyboard-shortcuts.md](keyboard-shortcuts.md)'), 'see [Keyboard shortcuts](/docs/keyboard-shortcuts/)');
-  assert.equal(rewriteLinks('[profiles](configuration.md#profiles)'), '[profiles](/docs/configuration/#profiles)');
-  assert.equal(rewriteLinks('[list](docs/getting-started.md)'), '[list](/docs/getting-started/)');
-  assert.equal(rewriteLinks('[phone](features.md#remote-access-phone-companion)'), '[phone](/docs/phone/)');
+  assert.equal(rewriteLinks('see [keyboard-shortcuts.md](keyboard-shortcuts.md)'), `see [Keyboard shortcuts](${base}/docs/keyboard-shortcuts/)`);
+  assert.equal(rewriteLinks('[profiles](configuration.md#profiles)'), `[profiles](${base}/docs/configuration/#profiles)`);
+  assert.equal(rewriteLinks('[list](docs/getting-started.md)'), `[list](${base}/docs/getting-started/)`);
+  assert.equal(rewriteLinks('[phone](features.md#remote-access-phone-companion)'), `[phone](${base}/docs/phone/)`);
+});
+
+test('the site is served under its base path without a custom domain', () => {
+  assert.equal(base, '/rift');
 });
 
 test('links to unpublished pages and the private repo become plain text; others stay', () => {

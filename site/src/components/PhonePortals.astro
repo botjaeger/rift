@@ -1,4 +1,5 @@
 ---
+import { url } from '../lib/url';
 // The Rift phone app's Portals screen, drawn at the app's real 390 x 844 pt size and scaled into the frame
 // (from the app's Portals screen, Dark Default theme). Used on the home and phone pages.
 ---
@@ -26,7 +27,7 @@
 
         <div class="p-row needs inline">
           <div class="p-row-main">
-            <span class="tile claude"><img src="/claude-60.png" alt="" width="20" height="20" loading="lazy" /></span>
+            <span class="tile claude"><img src={url('/claude-60.png')} alt="" width="20" height="20" loading="lazy" /></span>
             <div class="p-row-text">
               <div class="p-row-title">project1</div>
               <div class="p-row-line">Waiting for you · Edit src/server.ts?</div>
@@ -67,7 +68,7 @@
 
         <div class="p-row">
           <div class="p-row-main">
-            <span class="tile claude"><img src="/claude-60.png" alt="" width="20" height="20" loading="lazy" /></span>
+            <span class="tile claude"><img src={url('/claude-60.png')} alt="" width="20" height="20" loading="lazy" /></span>
             <div class="p-row-text">
               <div class="p-row-title">project4</div>
               <div class="p-row-line">Idle · waiting for your prompt</div>

@@ -37,7 +37,7 @@ shell    shellcheck on packaging/*.sh, scripts/*.sh, .githooks/*, bash hooks; zs
 docs     CLAUDE.md and AGENTS.md identical; every relative link in *.md resolves (vendored crates' upstream docs excepted)
 mobile   the Expo companion in mobile/: pnpm install --frozen-lockfile, typecheck, eslint, vitest (incl. the shared protocol fixtures)
 site     the website in site/: pnpm install --frozen-lockfile, its script tests, astro check and build (docs pages synced from docs/; the
-         download data from the latest public release, so it needs the network)
+         download data from the latest public release, so it needs the network), then every internal link checked under /rift/
 release  cargo build --release --locked
 ui       isolated scripted UI regressions (display or xvfb-run required), RIFT_UI_SHARDS (default 2) parallel shards
          of scripts/ui-smoke.py's independent section groups; --only NAME[,NAME] runs only those sections' groups

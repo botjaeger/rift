@@ -1,3 +1,4 @@
+import { base } from '../base.mjs';
 import { osKeyTables } from './os-keys.mjs';
 
 // Pure Markdown transforms behind scripts/sync-docs.mjs, kept apart so they can be tested
@@ -101,7 +102,7 @@ export function rewriteLinks(md) {
     const bare = target.replace(/^docs\//, '');
     const [file, anchor] = bare.split('#');
     const mapped = LINKS[bare] ?? LINKS[file];
-    if (mapped) return `[${TITLES[text] ?? text}](${mapped}${LINKS[bare] || !anchor ? '' : `#${anchor}`})`;
+    if (mapped) return `[${TITLES[text] ?? text}](${base}${mapped}${LINKS[bare] || !anchor ? '' : `#${anchor}`})`;
     if (/^https?:\/\//.test(target) && !PRIVATE_REPO.test(target)) return all;
     return OPEN + text + CLOSE; // a page the site does not publish
   });

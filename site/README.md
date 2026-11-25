@@ -49,8 +49,12 @@ asset is missing.
 
 ## Assets
 
-- `public/CNAME` holds the custom domain; `astro.config.mjs` reads it for canonical, OG and sitemap URLs.
-  Deploys from Actions ignore the file, so set the same domain under Settings › Pages › Custom domain.
+- The site is served at https://botjaeger.github.io/rift/, so every internal link and asset goes
+  through `url()` in `src/lib/url.ts` (Markdown links get the base path from `astro.config.mjs`).
+  `pnpm build` ends with `scripts/check-links.mjs`, which fails on a link outside `/rift/` or to a
+  page the build did not produce.
+- For a custom domain, put it in `public/CNAME` and set the same domain under Settings › Pages ›
+  Custom domain (deploys from Actions ignore the file); the site then moves to the domain's root.
 - `node scripts/icons.mjs` regenerates the logo sizes and favicons from `scripts/rift-1024.png`.
 - `scripts/og.html` is the source of `public/og.png` (screenshot it at 1200×630).
 

@@ -1,8 +1,10 @@
 import type { APIRoute } from 'astro';
 import { docUrl, getDocs } from '../lib/docs';
+import { url } from '../lib/url';
 
 export const GET: APIRoute = async ({ site }) => {
-  const paths = ['/', '/features/', '/phone/', '/performance/', '/download/', '/about/', '/docs/', ...(await getDocs()).map((d) => docUrl(d.id))];
+  const pages = ['/', '/features/', '/phone/', '/performance/', '/download/', '/about/', '/docs/'].map(url);
+  const paths = [...pages, ...(await getDocs()).map((d) => docUrl(d.id))];
   const urls = paths.map((p) => `  <url><loc>${new URL(p, site)}</loc></url>`).join('\n');
   return new Response(
     `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls}\n</urlset>\n`,

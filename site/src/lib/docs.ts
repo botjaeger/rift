@@ -1,4 +1,5 @@
 import { getCollection, render, type CollectionEntry } from 'astro:content';
+import { url } from './url';
 
 export type Doc = CollectionEntry<'docs'>;
 
@@ -18,7 +19,7 @@ export async function getDocs(): Promise<Doc[]> {
   return docs.sort((a, b) => a.data.order - b.data.order);
 }
 
-export const docUrl = (slug: string, anchor = '') => `/docs/${slug}/${anchor ? `#${anchor}` : ''}`;
+export const docUrl = (slug: string, anchor = '') => url(`/docs/${slug}/${anchor ? `#${anchor}` : ''}`);
 
 // Markdown to the plain words a reader sees, for the search index.
 function plain(md: string): string {

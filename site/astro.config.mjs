@@ -1,12 +1,11 @@
-import { readFileSync } from 'node:fs';
 import { defineConfig } from 'astro/config';
+import { base, site } from './base.mjs';
 
-// public/CNAME holds the custom domain, used here for canonical, OG and sitemap URLs. A GitHub Actions
-// Pages deploy ignores the file: set the same domain under Settings › Pages › Custom domain.
-const domain = readFileSync(new URL('./public/CNAME', import.meta.url), 'utf8').trim();
-
+// base.mjs says where the site is served (a custom domain from public/CNAME, else
+// https://botjaeger.github.io/rift/). Internal links go through src/lib/url.ts.
 export default defineConfig({
-  site: `https://${domain}`,
+  site,
+  base: base || '/',
   output: 'static',
   trailingSlash: 'ignore',
   build: { format: 'directory' },

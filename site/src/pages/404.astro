@@ -1,4 +1,5 @@
 ---
+import { url } from '../lib/url';
 import Base from '../layouts/Base.astro';
 ---
 
@@ -9,8 +10,8 @@ import Base from '../layouts/Base.astro';
       <p class="mono code-404">404</p>
       <h1>This page does not exist.</h1>
       <div class="actions">
-        <a class="btn btn-primary" href="/">Rift home</a>
-        <a class="btn btn-ghost" href="/download/">Download</a>
+        <a class="btn btn-primary" href={url('/')}>Rift home</a>
+        <a class="btn btn-ghost" href={url('/download/')}>Download</a>
       </div>
     </div>
   </section>
